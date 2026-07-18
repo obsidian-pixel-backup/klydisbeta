@@ -22,28 +22,197 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 
-                <Button Margin="10" Padding="8" Command="{Binding CreateNewSessionCommand}" Background="{DynamicResource ButtonBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="+" Margin="0,0,8,0" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                        <TextBlock Text="New Chat"/>
-                    </StackPanel>
+                <Button Margin="10" Command="{Binding CreateNewSessionCommand}" Background="Transparent" BorderThickness="0" Padding="0">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="border" CornerRadius="7" Background="{DynamicResource ButtonBackgroundBrush}" BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1" Padding="8" RenderTransformOrigin="0.5,0.5">
+                                <Border.RenderTransform>
+                                    <ScaleTransform ScaleX="1" ScaleY="1"/>
+                                </Border.RenderTransform>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                    <TextBlock Text="+" Margin="0,0,8,0" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                    <TextBlock Text="New Chat" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                </StackPanel>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="border" Property="Opacity" Value="0.8"/>
+                                </Trigger>
+                                <EventTrigger RoutedEvent="MouseEnter">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.02" Duration="0:0:0.15">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.02" Duration="0:0:0.15">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                                <EventTrigger RoutedEvent="MouseLeave">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.15">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.15">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                                <EventTrigger RoutedEvent="PreviewMouseDown">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.95" Duration="0:0:0.1"/>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.95" Duration="0:0:0.1"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                                <EventTrigger RoutedEvent="PreviewMouseUp">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.02" Duration="0:0:0.1"/>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.02" Duration="0:0:0.1"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
                 </Button>
 
-                <ListBox Grid.Row="1" ItemsSource="{Binding Sessions}" SelectedItem="{Binding SelectedSession}" Background="Transparent" BorderThickness="0" Margin="0,0,0,10">
+                <ListBox Grid.Row="1" ItemsSource="{Binding Sessions}" SelectedItem="{Binding SelectedSession}" Background="Transparent" BorderThickness="0" Margin="0,0,0,10" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Background" Value="Transparent"/>
+                            <Setter Property="BorderThickness" Value="0"/>
+                            <Setter Property="Padding" Value="10,8"/>
+                            <Setter Property="Margin" Value="5,2"/>
+                            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            <Setter Property="VerticalContentAlignment" Value="Center"/>
+                            <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+                            <Setter Property="RenderTransform">
+                                <Setter.Value>
+                                    <ScaleTransform ScaleX="1" ScaleY="1"/>
+                                </Setter.Value>
+                            </Setter>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="7" Padding="{TemplateBinding Padding}">
+                                            <ContentPresenter />
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource ButtonBackgroundBrush}"/>
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource UserBubbleBackgroundBrush}"/>
+                                            </Trigger>
+                                            <EventTrigger RoutedEvent="MouseEnter">
+                                                <BeginStoryboard>
+                                                    <Storyboard>
+                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.02" Duration="0:0:0.15">
+                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                                        </DoubleAnimation>
+                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.02" Duration="0:0:0.15">
+                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                                        </DoubleAnimation>
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </EventTrigger>
+                                            <EventTrigger RoutedEvent="MouseLeave">
+                                                <BeginStoryboard>
+                                                    <Storyboard>
+                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.15">
+                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                                        </DoubleAnimation>
+                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.15">
+                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                                        </DoubleAnimation>
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </EventTrigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <Border Padding="10,8" Margin="5,2" Background="Transparent" BorderThickness="3,0,0,0" BorderBrush="Transparent">
-                                <StackPanel>
-                                    <TextBlock Text="{Binding Title}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold"/>
-                                    <TextBlock Text="{Binding LastMessagePreview}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" TextTrimming="CharacterEllipsis"/>
-                                </StackPanel>
-                                <Border.ContextMenu>
+                            <Grid Background="Transparent">
+                                <Grid.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="Rename"/>
+                                        <MenuItem Header="Toggle Pin" Command="{Binding DataContext.TogglePinSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
+                                        <MenuItem Header="Rename" Command="{Binding DataContext.BeginEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
                                         <MenuItem Header="Delete" Command="{Binding DataContext.DeleteSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
                                     </ContextMenu>
-                                </Border.ContextMenu>
-                            </Border>
+                                </Grid.ContextMenu>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <Path x:Name="PinIcon" Grid.Column="0" Visibility="Collapsed" Data="M 4,2 L 8,2 L 8,6 L 10,8 L 10,10 L 7,10 L 7,14 L 6,15 L 5,14 L 5,10 L 2,10 L 2,8 L 4,6 Z" Fill="{DynamicResource AccentPrimaryBrush}" Width="10" Height="12" Stretch="Uniform" Margin="0,0,8,0" VerticalAlignment="Center"/>
+
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <Grid>
+                                        <TextBlock x:Name="TitleText" Text="{Binding Title}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <TextBox x:Name="TitleEdit" Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" Visibility="Collapsed" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderThickness="1" BorderBrush="{DynamicResource AccentPrimaryBrush}" Padding="2">
+                                            <TextBox.InputBindings>
+                                                <KeyBinding Key="Return" Command="{Binding DataContext.CommitEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
+                                                <KeyBinding Key="Esc" Command="{Binding DataContext.CancelEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
+                                            </TextBox.InputBindings>
+                                        </TextBox>
+                                    </Grid>
+                                    <TextBlock x:Name="PreviewText" Text="{Binding LastMessagePreview}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+
+                                <!-- Action Buttons visible on hover -->
+                                <StackPanel x:Name="ActionButtons" Grid.Column="2" Orientation="Horizontal" Visibility="Collapsed" VerticalAlignment="Center" Margin="5,0,0,0">
+                                    <Button ToolTip="Toggle Pin" Command="{Binding DataContext.TogglePinSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4" Margin="0,0,2,0">
+                                        <Path x:Name="ActionPinPath" Data="M 4,2 L 8,2 L 8,6 L 10,8 L 10,10 L 7,10 L 7,14 L 6,15 L 5,14 L 5,10 L 2,10 L 2,8 L 4,6 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="12" Height="12" Stretch="Uniform"/>
+                                    </Button>
+                                    <Button ToolTip="Rename" Command="{Binding DataContext.BeginEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4" Margin="0,0,2,0">
+                                        <Path x:Name="ActionRenamePath" Data="M 1,11 L 4,14 L 14,4 L 11,1 Z M 1,14 L 1,11 L 4,14 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="12" Height="12" Stretch="Uniform"/>
+                                    </Button>
+                                    <Button ToolTip="Delete" Command="{Binding DataContext.DeleteSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4">
+                                        <Path x:Name="ActionDeletePath" Data="M 3,3 L 11,3 M 5,3 L 5,1 L 9,1 L 9,3 M 4,3 L 4,13 C 4,14 5,14 5,14 L 9,14 C 9,14 10,14 10,13 L 10,3" Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.5" Fill="Transparent" Width="12" Height="12" Stretch="Uniform"/>
+                                    </Button>
+                                </StackPanel>
+                            </Grid>
+                            <DataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding LastMessagePreview}" Value="">
+                                    <Setter TargetName="PreviewText" Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding LastMessagePreview}" Value="{x:Null}">
+                                    <Setter TargetName="PreviewText" Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                    <Setter TargetName="TitleText" Property="Foreground" Value="#0F172A"/>
+                                    <Setter TargetName="PreviewText" Property="Foreground" Value="#1E293B"/>
+                                    <Setter TargetName="PinIcon" Property="Fill" Value="#0F172A"/>
+                                    <Setter TargetName="ActionPinPath" Property="Fill" Value="#1E293B"/>
+                                    <Setter TargetName="ActionRenamePath" Property="Fill" Value="#1E293B"/>
+                                    <Setter TargetName="ActionDeletePath" Property="Stroke" Value="#1E293B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsEditingTitle}" Value="True">
+                                    <Setter TargetName="TitleText" Property="Visibility" Value="Collapsed"/>
+                                    <Setter TargetName="PreviewText" Property="Visibility" Value="Collapsed"/>
+                                    <Setter TargetName="TitleEdit" Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                    <Setter TargetName="PinIcon" Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                                    <Setter TargetName="ActionButtons" Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </DataTemplate.Triggers>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
@@ -81,10 +250,17 @@
                       ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                       VirtualizingPanel.IsVirtualizing="True"
                       VirtualizingPanel.ScrollUnit="Pixel"
-                      Padding="0,0,0,80">
+                      Padding="0,10,0,10">
                 <ListBox.ItemContainerStyle>
                     <Style TargetType="ListBoxItem">
                         <Setter Property="Focusable" Value="False"/>
+                        <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+                        <Setter Property="RenderTransform">
+                            <Setter.Value>
+                                <TranslateTransform Y="20"/>
+                            </Setter.Value>
+                        </Setter>
+                        <Setter Property="Opacity" Value="0"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="ListBoxItem">
@@ -92,14 +268,28 @@
                                 </ControlTemplate>
                             </Setter.Value>
                         </Setter>
+                        <Style.Triggers>
+                            <EventTrigger RoutedEvent="Loaded">
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.3"/>
+                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="20" To="0" Duration="0:0:0.3">
+                                            <DoubleAnimation.EasingFunction>
+                                                <QuadraticEase EasingMode="EaseOut"/>
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                        </Style.Triggers>
                     </Style>
                 </ListBox.ItemContainerStyle>
                 <ListBox.ItemTemplate>
                     <DataTemplate>
                         <Grid Margin="15,10">
                             <!-- User Message -->
-                            <Border CornerRadius="7,7,0,7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Right"
-                                    Background="{DynamicResource UserBubbleBackgroundBrush}"
+                            <Border CornerRadius="7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Right"
+                                    Background="{DynamicResource UserBubbleBackgroundBrush}" BorderThickness="0"
                                     Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=user}">
                                 <DockPanel LastChildFill="True">
                                     <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}" 
@@ -137,8 +327,26 @@
                                 </Expander>
                             </Border>
 
+                            <!-- Tool Message -->
+                            <Border CornerRadius="7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Left" Margin="0,5"
+                                    Background="{DynamicResource ToolBubbleBackgroundBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
+                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=tool}">
+                                <StackPanel>
+                                    <TextBlock Text="🔧 Tool Output" FontWeight="SemiBold" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,0,5"/>
+                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}" FontFamily="Consolas" FontSize="12"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- System Message -->
+                            <Border CornerRadius="7" Padding="10,5" MaxWidth="500" HorizontalAlignment="Center" Margin="0,5"
+                                    Background="{DynamicResource SystemBubbleBackgroundBrush}" BorderThickness="0"
+                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=system}">
+                                <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" TextAlignment="Center" FontSize="12"/>
+                            </Border>
+
+
                             <!-- Assistant Message -->
-                            <Border CornerRadius="7,7,7,0" Padding="15,10" MaxWidth="600" HorizontalAlignment="Left"
+                            <Border CornerRadius="7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Left"
                                     Background="{DynamicResource AssistantBubbleBackgroundBrush}"
                                     BorderThickness="0"
                                     Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=assistant}">
@@ -160,7 +368,42 @@
                                                   Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
                                         </Grid>
                                     </Button>
-                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                        
+                                        <!-- Tool Calls indicator inside assistant -->
+                                        <ItemsControl ItemsSource="{Binding ToolCalls}" Margin="0,5,0,0">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Background="Transparent" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="5" Padding="10,5" Margin="0,2">
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <TextBlock Text="⚙" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,5,0"/>
+                                                            <TextBlock Text="{Binding Name, StringFormat='Running {0}...'}" Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" FontSize="12"/>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+
+                                        <!-- Generating indicator -->
+                                        <TextBlock Text="Generating..." FontStyle="Italic" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,5,0,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding IsStreaming}" Value="True"/>
+                                                                <Condition Binding="{Binding Content}" Value=""/>
+                                                                <Condition Binding="{Binding ToolCalls.Count}" Value="0"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </MultiDataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </StackPanel>
                                 </DockPanel>
                             </Border>
                         </Grid>

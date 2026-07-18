@@ -9,12 +9,25 @@ using Klydis.Core.Chat;
 
 namespace Klydis.App.ViewModels;
 
-public class SessionInfo
+public partial class SessionInfo : ObservableObject
 {
-    public string Id { get; set; } = Guid.NewGuid().ToString();
-    public string Title { get; set; } = "New Chat";
-    public string LastMessagePreview { get; set; } = "";
-    public DateTime Timestamp { get; set; } = DateTime.Now;
+    [ObservableProperty]
+    private string _id = Guid.NewGuid().ToString();
+
+    [ObservableProperty]
+    private string _title = "New Chat";
+
+    [ObservableProperty]
+    private string _lastMessagePreview = "";
+
+    [ObservableProperty]
+    private DateTime _timestamp = DateTime.Now;
+
+    [ObservableProperty]
+    private bool _isPinned;
+
+    [ObservableProperty]
+    private bool _isEditingTitle;
 }
 
 /// <summary>
@@ -89,9 +102,12 @@ public partial class ChatViewModel : ObservableObject
                     Id = session.Id,
                     Title = session.Title,
                     LastMessagePreview = "",
-                    Timestamp = session.UpdatedAt
+                    Timestamp = session.UpdatedAt,
+                    IsPinned = session.IsPinned
                 });
             }
+            // Sort to ensure pinned items are at top if any are manually modified, 
+            // though the db already sorts them.
         });
 
         if (Sessions.Count > 0)
@@ -222,18 +238,21 @@ public partial class ChatViewModel : ObservableObject
                     switch (evt.Type)
                     {
                         case ChatStreamEventType.Token:
-                            assistantMessage.Content += evt.Content;
-                            break;
-                        case ChatStreamEventType.ThinkingStart:
-                            thoughtMessage = new ChatMessageViewModel
-                            {
-                                Role = "thought",
-                                Content = string.Empty,
-                                IsThinkingExpanded = true,
-                                Timestamp = DateTime.Now
-                            };
                             System.Windows.Application.Current.Dispatcher.Invoke(() =>
                             {
+                                assistantMessage.Content += evt.Content;
+                            });
+                            break;
+                        case ChatStreamEventType.ThinkingStart:
+                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                thoughtMessage = new ChatMessageViewModel
+                                {
+                                    Role = "thought",
+                                    Content = string.Empty,
+                                    IsThinkingExpanded = true,
+                                    Timestamp = DateTime.Now
+                                };
                                 int assistantIdx = Messages.IndexOf(assistantMessage);
                                 if (assistantIdx >= 0)
                                 {
@@ -248,29 +267,44 @@ public partial class ChatViewModel : ObservableObject
                         case ChatStreamEventType.ThinkingToken:
                             if (thoughtMessage != null)
                             {
-                                thoughtMessage.Content += evt.Content;
+                                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                                {
+                                    thoughtMessage.Content += evt.Content;
+                                });
                             }
                             break;
                         case ChatStreamEventType.ThinkingEnd:
                             if (thoughtMessage != null)
                             {
-                                thoughtMessage.IsThinkingExpanded = false;
+                                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                                {
+                                    thoughtMessage.IsThinkingExpanded = false;
+                                });
                             }
                             break;
                         case ChatStreamEventType.ToolCall:
-                            assistantMessage.HasToolCalls = true;
-                            assistantMessage.ToolCalls.Add(new ToolCallViewModel { Name = evt.Content, Status = "running", Output = "Executing..." });
+                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                assistantMessage.HasToolCalls = true;
+                                assistantMessage.ToolCalls.Add(new ToolCallViewModel { Name = evt.Content, Status = "running", Output = "Executing..." });
+                            });
                             break;
                         case ChatStreamEventType.ToolResult:
-                            if (assistantMessage.ToolCalls.Count > 0)
+                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
                             {
-                                var lastTool = assistantMessage.ToolCalls[^1];
-                                lastTool.Status = "done";
-                                lastTool.Output = evt.Content;
-                            }
+                                if (assistantMessage.ToolCalls.Count > 0)
+                                {
+                                    var lastTool = assistantMessage.ToolCalls[^1];
+                                    lastTool.Status = "done";
+                                    lastTool.Output = evt.Content;
+                                }
+                            });
                             break;
                         case ChatStreamEventType.Error:
-                            assistantMessage.Content += $"\n\n[Error: {evt.Content}]";
+                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                assistantMessage.Content += $"\n\n[Error: {evt.Content}]";
+                            });
                             break;
                     }
                 }
@@ -296,6 +330,24 @@ public partial class ChatViewModel : ObservableObject
             IsGenerating = false;
             _generationCts?.Dispose();
             _generationCts = null;
+
+            // Auto-rename chat if it is the first interaction
+            if (SessionTitle == "New Chat" && Messages.Count >= 2 && SelectedSession != null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    var newTitle = await _chatEngine!.GenerateTitleAsync(userMessage, assistantMessage.Content);
+                    if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat")
+                    {
+                        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            SessionTitle = newTitle;
+                            SelectedSession.Title = newTitle;
+                        });
+                        await _messageStore.UpdateSessionAsync(SelectedSession.Id, newTitle, null, null, null);
+                    }
+                });
+            }
         }
     }
 
@@ -311,12 +363,9 @@ public partial class ChatViewModel : ObservableObject
         string title = "New Chat";
         string sessionId = await _messageStore.CreateSessionAsync(title, SelectedModelId);
         
-        Messages.Clear();
-        _chatEngine?.LoadHistory(System.Linq.Enumerable.Empty<ChatMessage>(), Guid.Parse(sessionId));
-        
-        SessionTitle = title;
         var newSession = new SessionInfo { Id = sessionId, Title = title, Timestamp = DateTime.Now };
         Sessions.Insert(0, newSession);
+        SelectedSession = newSession;
     }
 
     [RelayCommand]
@@ -381,6 +430,63 @@ public partial class ChatViewModel : ObservableObject
         else
         {
             await CreateNewSessionAsync();
+        }
+    }
+
+    [RelayCommand]
+    private async Task TogglePinSessionAsync(SessionInfo session)
+    {
+        if (session == null) return;
+        session.IsPinned = !session.IsPinned;
+        await _messageStore.UpdateSessionAsync(session.Id, null, null, null, session.IsPinned);
+        
+        // Re-sort the sessions collection based on IsPinned then Timestamp
+        var sorted = new List<SessionInfo>(Sessions);
+        sorted.Sort((a, b) =>
+        {
+            if (a.IsPinned && !b.IsPinned) return -1;
+            if (!a.IsPinned && b.IsPinned) return 1;
+            return b.Timestamp.CompareTo(a.Timestamp);
+        });
+        
+        Sessions.Clear();
+        foreach (var s in sorted) Sessions.Add(s);
+        
+        SelectedSession = session;
+    }
+
+    [RelayCommand]
+    private void BeginEditTitle(SessionInfo session)
+    {
+        if (session != null)
+        {
+            session.IsEditingTitle = true;
+        }
+    }
+
+    [RelayCommand]
+    private async Task CommitEditTitleAsync(SessionInfo session)
+    {
+        if (session != null && session.IsEditingTitle)
+        {
+            session.IsEditingTitle = false;
+            if (!string.IsNullOrWhiteSpace(session.Title))
+            {
+                await _messageStore.UpdateSessionAsync(session.Id, session.Title, null, null, null);
+                if (SelectedSession?.Id == session.Id)
+                {
+                    SessionTitle = session.Title;
+                }
+            }
+        }
+    }
+
+    [RelayCommand]
+    private void CancelEditTitle(SessionInfo session)
+    {
+        if (session != null)
+        {
+            session.IsEditingTitle = false;
         }
     }
 

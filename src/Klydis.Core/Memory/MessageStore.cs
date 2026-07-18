@@ -19,7 +19,8 @@ public record SessionRecord(
     DateTime UpdatedAt,
     string? WorldState,
     string? SystemPrompt,
-    string? SettingsJson
+    string? SettingsJson,
+    bool IsPinned
 );
 
 /// <summary>
@@ -84,7 +85,8 @@ public class MessageStore
                 updated_at TEXT NOT NULL,
                 world_state TEXT,
                 system_prompt TEXT,
-                settings_json TEXT
+                settings_json TEXT,
+                is_pinned INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -114,6 +116,17 @@ public class MessageStore
             END;
         ";
         await createCmd.ExecuteNonQueryAsync();
+
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE sessions ADD COLUMN is_pinned INTEGER DEFAULT 0;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
     }
 
     /// <summary>
@@ -152,7 +165,7 @@ public class MessageStore
         await connection.OpenAsync();
         
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT * FROM sessions ORDER BY updated_at DESC";
+        command.CommandText = "SELECT * FROM sessions ORDER BY is_pinned DESC, updated_at DESC";
         
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -187,7 +200,7 @@ public class MessageStore
     /// <summary>
     /// Updates an existing chat session.
     /// </summary>
-    public async Task UpdateSessionAsync(string sessionId, string? title, string? worldState, string? systemPrompt)
+    public async Task UpdateSessionAsync(string sessionId, string? title, string? worldState, string? systemPrompt, bool? isPinned = null)
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync();
@@ -212,6 +225,11 @@ public class MessageStore
         {
             sets.Add("system_prompt = @systemPrompt");
             command.Parameters.AddWithValue("@systemPrompt", systemPrompt);
+        }
+        if (isPinned.HasValue)
+        {
+            sets.Add("is_pinned = @isPinned");
+            command.Parameters.AddWithValue("@isPinned", isPinned.Value ? 1 : 0);
         }
 
         command.CommandText = $"UPDATE sessions SET {string.Join(", ", sets)} WHERE id = @id";
@@ -363,7 +381,8 @@ public class MessageStore
             UpdatedAt: DateTime.Parse(reader.GetString(reader.GetOrdinal("updated_at"))),
             WorldState: reader.IsDBNull(reader.GetOrdinal("world_state")) ? null : reader.GetString(reader.GetOrdinal("world_state")),
             SystemPrompt: reader.IsDBNull(reader.GetOrdinal("system_prompt")) ? null : reader.GetString(reader.GetOrdinal("system_prompt")),
-            SettingsJson: reader.IsDBNull(reader.GetOrdinal("settings_json")) ? null : reader.GetString(reader.GetOrdinal("settings_json"))
+            SettingsJson: reader.IsDBNull(reader.GetOrdinal("settings_json")) ? null : reader.GetString(reader.GetOrdinal("settings_json")),
+            IsPinned: !reader.IsDBNull(reader.GetOrdinal("is_pinned")) && reader.GetInt32(reader.GetOrdinal("is_pinned")) == 1
         );
     }
 

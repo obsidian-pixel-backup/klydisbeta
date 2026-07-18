@@ -36,7 +36,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     private readonly ILogger<InferenceEngine> _logger;
     private LLamaWeights? _weights;
     private LLamaContext? _context;
-    private StatelessExecutor? _executor;
+    private InteractiveExecutor? _executor;
+    private string _lastEvaluatedPrompt = string.Empty;
 
     /// <summary>
     /// Event fired when a token is generated, providing the token text and current tokens/second rate.
@@ -95,19 +96,24 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 BatchThreads = Math.Max(Environment.ProcessorCount / 2, 1),
                 // Pin model weights in RAM to prevent OS paging — critical for GPU DMA transfers
                 UseMemoryLock = true,
-                // Explicitly target GPU 0
+                // Memory map the model file for faster loading and lower memory pressure
+                UseMemorymap = true,
+                // Enable tensor parallelism across GPUs
+                SplitMode = LLama.Native.GPUSplitMode.Row,
+                // Explicitly target GPU 0 as main
                 MainGpu = 0
             };
             
-            // Use native F16 KV cache to allow GPU Tensor Core acceleration and prevent on-the-fly dequantization overhead
-            parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_F16;
-            parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_F16;
+            // Use native Q8_0 KV cache to halve VRAM usage with negligible quality loss
+            parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
+            parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
 
             _weights = LLamaWeights.LoadFromFile(parameters);
             _context = _weights.CreateContext(parameters);
             
-            // Using StatelessExecutor to prevent state/KV cache corruption in multi-turn conversation
-            _executor = new StatelessExecutor(_weights, parameters);
+            // Using InteractiveExecutor for hybrid fast-path prefix caching
+            _executor = new InteractiveExecutor(_context);
+            _lastEvaluatedPrompt = string.Empty;
 
             CurrentModelPath = modelPath;
             _logger.LogInformation("Model loaded successfully.");
@@ -142,8 +148,24 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 var stopwatch = Stopwatch.StartNew();
                 int tokenCount = 0;
                 bool isFirstToken = true;
+                string textToEvaluate = prompt;
 
-                await foreach (var token in _executor.InferAsync(prompt, inferenceParams, cancellationToken: ct))
+                // HYBRID EXECUTOR LOGIC: Fast-path for appends, Slow-path for edits/deletes
+                if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt))
+                {
+                    textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
+                    _logger.LogDebug("Fast-path inference triggered. Evaluating delta of {DeltaLength} chars.", textToEvaluate.Length);
+                }
+                else
+                {
+                    _logger.LogDebug("Slow-path inference triggered. Re-evaluating entire prompt.");
+                    _executor = new InteractiveExecutor(_context); // Reset the executor state
+                    _lastEvaluatedPrompt = string.Empty;
+                }
+
+                var generatedContent = new System.Text.StringBuilder();
+
+                await foreach (var token in _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: ct))
                 {
                     if (isFirstToken)
                     {
@@ -155,11 +177,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                         tokenCount++;
                     }
                     
+                    generatedContent.Append(token);
+                    
                     float tokensPerSecond = tokenCount > 0 ? (float)(tokenCount / stopwatch.Elapsed.TotalSeconds) : 0;
                     TokenGenerated?.Invoke(token, tokensPerSecond);
                     
                     await channel.Writer.WriteAsync(token, ct);
                 }
+                
+                // Update the state hash to include both the input prompt and the generated response
+                _lastEvaluatedPrompt = prompt + generatedContent.ToString();
             }
             catch (Exception ex)
             {
@@ -180,10 +207,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         _logger.LogDebug("Finished token generation.");
     }
 
-    public IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, CancellationToken ct)
+    public IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, CancellationToken ct)
     {
         var inferenceParams = new InferenceParams 
         { 
+            MaxTokens = -1,
+            TokensKeep = tokensKeep,
             AntiPrompts = stopTokens.ToList(),
             SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
             {
@@ -198,7 +227,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
     public async Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default)
     {
-        var inferenceParams = new InferenceParams();
+        var inferenceParams = new InferenceParams { MaxTokens = -1 };
         var sb = new System.Text.StringBuilder();
         await foreach (var token in GenerateAsync(prompt, inferenceParams, ct))
         {

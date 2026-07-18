@@ -36,6 +36,8 @@
     <SolidColorBrush x:Key="AssistantBubbleBorderBrush" Color="{StaticResource ColorFluorescentBlue}" />
     <SolidColorBrush x:Key="ThinkingBubbleBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
     <SolidColorBrush x:Key="ThinkingBubbleBorderBrush" Color="{StaticResource ColorThinAir}" />
+    <SolidColorBrush x:Key="ToolBubbleBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="SystemBubbleBackgroundBrush" Color="Transparent" />
 
     <!-- Utilities -->
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource ColorSuccess}" />

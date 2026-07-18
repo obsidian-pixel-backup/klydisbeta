@@ -44,8 +44,9 @@ public interface IInferenceEngine
     /// <summary>
     /// Streams tokens for a given prompt.
     /// </summary>
-    IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, CancellationToken ct);
+    IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, CancellationToken ct);
     Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default);
+    int GetTokenCount(string text);
 }
 
 /// <summary>
@@ -161,123 +162,146 @@ public class ChatEngine(
             iterationCount++;
             
             // Build system prompt with tools
-            var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nTo use a tool, output a JSON block like: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>";
+            var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nTo use a tool, output a JSON block like: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>. You can use multiple tools and provide context before or after tool calls.";
             var messages = new List<ChatMessage> { new(ChatRole.System, sysPrompt) };
             messages.AddRange(_history);
 
             var prompt = promptEngine.ApplyTemplate(messages, templateType);
+            
+            // Calculate system prompt size for context shifting (TokensKeep)
+            var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { new(ChatRole.System, sysPrompt) }, templateType);
+            int sysPromptTokens = inferenceEngine.GetTokenCount(sysOnlyPrompt);
+
             var fullResponseBuilder = new StringBuilder();
             bool isThinking = false;
+            bool isToolCall = false;
             string unyieldedText = string.Empty;
 
             // Stream tokens
-            await foreach (var token in inferenceEngine.StreamTokensAsync(prompt, stopTokens, ct))
+            await foreach (var token in inferenceEngine.StreamTokensAsync(prompt, stopTokens, sysPromptTokens, ct))
             {
                 fullResponseBuilder.Append(token);
-                var currentText = fullResponseBuilder.ToString();
                 unyieldedText += token;
 
                 bool processedAny;
                 do
                 {
                     processedAny = false;
-                    if (!isThinking)
+                    
+                    if (!isThinking && !isToolCall)
                     {
                         int thinkIndex = unyieldedText.IndexOf("<think>", StringComparison.Ordinal);
+                        int toolIndex = unyieldedText.IndexOf("<tool_call>", StringComparison.Ordinal);
+                        int altToolIndex = unyieldedText.IndexOf("<|tool_call|>", StringComparison.Ordinal);
+                        
+                        if (altToolIndex >= 0 && (toolIndex < 0 || altToolIndex < toolIndex))
+                            toolIndex = altToolIndex;
+                            
+                        // Find which comes first
+                        if (thinkIndex >= 0 && toolIndex >= 0)
+                        {
+                            if (thinkIndex < toolIndex) toolIndex = -1;
+                            else thinkIndex = -1;
+                        }
+
                         if (thinkIndex >= 0)
                         {
                             string before = unyieldedText.Substring(0, thinkIndex);
                             if (!string.IsNullOrEmpty(before))
-                            {
-                                if (!currentText.Contains("<tool_call>") && !currentText.Contains("<|tool_call|>"))
-                                {
-                                    yield return new ChatStreamEvent(ChatStreamEventType.Token, before);
-                                }
-                            }
+                                yield return new ChatStreamEvent(ChatStreamEventType.Token, before);
+                            
                             isThinking = true;
                             yield return new ChatStreamEvent(ChatStreamEventType.ThinkingStart, "");
                             unyieldedText = unyieldedText.Substring(thinkIndex + 7);
                             processedAny = true;
                         }
+                        else if (toolIndex >= 0)
+                        {
+                            string before = unyieldedText.Substring(0, toolIndex);
+                            if (!string.IsNullOrEmpty(before))
+                                yield return new ChatStreamEvent(ChatStreamEventType.Token, before);
+                            
+                            isToolCall = true;
+                            int skip = unyieldedText.IndexOf("<|tool_call|>", StringComparison.Ordinal) == toolIndex ? 13 : 11;
+                            unyieldedText = unyieldedText.Substring(toolIndex + skip);
+                            processedAny = true;
+                        }
                     }
-                    else // isThinking == true
+                    else if (isThinking)
                     {
                         int thinkEndIndex = unyieldedText.IndexOf("</think>", StringComparison.Ordinal);
                         if (thinkEndIndex >= 0)
                         {
                             string before = unyieldedText.Substring(0, thinkEndIndex);
                             if (!string.IsNullOrEmpty(before))
-                            {
                                 yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, before);
-                            }
+                            
                             isThinking = false;
                             yield return new ChatStreamEvent(ChatStreamEventType.ThinkingEnd, "");
                             unyieldedText = unyieldedText.Substring(thinkEndIndex + 8);
                             processedAny = true;
                         }
                     }
-                } while (processedAny);
-
-                // Now yield what can be yielded safely (avoiding cut-off partial tags)
-                if (!string.IsNullOrEmpty(unyieldedText))
-                {
-                    if (!isThinking)
+                    else if (isToolCall)
                     {
-                        // Check if unyieldedText ends with a prefix of "<think>"
-                        string tag = "<think>";
-                        bool endsWithPartialTag = false;
-                        for (int len = 1; len < tag.Length; len++)
+                        int toolEndIndex = unyieldedText.IndexOf("</tool_call>", StringComparison.Ordinal);
+                        int altToolEndIndex = unyieldedText.IndexOf("</|tool_call|>", StringComparison.Ordinal);
+                        if (altToolEndIndex < 0) altToolEndIndex = unyieldedText.IndexOf("<|/tool_call|>", StringComparison.Ordinal);
+                        
+                        if (altToolEndIndex >= 0 && (toolEndIndex < 0 || altToolEndIndex < toolEndIndex))
+                            toolEndIndex = altToolEndIndex;
+                            
+                        if (toolEndIndex >= 0)
                         {
-                            if (unyieldedText.EndsWith(tag.Substring(0, len), StringComparison.Ordinal))
-                            {
-                                endsWithPartialTag = true;
-                                string safePart = unyieldedText.Substring(0, unyieldedText.Length - len);
-                                if (!string.IsNullOrEmpty(safePart))
-                                {
-                                    if (!currentText.Contains("<tool_call>") && !currentText.Contains("<|tool_call|>"))
-                                    {
-                                        yield return new ChatStreamEvent(ChatStreamEventType.Token, safePart);
-                                    }
-                                    unyieldedText = unyieldedText.Substring(unyieldedText.Length - len);
-                                }
-                                break;
-                            }
-                        }
-
-                        if (!endsWithPartialTag)
-                        {
-                            if (!currentText.Contains("<tool_call>") && !currentText.Contains("<|tool_call|>"))
-                            {
-                                yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
-                            }
-                            unyieldedText = string.Empty;
+                            isToolCall = false;
+                            int skip = 12; // </tool_call> is 12
+                            if (unyieldedText.IndexOf("</|tool_call|>", StringComparison.Ordinal) == toolEndIndex ||
+                                unyieldedText.IndexOf("<|/tool_call|>", StringComparison.Ordinal) == toolEndIndex)
+                                skip = 14;
+                                
+                            unyieldedText = unyieldedText.Substring(toolEndIndex + skip);
+                            processedAny = true;
                         }
                     }
-                    else // isThinking == true
+                } while (processedAny);
+
+                // Yield safe text (avoiding cut-off partial tags)
+                if (!string.IsNullOrEmpty(unyieldedText))
+                {
+                    string[] tagsToCheck = isThinking ? new[] { "</think>" } : 
+                                           isToolCall ? new[] { "</tool_call>", "</|tool_call|>", "<|/tool_call|>" } : 
+                                           new[] { "<think>", "<tool_call>", "<|tool_call|>" };
+                                           
+                    bool endsWithPartial = false;
+                    int safeLen = unyieldedText.Length;
+                    
+                    foreach (var tag in tagsToCheck)
                     {
-                        // Check if unyieldedText ends with a prefix of "</think>"
-                        string tag = "</think>";
-                        bool endsWithPartialTag = false;
                         for (int len = 1; len < tag.Length; len++)
                         {
                             if (unyieldedText.EndsWith(tag.Substring(0, len), StringComparison.Ordinal))
                             {
-                                endsWithPartialTag = true;
-                                string safePart = unyieldedText.Substring(0, unyieldedText.Length - len);
-                                if (!string.IsNullOrEmpty(safePart))
-                                {
-                                    yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, safePart);
-                                    unyieldedText = unyieldedText.Substring(unyieldedText.Length - len);
-                                }
-                                break;
+                                endsWithPartial = true;
+                                safeLen = Math.Min(safeLen, unyieldedText.Length - len);
                             }
                         }
-
-                        if (!endsWithPartialTag)
+                    }
+                    
+                    if (endsWithPartial)
+                    {
+                        string safePart = unyieldedText.Substring(0, safeLen);
+                        if (!string.IsNullOrEmpty(safePart))
                         {
-                            yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, unyieldedText);
-                            unyieldedText = string.Empty;
+                            if (isThinking) yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, safePart);
+                            else if (!isToolCall) yield return new ChatStreamEvent(ChatStreamEventType.Token, safePart);
                         }
+                        unyieldedText = unyieldedText.Substring(safeLen);
+                    }
+                    else
+                    {
+                        if (isThinking) yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, unyieldedText);
+                        else if (!isToolCall) yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
+                        unyieldedText = string.Empty;
                     }
                 }
             }
@@ -289,13 +313,9 @@ public class ChatEngine(
                 {
                     yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, unyieldedText);
                 }
-                else
+                else if (!isToolCall)
                 {
-                    var currentText = fullResponseBuilder.ToString();
-                    if (!currentText.Contains("<tool_call>") && !currentText.Contains("<|tool_call|>"))
-                    {
-                        yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
-                    }
+                    yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
                 }
             }
 
@@ -325,7 +345,7 @@ public class ChatEngine(
                     
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
                     
-                    var result = await toolExecutor.ExecuteToolAsync(req, ct);
+                    var result = await toolExecutor.ExecuteToolAsync(req, CurrentSessionId.ToString(), ct);
                     var toolOutput = result.Output ?? result.Error ?? "Empty result";
                     _history.Add(new ChatMessage(ChatRole.Tool, toolOutput, req.Name));
                     await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, toolOutput, 0, null);
@@ -352,18 +372,51 @@ public class ChatEngine(
     {
         var results = new List<ToolCallRequest>();
         
-        // Native <tool_call> JSON format
-        var match = Regex.Match(response, @"<tool_call>\s*({.*?})\s*</tool_call>", RegexOptions.Singleline);
-        if (match.Success)
+        // Native <tool_call> JSON format (supports multiple calls and missing end tag)
+        var matches = Regex.Matches(response, @"<\|?tool_call\|?>\s*(\{.*?\})(?:\s*</\|?tool_call\|?>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        foreach (Match match in matches)
         {
             try
             {
-                var doc = JsonDocument.Parse(match.Groups[1].Value);
-                if (doc.RootElement.TryGetProperty("name", out var nameProp) && 
-                    doc.RootElement.TryGetProperty("arguments", out var argsProp))
+                var jsonStr = match.Groups[1].Value.Trim();
+                
+                // Cleanup common markdown mistakes
+                if (jsonStr.StartsWith("```json")) jsonStr = jsonStr.Substring(7);
+                else if (jsonStr.StartsWith("```")) jsonStr = jsonStr.Substring(3);
+                if (jsonStr.EndsWith("```")) jsonStr = jsonStr.Substring(0, jsonStr.Length - 3);
+                jsonStr = jsonStr.Trim();
+
+                // If matched to end of string, remove trailing text after last brace
+                int lastBrace = jsonStr.LastIndexOf('}');
+                if (lastBrace >= 0)
+                {
+                    jsonStr = jsonStr.Substring(0, lastBrace + 1);
+                }
+
+                if (string.IsNullOrWhiteSpace(jsonStr)) continue;
+
+                var doc = JsonDocument.Parse(jsonStr);
+                if (doc.RootElement.TryGetProperty("name", out var nameProp))
                 {
                     var name = nameProp.GetString();
-                    var args = JsonSerializer.Deserialize<Dictionary<string, object>>(argsProp.GetRawText());
+                    Dictionary<string, object>? args = new();
+                    
+                    if (doc.RootElement.TryGetProperty("arguments", out var argsProp))
+                    {
+                        if (argsProp.ValueKind == JsonValueKind.Object)
+                        {
+                            args = JsonSerializer.Deserialize<Dictionary<string, object>>(argsProp.GetRawText());
+                        }
+                        else if (argsProp.ValueKind == JsonValueKind.String)
+                        {
+                            var str = argsProp.GetString();
+                            if (!string.IsNullOrWhiteSpace(str))
+                            {
+                                args = JsonSerializer.Deserialize<Dictionary<string, object>>(str);
+                            }
+                        }
+                    }
+
                     if (name != null && args != null)
                     {
                         results.Add(new ToolCallRequest(name, args));
@@ -377,5 +430,46 @@ public class ChatEngine(
         }
         
         return results;
+    }
+
+    /// <summary>
+    /// Generates a short title for the conversation based on the first messages.
+    /// </summary>
+    public async Task<string> GenerateTitleAsync(string userMessage, string assistantResponse, CancellationToken ct = default)
+    {
+        try
+        {
+            var sysPrompt = "You are an AI that generates a concise 2-4 word title for a conversation based on the user's first message and the assistant's reply. Do not use quotes, punctuation, or thinking tags. Output ONLY the title.";
+            var userPrompt = $"User: {userMessage}\nAssistant: {assistantResponse}\n\nTitle:";
+
+            var templateType = promptEngine.DetectTemplate(inferenceEngine.Architecture);
+            var messages = new List<ChatMessage> 
+            { 
+                new(ChatRole.System, sysPrompt),
+                new(ChatRole.User, userPrompt)
+            };
+
+            var prompt = promptEngine.ApplyTemplate(messages, templateType);
+            
+            var generatedText = await inferenceEngine.GenerateTextAsync(prompt, ct);
+            
+            // Clean up any think blocks or quotes just in case
+            generatedText = Regex.Replace(generatedText, @"<think>.*?</think>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+            generatedText = generatedText.Trim('"', '\'', ' ', '\n', '\r', '.', '*');
+            
+            if (string.IsNullOrWhiteSpace(generatedText))
+                return "New Chat";
+
+            // Limit to max 50 chars just in case
+            if (generatedText.Length > 50)
+                generatedText = generatedText.Substring(0, 50).Trim();
+
+            return generatedText;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to generate title.");
+            return "New Chat";
+        }
     }
 }

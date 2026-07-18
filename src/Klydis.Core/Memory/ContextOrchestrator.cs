@@ -18,15 +18,24 @@ namespace Klydis.Core.Memory
     {
         private readonly MessageStore _store;
         private readonly IInferenceEngine _inferenceEngine;
+        private readonly Klydis.Core.Inference.ModelPool _modelPool;
+        private readonly Klydis.Core.Models.ModelRegistry _modelRegistry;
         private readonly ILogger<ContextOrchestrator> _logger;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ContextOrchestrator"/> class.
         /// </summary>
-        public ContextOrchestrator(MessageStore store, IInferenceEngine inferenceEngine, ILogger<ContextOrchestrator> logger)
+        public ContextOrchestrator(
+            MessageStore store, 
+            IInferenceEngine inferenceEngine, 
+            Klydis.Core.Inference.ModelPool modelPool,
+            Klydis.Core.Models.ModelRegistry modelRegistry,
+            ILogger<ContextOrchestrator> logger)
         {
             _store = store;
             _inferenceEngine = inferenceEngine;
+            _modelPool = modelPool;
+            _modelRegistry = modelRegistry;
             _logger = logger;
         }
 
@@ -104,6 +113,24 @@ namespace Klydis.Core.Memory
             return promptBuilder.ToString();
         }
 
+        private async Task<IInferenceEngine> GetFastEngineAsync()
+        {
+            // Try to find the smallest model by file size for fast intermediary tasks
+            var fastModel = _modelRegistry.GetAllModels()
+                .Where(m => m.FileSizeBytes > 0)
+                .OrderBy(m => m.FileSizeBytes)
+                .FirstOrDefault();
+
+            if (fastModel != null)
+            {
+                _logger.LogInformation("Routing task to Fast Model: {ModelName}", fastModel.DisplayName);
+                return await _modelPool.EnsureLoadedAsync(fastModel.Id);
+            }
+            
+            _logger.LogInformation("No fast model found in registry. Falling back to primary engine.");
+            return _inferenceEngine;
+        }
+
         /// <summary>
         /// Consolidates older, archived messages into a compact world state using the inference engine.
         /// </summary>
@@ -125,7 +152,9 @@ namespace Klydis.Core.Memory
             
             string summarizationPrompt = $"Current World State:\n{session.WorldState ?? "None"}\n\nNew Interactions to incorporate:\n{textToSummarize}\n\nTask: Update the World State to concisely reflect these new interactions without losing crucial long-term information. Respond with ONLY the new updated world state text.";
 
-            string newWorldState = await _inferenceEngine.GenerateTextAsync(summarizationPrompt);
+            // Phase 2: Route task to a faster/smaller model to avoid blocking the massive UI model
+            var engine = await GetFastEngineAsync();
+            string newWorldState = await engine.GenerateTextAsync(summarizationPrompt);
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
         }
@@ -217,6 +246,23 @@ namespace Klydis.Core.Memory
                 }
 
                 return scores.OrderByDescending(x => x.Value).Take(topK).Select(x => (x.Key, x.Value)).ToList();
+            }
+
+            /// <summary>
+            /// Phase 4: Enhances RAG retrieval by passing the raw query through a fast LLM to rewrite it into strict search filters.
+            /// </summary>
+            public async Task<List<(int DocId, double Score)>> SearchEnhancedAsync(string rawQuery, IInferenceEngine fastEngine, int topK = 3)
+            {
+                string restructurePrompt = $"User query: \"{rawQuery}\"\n\nTask: Extract the core nouns, verbs, and technical keywords. Strip all conversational filler. Respond ONLY with the space-separated keywords.";
+                string filteredQuery = await fastEngine.GenerateTextAsync(restructurePrompt);
+                
+                // Fallback if the fast model fails to generate anything or crashes
+                if (string.IsNullOrWhiteSpace(filteredQuery))
+                {
+                    filteredQuery = rawQuery;
+                }
+
+                return Search(filteredQuery, topK);
             }
 
             private static string[] Tokenize(string text)

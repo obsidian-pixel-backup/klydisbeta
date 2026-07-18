@@ -6,11 +6,16 @@ using CommunityToolkit.Mvvm.Input;
 
 namespace Klydis.App.ViewModels;
 
-public class ToolCallViewModel : ObservableObject
+public partial class ToolCallViewModel : ObservableObject
 {
-    public string Name { get; set; } = string.Empty;
-    public string Status { get; set; } = "pending"; // pending, done, failed
-    public string Output { get; set; } = string.Empty;
+    [ObservableProperty]
+    private string _name = string.Empty;
+
+    [ObservableProperty]
+    private string _status = "pending"; // pending, done, failed
+
+    [ObservableProperty]
+    private string _output = string.Empty;
 }
 
 /// <summary>
