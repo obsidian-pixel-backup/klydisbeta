@@ -12,10 +12,13 @@ public partial class ToolCallViewModel : ObservableObject
     private string _name = string.Empty;
 
     [ObservableProperty]
-    private string _status = "pending"; // pending, done, failed
+    private string _status = "pending"; // pending, running, done, failed
 
     [ObservableProperty]
     private string _output = string.Empty;
+
+    [ObservableProperty]
+    private bool _isExpanded;
 }
 
 /// <summary>
@@ -51,7 +54,26 @@ public partial class ChatMessageViewModel : ObservableObject
     [ObservableProperty]
     private bool _isCopied;
 
+    [ObservableProperty]
+    private bool _isEditing;
+
+    [ObservableProperty]
+    private string _editText = string.Empty;
+
     public ObservableCollection<ToolCallViewModel> ToolCalls { get; } = new();
+
+    [RelayCommand]
+    private void BeginEdit()
+    {
+        EditText = Content;
+        IsEditing = true;
+    }
+
+    [RelayCommand]
+    private void CancelEdit()
+    {
+        IsEditing = false;
+    }
 
     public string BackgroundBrushKey => Role switch
     {

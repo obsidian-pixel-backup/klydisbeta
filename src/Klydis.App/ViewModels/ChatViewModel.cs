@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -43,6 +45,12 @@ public partial class ChatViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _isGenerating;
+
+    [ObservableProperty]
+    private bool _isModelLoading;
+
+    [ObservableProperty]
+    private bool _isModelReady;
 
     [ObservableProperty]
     private double _tokensPerSecond;
@@ -100,7 +108,7 @@ public partial class ChatViewModel : ObservableObject
                 Sessions.Add(new SessionInfo
                 {
                     Id = session.Id,
-                    Title = session.Title,
+                    Title = CleanTitle(session.Title),
                     LastMessagePreview = "",
                     Timestamp = session.UpdatedAt,
                     IsPinned = session.IsPinned
@@ -127,11 +135,13 @@ public partial class ChatViewModel : ObservableObject
         var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.DisplayName == value);
         if (modelInfo != null)
         {
-            try 
+            try
             {
-                Messages.Add(new ChatMessageViewModel { Role = "system", Content = $"Loading model {modelInfo.DisplayName}...", Timestamp = DateTime.Now });
-                IsGenerating = true; // block sending
-                
+                // Load state is app chrome, not conversation content: it is shown
+                // in the header model chip and status bar, never in the transcript.
+                IsModelLoading = true;
+                IsModelReady = false;
+
                 // Unload any existing model to free VRAM
                 _inferenceEngine.UnloadModel();
                 
@@ -163,17 +173,16 @@ public partial class ChatViewModel : ObservableObject
                     totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
                 
                 await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
-                
-                Messages.Add(new ChatMessageViewModel { Role = "system", Content = $"Model loaded successfully.", Timestamp = DateTime.Now });
+                IsModelReady = true;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Failed to load model: {ex}");
-                Messages.Add(new ChatMessageViewModel { Role = "system", Content = $"Failed to load model: {ex.Message}\n{ex.StackTrace}", Timestamp = DateTime.Now });
+                Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}", Timestamp = DateTime.Now });
             }
             finally
             {
-                IsGenerating = false;
+                IsModelLoading = false;
             }
         }
     }
@@ -202,7 +211,7 @@ public partial class ChatViewModel : ObservableObject
     [RelayCommand]
     private async Task SendMessageAsync()
     {
-        if (string.IsNullOrWhiteSpace(InputText) || IsGenerating)
+        if (string.IsNullOrWhiteSpace(InputText) || IsGenerating || IsModelLoading)
             return;
 
         var userMessage = InputText;
@@ -215,19 +224,55 @@ public partial class ChatViewModel : ObservableObject
             Timestamp = DateTime.Now
         });
 
-        var assistantMessage = new ChatMessageViewModel
-        {
-            Role = "assistant",
-            Content = string.Empty,
-            IsStreaming = true,
-            Timestamp = DateTime.Now
-        };
-        Messages.Add(assistantMessage);
-
         IsGenerating = true;
         _generationCts = new CancellationTokenSource();
 
+        // Bubbles are created lazily and appended in the exact order events
+        // arrive, so text, thinking and tool activity stay chronological even
+        // when the engine runs multiple tool iterations.
+        ChatMessageViewModel? assistantMessage = null;
         ChatMessageViewModel? thoughtMessage = null;
+        ToolCallViewModel? pendingToolCall = null;
+        var fullAssistantText = new StringBuilder();
+
+        // The generating indicator lives in the transcript as the always-last
+        // item, where the response will materialize — not pinned above the input.
+        var typingIndicator = new ChatMessageViewModel { Role = "typing", Timestamp = DateTime.Now };
+        Messages.Add(typingIndicator);
+
+        void OnUi(Action action) => System.Windows.Application.Current.Dispatcher.Invoke(action);
+
+        void AppendMessage(ChatMessageViewModel message)
+        {
+            int indicatorIdx = Messages.IndexOf(typingIndicator);
+            if (indicatorIdx >= 0)
+            {
+                Messages.Insert(indicatorIdx, message);
+            }
+            else
+            {
+                Messages.Add(message);
+            }
+        }
+
+        void CloseAssistantBubble()
+        {
+            if (assistantMessage != null)
+            {
+                assistantMessage.IsStreaming = false;
+                assistantMessage = null;
+            }
+        }
+
+        void CloseThoughtBubble()
+        {
+            if (thoughtMessage != null)
+            {
+                thoughtMessage.IsThinkingExpanded = false;
+                thoughtMessage.IsStreaming = false;
+                thoughtMessage = null;
+            }
+        }
 
         try
         {
@@ -238,72 +283,100 @@ public partial class ChatViewModel : ObservableObject
                     switch (evt.Type)
                     {
                         case ChatStreamEventType.Token:
-                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            OnUi(() =>
                             {
+                                if (assistantMessage == null)
+                                {
+                                    assistantMessage = new ChatMessageViewModel
+                                    {
+                                        Role = "assistant",
+                                        Content = string.Empty,
+                                        IsStreaming = true,
+                                        Timestamp = DateTime.Now
+                                    };
+                                    AppendMessage(assistantMessage);
+                                }
                                 assistantMessage.Content += evt.Content;
+                                fullAssistantText.Append(evt.Content);
                             });
                             break;
                         case ChatStreamEventType.ThinkingStart:
-                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            OnUi(() =>
                             {
+                                CloseAssistantBubble();
                                 thoughtMessage = new ChatMessageViewModel
                                 {
                                     Role = "thought",
                                     Content = string.Empty,
+                                    IsStreaming = true,
                                     IsThinkingExpanded = true,
                                     Timestamp = DateTime.Now
                                 };
-                                int assistantIdx = Messages.IndexOf(assistantMessage);
-                                if (assistantIdx >= 0)
-                                {
-                                    Messages.Insert(assistantIdx, thoughtMessage);
-                                }
-                                else
-                                {
-                                    Messages.Add(thoughtMessage);
-                                }
+                                AppendMessage(thoughtMessage);
                             });
                             break;
                         case ChatStreamEventType.ThinkingToken:
-                            if (thoughtMessage != null)
+                            OnUi(() =>
                             {
-                                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                                if (thoughtMessage != null)
                                 {
                                     thoughtMessage.Content += evt.Content;
-                                });
-                            }
+                                }
+                            });
                             break;
                         case ChatStreamEventType.ThinkingEnd:
-                            if (thoughtMessage != null)
-                            {
-                                System.Windows.Application.Current.Dispatcher.Invoke(() =>
-                                {
-                                    thoughtMessage.IsThinkingExpanded = false;
-                                });
-                            }
+                            OnUi(CloseThoughtBubble);
                             break;
                         case ChatStreamEventType.ToolCall:
-                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            OnUi(() =>
                             {
-                                assistantMessage.HasToolCalls = true;
-                                assistantMessage.ToolCalls.Add(new ToolCallViewModel { Name = evt.Content, Status = "running", Output = "Executing..." });
+                                CloseAssistantBubble();
+                                CloseThoughtBubble();
+                                var toolMessage = new ChatMessageViewModel
+                                {
+                                    Role = "toolcall",
+                                    HasToolCalls = true,
+                                    Timestamp = DateTime.Now
+                                };
+                                pendingToolCall = new ToolCallViewModel { Name = evt.Content, Status = "running" };
+                                toolMessage.ToolCalls.Add(pendingToolCall);
+                                AppendMessage(toolMessage);
                             });
                             break;
                         case ChatStreamEventType.ToolResult:
-                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            OnUi(() =>
                             {
-                                if (assistantMessage.ToolCalls.Count > 0)
+                                if (pendingToolCall != null)
                                 {
-                                    var lastTool = assistantMessage.ToolCalls[^1];
-                                    lastTool.Status = "done";
-                                    lastTool.Output = evt.Content;
+                                    bool success = evt.Metadata == null
+                                        || !evt.Metadata.TryGetValue("Success", out var flag)
+                                        || flag is not bool ok
+                                        || ok;
+                                    pendingToolCall.Status = success ? "done" : "failed";
+                                    pendingToolCall.Output = evt.Content;
+                                    pendingToolCall.IsExpanded = !success;
+                                    pendingToolCall = null;
                                 }
                             });
                             break;
                         case ChatStreamEventType.Error:
-                            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                            OnUi(() =>
                             {
-                                assistantMessage.Content += $"\n\n[Error: {evt.Content}]";
+                                CloseAssistantBubble();
+                                CloseThoughtBubble();
+                                if (pendingToolCall != null)
+                                {
+                                    pendingToolCall.Status = "failed";
+                                    pendingToolCall.Output = evt.Content;
+                                    pendingToolCall.IsExpanded = true;
+                                    pendingToolCall = null;
+                                }
+                                AppendMessage(new ChatMessageViewModel
+                                {
+                                    Role = "error",
+                                    Content = evt.Content,
+                                    Timestamp = DateTime.Now
+                                });
                             });
                             break;
                     }
@@ -313,30 +386,51 @@ public partial class ChatViewModel : ObservableObject
             {
                 // Dummy streaming
                 await Task.Delay(500);
-                assistantMessage.Content = "This is a placeholder response since no engine was provided.";
+                AppendMessage(new ChatMessageViewModel
+                {
+                    Role = "assistant",
+                    Content = "This is a placeholder response since no engine was provided.",
+                    Timestamp = DateTime.Now
+                });
             }
         }
         catch (OperationCanceledException)
         {
-            assistantMessage.Content += "\n\n[Generation Canceled]";
+            OnUi(() => AppendMessage(new ChatMessageViewModel
+            {
+                Role = "system",
+                Content = "Generation canceled.",
+                Timestamp = DateTime.Now
+            }));
         }
         catch (Exception ex)
         {
-            assistantMessage.Content += $"\n\n[Error: {ex.Message}]";
+            OnUi(() => AppendMessage(new ChatMessageViewModel
+            {
+                Role = "error",
+                Content = ex.Message,
+                Timestamp = DateTime.Now
+            }));
         }
         finally
         {
-            assistantMessage.IsStreaming = false;
+            OnUi(() =>
+            {
+                CloseAssistantBubble();
+                CloseThoughtBubble();
+                Messages.Remove(typingIndicator);
+            });
             IsGenerating = false;
             _generationCts?.Dispose();
             _generationCts = null;
 
             // Auto-rename chat if it is the first interaction
-            if (SessionTitle == "New Chat" && Messages.Count >= 2 && SelectedSession != null)
+            var responseText = fullAssistantText.ToString();
+            if (SessionTitle == "New Chat" && Messages.Count >= 2 && SelectedSession != null && !string.IsNullOrWhiteSpace(responseText))
             {
                 _ = Task.Run(async () =>
                 {
-                    var newTitle = await _chatEngine!.GenerateTitleAsync(userMessage, assistantMessage.Content);
+                    var newTitle = CleanTitle(await _chatEngine!.GenerateTitleAsync(userMessage, responseText));
                     if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat")
                     {
                         System.Windows.Application.Current.Dispatcher.Invoke(() =>
@@ -349,6 +443,53 @@ public partial class ChatViewModel : ObservableObject
                 });
             }
         }
+    }
+
+    [RelayCommand]
+    private async Task SubmitEditAsync(ChatMessageViewModel message)
+    {
+        if (SelectedSession == null || message.Role != "user" || IsGenerating) return;
+
+        int uiIndex = Messages.IndexOf(message);
+        if (uiIndex < 0) return;
+
+        int occurrence = 0;
+        for (int i = 0; i < uiIndex; i++)
+        {
+            if (Messages[i].Role == "user" && Messages[i].Content == message.Content)
+                occurrence++;
+        }
+
+        var dbMessages = await _messageStore.GetMessagesAsync(SelectedSession.Id, null);
+        
+        int startDbIndex = -1;
+        int dbOccurrence = 0;
+        for (int i = 0; i < dbMessages.Count; i++)
+        {
+            if (dbMessages[i].Role.ToString().ToLowerInvariant() == "user" && dbMessages[i].Content == message.Content)
+            {
+                if (dbOccurrence == occurrence)
+                {
+                    startDbIndex = i;
+                    break;
+                }
+                dbOccurrence++;
+            }
+        }
+
+        if (startDbIndex >= 0)
+        {
+            for (int i = startDbIndex; i < dbMessages.Count; i++)
+            {
+                await _messageStore.DeleteMessageAsync(dbMessages[i].Id);
+            }
+        }
+
+        InputText = message.EditText;
+        message.IsEditing = false;
+        await SelectSessionAsync(SelectedSession);
+        
+        await SendMessageAsync();
     }
 
     [RelayCommand]
@@ -394,13 +535,18 @@ public partial class ChatViewModel : ObservableObject
                         Timestamp = msg.Timestamp
                     });
                 }
-                
-                Messages.Add(new ChatMessageViewModel
+
+                // Raw tool-call JSON is engine plumbing; keep it out of the transcript view.
+                content = StripToolCallBlocks(content);
+                if (!string.IsNullOrWhiteSpace(content))
                 {
-                    Role = "assistant",
-                    Content = content,
-                    Timestamp = msg.Timestamp
-                });
+                    Messages.Add(new ChatMessageViewModel
+                    {
+                        Role = "assistant",
+                        Content = content,
+                        Timestamp = msg.Timestamp
+                    });
+                }
             }
             else
             {
@@ -488,6 +634,19 @@ public partial class ChatViewModel : ObservableObject
         {
             session.IsEditingTitle = false;
         }
+    }
+
+    private static string CleanTitle(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return "New Chat";
+        return Regex.Replace(title, @"\s+", " ").Trim();
+    }
+
+    private static string StripToolCallBlocks(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        var stripped = Regex.Replace(text, @"<\|?tool_call\|?>.*?(</\|?tool_call\|?>|<\|/tool_call\|>|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        return stripped.Trim();
     }
 
     private static (string Thinking, string Content) SplitThinkingContent(string text)

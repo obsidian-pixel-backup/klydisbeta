@@ -1,14 +1,32 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <!-- Strict Palette -->
+    <!-- Brand palette: Fluorescent Blue / Thin Air / Blue Charcoal -->
     <Color x:Key="ColorFluorescentBlue">#50E8F4</Color>
     <Color x:Key="ColorThinAir">#C7F8FE</Color>
-    <Color x:Key="ColorBlueCharcoal">#0B0E14</Color>
-    
-    <!-- Utility Colors -->
+    <Color x:Key="ColorBlueCharcoal">#001619</Color>
+
+    <!-- Layered surfaces: lifts of the same teal hue, darkest to lightest -->
+    <Color x:Key="ColorSurface1">#032027</Color>
+    <Color x:Key="ColorSurface2">#062A33</Color>
+    <Color x:Key="ColorSurface3">#0B3540</Color>
+
+    <!-- Lines: teal-biased, never grey -->
+    <Color x:Key="ColorBorderSubtle">#0D3944</Color>
+    <Color x:Key="ColorBorderMid">#17545F</Color>
+
+    <!-- Text hierarchy carved out of Thin Air -->
+    <Color x:Key="ColorTextPrimary">#C7F8FE</Color>
+    <Color x:Key="ColorTextSecondary">#8FC9D3</Color>
+    <Color x:Key="ColorTextMuted">#578E9B</Color>
+
+    <!-- Accent tints -->
+    <Color x:Key="ColorAccentSoft">#093A45</Color>
+    <Color x:Key="ColorErrorSoft">#2A161B</Color>
+
+    <!-- Semantic colors (separate from the accent) -->
     <Color x:Key="ColorSuccess">#3FB950</Color>
-    <Color x:Key="ColorError">#F85149</Color>
+    <Color x:Key="ColorError">#F87171</Color>
     <Color x:Key="ColorWarning">#D29922</Color>
 
 </ResourceDictionary>

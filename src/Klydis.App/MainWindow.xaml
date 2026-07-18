@@ -7,11 +7,12 @@
         xmlns:views="clr-namespace:Klydis.App.Views"
         xmlns:converters="clr-namespace:Klydis.App.Converters"
         mc:Ignorable="d"
-        Title="{Binding AppTitle}" 
-        Height="800" Width="1200" 
+        Title="{Binding AppTitle}"
+        Icon="Assets/icon.ico"
+        Height="800" Width="1200"
         MinHeight="600" MinWidth="800"
-        WindowStyle="None" 
-        AllowsTransparency="True" 
+        WindowStyle="None"
+        AllowsTransparency="True"
         Background="Transparent"
         WindowState="Maximized">
 

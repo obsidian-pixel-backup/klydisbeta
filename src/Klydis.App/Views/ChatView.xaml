@@ -1,11 +1,12 @@
 <UserControl x:Class="Klydis.App.Views.ChatView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
-             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
              xmlns:mdxam="clr-namespace:MdXaml;assembly=MdXaml"
-             mc:Ignorable="d" 
+             xmlns:sys="clr-namespace:System;assembly=mscorlib"
+             mc:Ignorable="d"
              d:DesignHeight="600" d:DesignWidth="800"
              Background="{DynamicResource PanelBackgroundBrush}">
 
@@ -22,16 +23,16 @@
 
                             <ToggleButton Grid.Row="0"
                                           IsChecked="{Binding IsExpanded, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
-                                          OverridesDefaultStyle="True" Background="Transparent" 
+                                          OverridesDefaultStyle="True" Background="Transparent"
                                           Foreground="{TemplateBinding Foreground}"
                                           Cursor="Hand">
                                 <ToggleButton.Template>
                                     <ControlTemplate TargetType="ToggleButton">
-                                        <Border Background="Transparent" Padding="0,5">
+                                        <Border Background="Transparent" Padding="0,4">
                                             <StackPanel Orientation="Horizontal">
-                                                <Path x:Name="Arrow" Data="M 1,2 L 5,6 L 9,2" 
-                                                      Stroke="{TemplateBinding Foreground}" StrokeThickness="1.5" 
-                                                      HorizontalAlignment="Center" VerticalAlignment="Center" 
+                                                <Path x:Name="Arrow" Data="M 1,2 L 5,6 L 9,2"
+                                                      Stroke="{TemplateBinding Foreground}" StrokeThickness="1.5"
+                                                      HorizontalAlignment="Center" VerticalAlignment="Center"
                                                       RenderTransformOrigin="0.5,0.5" Width="10" Height="8" Margin="0,0,8,0">
                                                     <Path.RenderTransform>
                                                         <RotateTransform Angle="-90"/>
@@ -77,9 +78,9 @@
                                 <Border.RenderTransform>
                                     <TranslateTransform Y="-10"/>
                                 </Border.RenderTransform>
-                                
-                                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" 
-                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}" 
+
+                                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                                                   Focusable="false" />
                             </Border>
                         </Grid>
@@ -121,11 +122,84 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <!-- Pulsing dot for running tools / typing indicator -->
+        <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
+            <Setter Property="Width" Value="7"/>
+            <Setter Property="Height" Value="7"/>
+            <Setter Property="Fill" Value="{DynamicResource AccentPrimaryBrush}"/>
+            <Style.Triggers>
+                <EventTrigger RoutedEvent="Loaded">
+                    <BeginStoryboard>
+                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                            <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0.25" To="1" Duration="0:0:0.5"/>
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- One tool invocation: status icon + name + expandable output -->
+        <DataTemplate x:Key="ToolCallTemplate" DataType="{x:Type viewmodels:ToolCallViewModel}">
+            <Border Background="{DynamicResource ToolBubbleBackgroundBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="10" Padding="12,8" Margin="0,2">
+                <Expander Style="{StaticResource PremiumThinkingExpanderStyle}"
+                          IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
+                          Foreground="{DynamicResource TextSecondaryBrush}">
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal">
+                            <Grid Width="14" Height="14" Margin="0,0,8,0" VerticalAlignment="Center">
+                                <Ellipse Style="{StaticResource PulsingDotStyle}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                         Visibility="{Binding Status, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=running}"/>
+                                <Path Data="M 3,8 L 6,11 L 13,3" Stroke="{DynamicResource SuccessBrush}" StrokeThickness="2"
+                                      Stretch="Uniform" Width="11" Height="11"
+                                      Visibility="{Binding Status, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=done}"/>
+                                <Path Data="M 2,2 L 12,12 M 2,12 L 12,2" Stroke="{DynamicResource ErrorBrush}" StrokeThickness="2"
+                                      Stretch="Uniform" Width="10" Height="10"
+                                      Visibility="{Binding Status, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=failed}"/>
+                            </Grid>
+                            <TextBlock Text="{Binding Name}" FontFamily="Consolas" FontSize="12.5" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
+                            <TextBlock Margin="10,0,0,0" FontSize="11.5" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextMutedBrush}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Status}" Value="running">
+                                                <Setter Property="Text" Value="running"/>
+                                                <Setter Property="Foreground" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Status}" Value="done">
+                                                <Setter Property="Text" Value="completed"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Status}" Value="failed">
+                                                <Setter Property="Text" Value="failed"/>
+                                                <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
+                    </Expander.Header>
+                    <Border Background="{DynamicResource PanelBackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="8" Padding="10,8" Margin="0,6,0,2">
+                        <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <TextBlock Text="{Binding Output}" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                       FontFamily="Consolas" FontSize="12"/>
+                        </ScrollViewer>
+                    </Border>
+                </Expander>
+            </Border>
+        </DataTemplate>
     </UserControl.Resources>
 
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="250"/>
+            <ColumnDefinition Width="250" MinWidth="150" MaxWidth="600"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
@@ -136,11 +210,11 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                
-                <Button Margin="10" Command="{Binding CreateNewSessionCommand}" Background="Transparent" BorderThickness="0" Padding="0">
+
+                <Button Margin="12,12,12,6" Command="{Binding CreateNewSessionCommand}" Background="Transparent" BorderThickness="0" Padding="0">
                     <Button.Template>
                         <ControlTemplate TargetType="Button">
-                            <Border x:Name="border" CornerRadius="7" Background="{DynamicResource ButtonBackgroundBrush}" BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1" Padding="8" RenderTransformOrigin="0.5,0.5">
+                            <Border x:Name="border" CornerRadius="9" Background="{DynamicResource SurfaceElevatedBrush}" BorderBrush="{DynamicResource BorderMidBrush}" BorderThickness="1" Padding="8" RenderTransformOrigin="0.5,0.5">
                                 <Border.RenderTransform>
                                     <ScaleTransform ScaleX="1" ScaleY="1"/>
                                 </Border.RenderTransform>
@@ -151,45 +225,22 @@
                             </Border>
                             <ControlTemplate.Triggers>
                                 <Trigger Property="IsMouseOver" Value="True">
-                                    <Setter TargetName="border" Property="Opacity" Value="0.8"/>
+                                    <Setter TargetName="border" Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                    <Setter TargetName="border" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
                                 </Trigger>
-                                <EventTrigger RoutedEvent="MouseEnter">
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.02" Duration="0:0:0.15">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.02" Duration="0:0:0.15">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </EventTrigger>
-                                <EventTrigger RoutedEvent="MouseLeave">
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.15">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.15">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </EventTrigger>
                                 <EventTrigger RoutedEvent="PreviewMouseDown">
                                     <BeginStoryboard>
                                         <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.95" Duration="0:0:0.1"/>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.95" Duration="0:0:0.1"/>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.97" Duration="0:0:0.1"/>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.97" Duration="0:0:0.1"/>
                                         </Storyboard>
                                     </BeginStoryboard>
                                 </EventTrigger>
                                 <EventTrigger RoutedEvent="PreviewMouseUp">
                                     <BeginStoryboard>
                                         <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.02" Duration="0:0:0.1"/>
-                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.02" Duration="0:0:0.1"/>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.1"/>
+                                            <DoubleAnimation Storyboard.TargetName="border" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.1"/>
                                         </Storyboard>
                                     </BeginStoryboard>
                                 </EventTrigger>
@@ -198,59 +249,33 @@
                     </Button.Template>
                 </Button>
 
-                <ListBox Grid.Row="1" ItemsSource="{Binding Sessions}" SelectedItem="{Binding SelectedSession}" Background="Transparent" BorderThickness="0" Margin="0,0,0,10" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <ListBox Grid.Row="1" ItemsSource="{Binding Sessions}" SelectedItem="{Binding SelectedSession}" Background="Transparent" BorderThickness="0" Margin="0,4,0,10" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="BorderThickness" Value="0"/>
                             <Setter Property="Padding" Value="10,8"/>
-                            <Setter Property="Margin" Value="5,2"/>
+                            <Setter Property="Margin" Value="7,2"/>
                             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                             <Setter Property="VerticalContentAlignment" Value="Center"/>
-                            <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
-                            <Setter Property="RenderTransform">
-                                <Setter.Value>
-                                    <ScaleTransform ScaleX="1" ScaleY="1"/>
-                                </Setter.Value>
-                            </Setter>
                             <Setter Property="Template">
                                 <Setter.Value>
                                     <ControlTemplate TargetType="ListBoxItem">
-                                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="7" Padding="{TemplateBinding Padding}">
-                                            <ContentPresenter />
+                                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                                            <Grid>
+                                                <Border x:Name="SelBar" Width="3" CornerRadius="2" HorizontalAlignment="Left" Margin="-6,2,0,2" Background="{DynamicResource AccentPrimaryBrush}" Visibility="Collapsed"/>
+                                                <ContentPresenter />
+                                            </Grid>
                                         </Border>
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsMouseOver" Value="True">
-                                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource ButtonBackgroundBrush}"/>
+                                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SurfaceElevatedBrush}"/>
                                             </Trigger>
                                             <Trigger Property="IsSelected" Value="True">
-                                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource UserBubbleBackgroundBrush}"/>
+                                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                                <Setter TargetName="SelBar" Property="Visibility" Value="Visible"/>
                                             </Trigger>
-                                            <EventTrigger RoutedEvent="MouseEnter">
-                                                <BeginStoryboard>
-                                                    <Storyboard>
-                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.02" Duration="0:0:0.15">
-                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                                        </DoubleAnimation>
-                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.02" Duration="0:0:0.15">
-                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                                        </DoubleAnimation>
-                                                    </Storyboard>
-                                                </BeginStoryboard>
-                                            </EventTrigger>
-                                            <EventTrigger RoutedEvent="MouseLeave">
-                                                <BeginStoryboard>
-                                                    <Storyboard>
-                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.15">
-                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                                        </DoubleAnimation>
-                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.15">
-                                                            <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                                        </DoubleAnimation>
-                                                    </Storyboard>
-                                                </BeginStoryboard>
-                                            </EventTrigger>
                                         </ControlTemplate.Triggers>
                                     </ControlTemplate>
                                 </Setter.Value>
@@ -277,7 +302,7 @@
 
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                     <Grid>
-                                        <TextBlock x:Name="TitleText" Text="{Binding Title}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="TitleText" Text="{Binding Title}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                                         <TextBox x:Name="TitleEdit" Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" Visibility="Collapsed" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderThickness="1" BorderBrush="{DynamicResource AccentPrimaryBrush}" Padding="2">
                                             <TextBox.InputBindings>
                                                 <KeyBinding Key="Return" Command="{Binding DataContext.CommitEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
@@ -285,19 +310,19 @@
                                             </TextBox.InputBindings>
                                         </TextBox>
                                     </Grid>
-                                    <TextBlock x:Name="PreviewText" Text="{Binding LastMessagePreview}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock x:Name="PreviewText" Text="{Binding LastMessagePreview}" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" TextTrimming="CharacterEllipsis"/>
                                 </StackPanel>
 
                                 <!-- Action Buttons visible on hover -->
                                 <StackPanel x:Name="ActionButtons" Grid.Column="2" Orientation="Horizontal" Visibility="Collapsed" VerticalAlignment="Center" Margin="5,0,0,0">
-                                    <Button ToolTip="Toggle Pin" Command="{Binding DataContext.TogglePinSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4" Margin="0,0,2,0">
-                                        <Path x:Name="ActionPinPath" Data="M 4,2 L 8,2 L 8,6 L 10,8 L 10,10 L 7,10 L 7,14 L 6,15 L 5,14 L 5,10 L 2,10 L 2,8 L 4,6 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="12" Height="12" Stretch="Uniform"/>
+                                    <Button ToolTip="Toggle Pin" Command="{Binding DataContext.TogglePinSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4" Margin="0,0,2,0" Cursor="Hand">
+                                        <Path Data="M 4,2 L 8,2 L 8,6 L 10,8 L 10,10 L 7,10 L 7,14 L 6,15 L 5,14 L 5,10 L 2,10 L 2,8 L 4,6 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="12" Height="12" Stretch="Uniform"/>
                                     </Button>
-                                    <Button ToolTip="Rename" Command="{Binding DataContext.BeginEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4" Margin="0,0,2,0">
-                                        <Path x:Name="ActionRenamePath" Data="M 1,11 L 4,14 L 14,4 L 11,1 Z M 1,14 L 1,11 L 4,14 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="12" Height="12" Stretch="Uniform"/>
+                                    <Button ToolTip="Rename" Command="{Binding DataContext.BeginEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4" Margin="0,0,2,0" Cursor="Hand">
+                                        <Path Data="M 1,11 L 4,14 L 14,4 L 11,1 Z M 1,14 L 1,11 L 4,14 Z" Fill="{DynamicResource TextSecondaryBrush}" Width="12" Height="12" Stretch="Uniform"/>
                                     </Button>
-                                    <Button ToolTip="Delete" Command="{Binding DataContext.DeleteSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4">
-                                        <Path x:Name="ActionDeletePath" Data="M 3,3 L 11,3 M 5,3 L 5,1 L 9,1 L 9,3 M 4,3 L 4,13 C 4,14 5,14 5,14 L 9,14 C 9,14 10,14 10,13 L 10,3" Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.5" Fill="Transparent" Width="12" Height="12" Stretch="Uniform"/>
+                                    <Button ToolTip="Delete" Command="{Binding DataContext.DeleteSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}" Background="Transparent" BorderThickness="0" Padding="4" Cursor="Hand">
+                                        <Path Data="M 3,3 L 11,3 M 5,3 L 5,1 L 9,1 L 9,3 M 4,3 L 4,13 C 4,14 5,14 5,14 L 9,14 C 9,14 10,14 10,13 L 10,3" Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.5" Fill="Transparent" Width="12" Height="12" Stretch="Uniform"/>
                                     </Button>
                                 </StackPanel>
                             </Grid>
@@ -307,14 +332,6 @@
                                 </DataTrigger>
                                 <DataTrigger Binding="{Binding LastMessagePreview}" Value="{x:Null}">
                                     <Setter TargetName="PreviewText" Property="Visibility" Value="Collapsed"/>
-                                </DataTrigger>
-                                <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-                                    <Setter TargetName="TitleText" Property="Foreground" Value="#0F172A"/>
-                                    <Setter TargetName="PreviewText" Property="Foreground" Value="#1E293B"/>
-                                    <Setter TargetName="PinIcon" Property="Fill" Value="#0F172A"/>
-                                    <Setter TargetName="ActionPinPath" Property="Fill" Value="#1E293B"/>
-                                    <Setter TargetName="ActionRenamePath" Property="Fill" Value="#1E293B"/>
-                                    <Setter TargetName="ActionDeletePath" Property="Stroke" Value="#1E293B"/>
                                 </DataTrigger>
                                 <DataTrigger Binding="{Binding IsEditingTitle}" Value="True">
                                     <Setter TargetName="TitleText" Property="Visibility" Value="Collapsed"/>
@@ -334,6 +351,25 @@
             </Grid>
         </Border>
 
+        <!-- Sidebar Resizer -->
+        <GridSplitter Grid.Column="0" Width="6" HorizontalAlignment="Right" VerticalAlignment="Stretch" Cursor="SizeWE" Background="Transparent" Panel.ZIndex="10" Margin="0,0,-3,0">
+            <GridSplitter.Template>
+                <ControlTemplate TargetType="GridSplitter">
+                    <Border Background="Transparent" Padding="2,0">
+                        <Border x:Name="VisualIndicator" Background="Transparent" Width="2" HorizontalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="VisualIndicator" Property="Background" Value="{DynamicResource AccentPrimaryBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsDragging" Value="True">
+                            <Setter TargetName="VisualIndicator" Property="Background" Value="{DynamicResource AccentPrimaryBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </GridSplitter.Template>
+        </GridSplitter>
+
         <!-- Chat Area -->
         <Grid Grid.Column="1">
             <Grid.RowDefinitions>
@@ -344,218 +380,529 @@
 
             <!-- Top Bar -->
             <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Background="{DynamicResource PanelBackgroundBrush}">
-                <Grid Margin="15,0">
+                <Grid Margin="20,0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    
-                    <TextBlock Text="{Binding SessionTitle}" VerticalAlignment="Center" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                    
-                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                        <!-- Tokens per second removed from header -->
-                    </StackPanel>
+
+                    <Grid VerticalAlignment="Center" HorizontalAlignment="Left">
+                        <StackPanel x:Name="HeaderTitleDisplay" Orientation="Horizontal" Background="Transparent"
+                                    ToolTip="Click to rename this chat" Cursor="Hand">
+                            <StackPanel.InputBindings>
+                                <MouseBinding MouseAction="LeftClick" Command="{Binding BeginEditTitleCommand}" CommandParameter="{Binding SelectedSession}"/>
+                            </StackPanel.InputBindings>
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding SelectedSession.IsEditingTitle}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </StackPanel.Style>
+                            <TextBlock Text="{Binding SessionTitle}" VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" MaxWidth="520"/>
+                            <Path Data="M 1,11 L 4,14 L 14,4 L 11,1 Z M 1,14 L 1,11 L 4,14 Z" Fill="{DynamicResource TextMutedBrush}"
+                                  Width="11" Height="11" Stretch="Uniform" VerticalAlignment="Center" Margin="8,1,0,0">
+                                <Path.Style>
+                                    <Style TargetType="Path">
+                                        <Setter Property="Opacity" Value="0"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsMouseOver, ElementName=HeaderTitleDisplay}" Value="True">
+                                                <Setter Property="Opacity" Value="0.7"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Path.Style>
+                            </Path>
+                        </StackPanel>
+                        <TextBox x:Name="HeaderTitleEdit" Text="{Binding SelectedSession.Title, UpdateSourceTrigger=PropertyChanged}"
+                                 FontSize="15" FontWeight="SemiBold" MinWidth="220" MaxWidth="520" Padding="6,3"
+                                 MaxLines="1" MaxHeight="36"
+                                 VerticalAlignment="Center" VerticalContentAlignment="Center"
+                                 IsVisibleChanged="HeaderTitleEdit_IsVisibleChanged" LostFocus="HeaderTitleEdit_LostFocus">
+                            <TextBox.InputBindings>
+                                <KeyBinding Key="Return" Command="{Binding CommitEditTitleCommand}" CommandParameter="{Binding SelectedSession}"/>
+                                <KeyBinding Key="Esc" Command="{Binding CancelEditTitleCommand}" CommandParameter="{Binding SelectedSession}"/>
+                            </TextBox.InputBindings>
+                            <TextBox.Style>
+                                <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding SelectedSession.IsEditingTitle}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBox.Style>
+                        </TextBox>
+                    </Grid>
+
+                    <Border Grid.Column="1" Background="{DynamicResource AccentSoftBrush}" CornerRadius="20" Padding="12,5" VerticalAlignment="Center"
+                            Visibility="{Binding SelectedModelId, Converter={StaticResource StringToVisibilityConverter}}">
+                        <Border.ToolTip>
+                            <TextBlock>
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Text" Value="No model loaded — pick one below to start chatting"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsModelReady}" Value="True">
+                                                <Setter Property="Text" Value="Model loaded and ready"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsModelLoading}" Value="True">
+                                                <Setter Property="Text" Value="Loading model into memory…"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Border.ToolTip>
+                        <StackPanel Orientation="Horizontal">
+                            <!-- Status dot: green = ready, grey = not loaded, pulsing cyan = loading -->
+                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Margin="0,1,7,0"
+                                     Visibility="{Binding IsModelLoading, Converter={StaticResource InverseBoolToVisConverter}}">
+                                <Ellipse.Style>
+                                    <Style TargetType="Ellipse">
+                                        <Setter Property="Fill" Value="{DynamicResource TextMutedBrush}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsModelReady}" Value="True">
+                                                <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Ellipse.Style>
+                            </Ellipse>
+                            <Ellipse Style="{StaticResource PulsingDotStyle}" Width="6" Height="6" VerticalAlignment="Center" Margin="0,1,7,0"
+                                     Visibility="{Binding IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
+                            <TextBlock Text="{Binding SelectedModelId}" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" VerticalAlignment="Center" MaxWidth="280" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Text="loading…" FontSize="12" FontStyle="Italic" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="7,0,0,0"
+                                       Visibility="{Binding IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
+                            <TextBlock Text="ready" FontSize="12" Foreground="{DynamicResource SuccessBrush}" VerticalAlignment="Center" Margin="7,0,0,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsModelReady}" Value="True"/>
+                                                    <Condition Binding="{Binding IsModelLoading}" Value="False"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
 
             <!-- Message List -->
-            <ListBox x:Name="MessagesList" Grid.Row="1" ItemsSource="{Binding Messages}" 
-                      Background="Transparent" BorderThickness="0" 
-                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                      VirtualizingPanel.IsVirtualizing="True"
-                      VirtualizingPanel.ScrollUnit="Pixel"
-                      Padding="0,10,0,10">
-                <ListBox.ItemContainerStyle>
-                    <Style TargetType="ListBoxItem">
-                        <Setter Property="Focusable" Value="False"/>
-                        <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
-                        <Setter Property="RenderTransform">
-                            <Setter.Value>
-                                <TranslateTransform Y="20"/>
-                            </Setter.Value>
-                        </Setter>
-                        <Setter Property="Opacity" Value="0"/>
-                        <Setter Property="Template">
-                            <Setter.Value>
-                                <ControlTemplate TargetType="ListBoxItem">
-                                    <ContentPresenter/>
-                                </ControlTemplate>
-                            </Setter.Value>
-                        </Setter>
-                        <Style.Triggers>
-                            <EventTrigger RoutedEvent="Loaded">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.3"/>
-                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="20" To="0" Duration="0:0:0.3">
-                                            <DoubleAnimation.EasingFunction>
-                                                <QuadraticEase EasingMode="EaseOut"/>
-                                            </DoubleAnimation.EasingFunction>
-                                        </DoubleAnimation>
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </ListBox.ItemContainerStyle>
-                <ListBox.ItemTemplate>
-                    <DataTemplate>
-                        <Grid Margin="15,10">
-                            <!-- User Message -->
-                            <Border CornerRadius="7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Right"
-                                    Background="{DynamicResource UserBubbleBackgroundBrush}" BorderThickness="0"
-                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=user}">
-                                <DockPanel LastChildFill="True">
-                                    <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}" 
-                                            Foreground="{DynamicResource UserBubbleTextBrush}" 
-                                            Style="{StaticResource ChatActionButtonStyle}" 
-                                            VerticalAlignment="Top" 
-                                            Margin="10,0,0,0" 
-                                            ToolTip="Copy message">
-                                        <Grid>
-                                            <Path Data="M 2,5 L 2,14 L 11,14 M 5,2 L 14,2 L 14,11 L 5,11 Z" 
-                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" 
-                                                  StrokeThickness="1.5" Width="14" Height="14" Stretch="Uniform" 
-                                                  Visibility="{Binding IsCopied, Converter={StaticResource InverseBoolToVisConverter}}"/>
-                                            <Path Data="M 3,8 L 6,11 L 13,3" 
-                                                  Stroke="{DynamicResource SuccessBrush}" 
-                                                  StrokeThickness="2" Width="14" Height="14" Stretch="Uniform" 
-                                                  Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
-                                        </Grid>
-                                    </Button>
-                                     <mdxam:MarkdownScrollViewer Markdown="{Binding Content}" Foreground="{DynamicResource UserBubbleTextBrush}" 
-                                                                 HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled" Margin="0" Padding="0"/>
-                                </DockPanel>
-                            </Border>
-
-                            <!-- Thought (Thinking) Message -->
-                            <Border CornerRadius="7" Padding="0" MaxWidth="600" HorizontalAlignment="Left" Margin="0,5"
-                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=thought}">
-                                <Expander Style="{StaticResource PremiumThinkingExpanderStyle}" Header="Thinking Process" IsExpanded="{Binding IsThinkingExpanded}" 
-                                          Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Width="600">
-                                    <Border Background="{DynamicResource ThinkingBubbleBackgroundBrush}" 
-                                            BorderBrush="{DynamicResource ThinkingBubbleBorderBrush}" BorderThickness="1" 
-                                            Padding="12,10" CornerRadius="7" Margin="0,5,0,0">
-                                        <TextBlock Text="{Binding Content}" FontStyle="Italic" TextWrapping="Wrap" 
-                                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+            <Grid Grid.Row="1">
+                <ListBox x:Name="MessagesList" ItemsSource="{Binding Messages}"
+                          Background="Transparent" BorderThickness="0"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                          VirtualizingPanel.IsVirtualizing="True"
+                          VirtualizingPanel.ScrollUnit="Pixel"
+                          Padding="0,12,0,12">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Focusable" Value="False"/>
+                            <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+                            <Setter Property="RenderTransform">
+                                <Setter.Value>
+                                    <TranslateTransform Y="14"/>
+                                </Setter.Value>
+                            </Setter>
+                            <Setter Property="Opacity" Value="0"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <ContentPresenter/>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                            <Style.Triggers>
+                                <EventTrigger RoutedEvent="Loaded">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.25"/>
+                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="14" To="0" Duration="0:0:0.25">
+                                                <DoubleAnimation.EasingFunction>
+                                                    <QuadraticEase EasingMode="EaseOut"/>
+                                                </DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Grid stretches to fill available width -->
+                            <Grid Margin="20,5">
+                                <!-- User Message -->
+                                <Grid Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=user}">
+                                    <!-- Normal View -->
+                                    <Border CornerRadius="14,14,4,14" Padding="14,10" HorizontalAlignment="Right" Margin="100,4,0,4"
+                                            Background="{DynamicResource UserBubbleBackgroundBrush}" BorderThickness="0"
+                                            Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
+                                        <DockPanel LastChildFill="True">
+                                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="10,0,0,0">
+                                                <Button Command="{Binding BeginEditCommand}" 
+                                                        Foreground="{DynamicResource UserBubbleTextBrush}"
+                                                        Style="{StaticResource ChatActionButtonStyle}"
+                                                        ToolTip="Edit and resubmit">
+                                                    <Grid>
+                                                        <Path Data="M 12.2,2.8 C 12.7,2.3 13.5,2.3 14,2.8 L 15.2,4 C 15.7,4.5 15.7,5.3 15.2,5.8 L 5,16 L 2,16 L 2,13 L 12.2,2.8 Z M 14.5,4.5 L 13.5,3.5 M 4,14 L 5.5,14 L 13.5,6 L 12,4.5 L 4,12.5 Z"
+                                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                              StrokeThickness="1.2" Width="14" Height="14" Stretch="Uniform"/>
+                                                    </Grid>
+                                                </Button>
+                                                <Button Command="{Binding CopyToClipboardCommand}"
+                                                        Foreground="{DynamicResource UserBubbleTextBrush}"
+                                                        Style="{StaticResource ChatActionButtonStyle}"
+                                                        ToolTip="Copy message"
+                                                        Margin="5,0,0,0">
+                                                    <Grid>
+                                                        <Path Data="M 2,5 L 2,14 L 11,14 M 5,2 L 14,2 L 14,11 L 5,11 Z"
+                                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                              StrokeThickness="1.5" Width="14" Height="14" Stretch="Uniform"
+                                                              Visibility="{Binding IsCopied, Converter={StaticResource InverseBoolToVisConverter}}"/>
+                                                        <Path Data="M 3,8 L 6,11 L 13,3"
+                                                              Stroke="{DynamicResource SuccessBrush}"
+                                                              StrokeThickness="2" Width="14" Height="14" Stretch="Uniform"
+                                                              Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
+                                                    </Grid>
+                                                </Button>
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding Content}" Foreground="{DynamicResource UserBubbleTextBrush}"
+                                                       TextWrapping="Wrap" VerticalAlignment="Center" FontSize="15" LineHeight="22"/>
+                                        </DockPanel>
                                     </Border>
-                                </Expander>
-                            </Border>
+                                    
+                                    <!-- Edit View -->
+                                    <Border CornerRadius="8" Padding="14,10" HorizontalAlignment="Right" Margin="100,4,0,4" MinWidth="400"
+                                            Background="{DynamicResource SurfaceBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
+                                            Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisConverter}}">
+                                        <StackPanel>
+                                            <TextBox Text="{Binding EditText, UpdateSourceTrigger=PropertyChanged}" 
+                                                     TextWrapping="Wrap" AcceptsReturn="True" MinHeight="60"
+                                                     Background="Transparent" Foreground="{DynamicResource TextPrimaryBrush}"
+                                                     BorderThickness="0" FontSize="15" Padding="0,0,0,10"/>
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                                                <Button Content="Cancel" Command="{Binding CancelEditCommand}" 
+                                                        Background="Transparent" Foreground="{DynamicResource TextSecondaryBrush}"
+                                                        BorderThickness="0" Margin="0,0,8,0" Padding="12,6" Cursor="Hand"/>
+                                                <Button Content="Save &amp; Submit" 
+                                                        Command="{Binding DataContext.SubmitEditCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" 
+                                                        CommandParameter="{Binding}" 
+                                                        Background="{DynamicResource AccentPrimaryBrush}" Foreground="{DynamicResource UserBubbleTextBrush}" 
+                                                        BorderThickness="0" Padding="16,6" Cursor="Hand">
+                                                    <Button.Template>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Border Background="{TemplateBinding Background}" CornerRadius="4">
+                                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                                                            </Border>
+                                                        </ControlTemplate>
+                                                    </Button.Template>
+                                                </Button>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
 
-                            <!-- Tool Message -->
-                            <Border CornerRadius="7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Left" Margin="0,5"
-                                    Background="{DynamicResource ToolBubbleBackgroundBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
-                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=tool}">
-                                <StackPanel>
-                                    <TextBlock Text="🔧 Tool Output" FontWeight="SemiBold" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,0,5"/>
-                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}" FontFamily="Consolas" FontSize="12"/>
+                                <!-- Thought (Thinking) Message -->
+                                <Border CornerRadius="10" Padding="0" HorizontalAlignment="Left" Margin="0,2,100,2"
+                                        Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=thought}">
+                                    <Expander Style="{StaticResource PremiumThinkingExpanderStyle}" IsExpanded="{Binding IsThinkingExpanded}"
+                                              Foreground="{DynamicResource TextMutedBrush}" FontSize="12">
+                                        <Expander.Header>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="Thinking" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" VerticalAlignment="Center"/>
+                                                <Ellipse Style="{StaticResource PulsingDotStyle}" Width="5" Height="5" Margin="7,1,0,0" VerticalAlignment="Center"
+                                                         Visibility="{Binding IsStreaming, Converter={StaticResource BoolToVisConverter}}"/>
+                                            </StackPanel>
+                                        </Expander.Header>
+                                        <Border Background="{DynamicResource ThinkingBubbleBackgroundBrush}"
+                                                BorderBrush="{DynamicResource AccentSoftBrush}" BorderThickness="2,0,0,0"
+                                                Padding="12,8" CornerRadius="0,8,8,0" Margin="4,4,0,0">
+                                            <TextBlock Text="{Binding Content}" FontStyle="Italic" TextWrapping="Wrap" FontSize="12.5"
+                                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                        </Border>
+                                    </Expander>
+                                </Border>
+
+                                <!-- Live Tool Call Card(s) -->
+                                <ItemsControl ItemsSource="{Binding ToolCalls}" ItemTemplate="{StaticResource ToolCallTemplate}"
+                                              HorizontalAlignment="Left" Margin="0,2,100,2"
+                                              Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=toolcall}"/>
+
+                                <!-- Historic Tool Output -->
+                                <Border CornerRadius="10" Padding="12,8" HorizontalAlignment="Left" Margin="0,2,100,2"
+                                        Background="{DynamicResource ToolBubbleBackgroundBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
+                                        Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=tool}">
+                                    <Expander Style="{StaticResource PremiumThinkingExpanderStyle}" Foreground="{DynamicResource TextSecondaryBrush}" IsExpanded="False">
+                                        <Expander.Header>
+                                            <TextBlock Text="Tool output" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"/>
+                                        </Expander.Header>
+                                        <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="0,6,0,2">
+                                            <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}" FontFamily="Consolas" FontSize="12"/>
+                                        </ScrollViewer>
+                                    </Expander>
+                                </Border>
+
+                                <!-- System Message -->
+                                <Border CornerRadius="20" Padding="14,5" MaxWidth="800" HorizontalAlignment="Center" Margin="0,4"
+                                        Background="{DynamicResource SurfaceBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
+                                        Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=system}">
+                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextMutedBrush}" TextAlignment="Center" FontSize="12"/>
+                                </Border>
+
+                                <!-- Error Message -->
+                                <Border CornerRadius="10" Padding="14,10" HorizontalAlignment="Left" Margin="0,4,100,4"
+                                        Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="3,0,0,0" BorderBrush="{DynamicResource ErrorBrush}"
+                                        Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=error}">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Path Grid.Column="0" Data="M 8,1 L 15,14 L 1,14 Z M 8,6 L 8,10 M 8,12 L 8,12.01" Stroke="{DynamicResource ErrorBrush}" StrokeThickness="1.5"
+                                              Width="15" Height="14" Stretch="Uniform" VerticalAlignment="Top" Margin="0,2,10,0"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource ErrorBrush}" FontSize="12.5"/>
+                                    </Grid>
+                                </Border>
+
+                                <!-- Generating indicator: breathing K badge + cycling status words, Claude-style -->
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" Margin="4,8"
+                                            Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=typing}">
+                                    <Border Width="22" Height="22" CornerRadius="7" Background="{DynamicResource AccentSoftBrush}"
+                                            VerticalAlignment="Center" Margin="0,0,9,0" RenderTransformOrigin="0.5,0.5">
+                                        <Border.RenderTransform>
+                                            <ScaleTransform ScaleX="1" ScaleY="1"/>
+                                        </Border.RenderTransform>
+                                        <Border.Triggers>
+                                            <EventTrigger RoutedEvent="Loaded">
+                                                <BeginStoryboard>
+                                                    <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                                                         From="1" To="1.18" Duration="0:0:0.85">
+                                                            <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+                                                        </DoubleAnimation>
+                                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                                                         From="1" To="1.18" Duration="0:0:0.85">
+                                                            <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+                                                        </DoubleAnimation>
+                                                        <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                         From="0.75" To="1" Duration="0:0:0.85">
+                                                            <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+                                                        </DoubleAnimation>
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </EventTrigger>
+                                        </Border.Triggers>
+                                        <TextBlock Text="K" FontSize="12" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <TextBlock x:Name="GeneratingWord" FontSize="12.5" Foreground="{DynamicResource TextSecondaryBrush}"
+                                               VerticalAlignment="Center" Text="Thinking…">
+                                        <TextBlock.Triggers>
+                                            <EventTrigger RoutedEvent="Loaded">
+                                                <BeginStoryboard>
+                                                    <Storyboard RepeatBehavior="Forever" Duration="0:0:10.5">
+                                                        <ObjectAnimationUsingKeyFrames Storyboard.TargetProperty="Text">
+                                                            <DiscreteObjectKeyFrame KeyTime="0:0:0">
+                                                                <DiscreteObjectKeyFrame.Value><sys:String>Thinking…</sys:String></DiscreteObjectKeyFrame.Value>
+                                                            </DiscreteObjectKeyFrame>
+                                                            <DiscreteObjectKeyFrame KeyTime="0:0:2.1">
+                                                                <DiscreteObjectKeyFrame.Value><sys:String>Weaving…</sys:String></DiscreteObjectKeyFrame.Value>
+                                                            </DiscreteObjectKeyFrame>
+                                                            <DiscreteObjectKeyFrame KeyTime="0:0:4.2">
+                                                                <DiscreteObjectKeyFrame.Value><sys:String>Conjuring…</sys:String></DiscreteObjectKeyFrame.Value>
+                                                            </DiscreteObjectKeyFrame>
+                                                            <DiscreteObjectKeyFrame KeyTime="0:0:6.3">
+                                                                <DiscreteObjectKeyFrame.Value><sys:String>Distilling…</sys:String></DiscreteObjectKeyFrame.Value>
+                                                            </DiscreteObjectKeyFrame>
+                                                            <DiscreteObjectKeyFrame KeyTime="0:0:8.4">
+                                                                <DiscreteObjectKeyFrame.Value><sys:String>Composing…</sys:String></DiscreteObjectKeyFrame.Value>
+                                                            </DiscreteObjectKeyFrame>
+                                                        </ObjectAnimationUsingKeyFrames>
+                                                        <DoubleAnimationUsingKeyFrames Storyboard.TargetProperty="Opacity">
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:0" Value="0"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:0.3" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:1.8" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:2.1" Value="0"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:2.4" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:3.9" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:4.2" Value="0"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:4.5" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:6" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:6.3" Value="0"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:6.6" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:8.1" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:8.4" Value="0"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:8.7" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:10.2" Value="1"/>
+                                                            <LinearDoubleKeyFrame KeyTime="0:0:10.5" Value="0"/>
+                                                        </DoubleAnimationUsingKeyFrames>
+                                                    </Storyboard>
+                                                </BeginStoryboard>
+                                            </EventTrigger>
+                                        </TextBlock.Triggers>
+                                    </TextBlock>
                                 </StackPanel>
-                            </Border>
 
-                            <!-- System Message -->
-                            <Border CornerRadius="7" Padding="10,5" MaxWidth="500" HorizontalAlignment="Center" Margin="0,5"
-                                    Background="{DynamicResource SystemBubbleBackgroundBrush}" BorderThickness="0"
-                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=system}">
-                                <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" TextAlignment="Center" FontSize="12"/>
-                            </Border>
+                                <!-- Assistant Message -->
+                                <Border CornerRadius="4,14,14,14" Padding="14,10" HorizontalAlignment="Left" Margin="0,4,100,4"
+                                        Background="{DynamicResource AssistantBubbleBackgroundBrush}"
+                                        BorderThickness="1" BorderBrush="{DynamicResource AssistantBubbleBorderBrush}"
+                                        Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=assistant}">
+                                    <DockPanel LastChildFill="True">
+                                        <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}"
+                                                Foreground="{DynamicResource TextSecondaryBrush}"
+                                                Style="{StaticResource ChatActionButtonStyle}"
+                                                VerticalAlignment="Top"
+                                                Margin="10,0,0,0"
+                                                ToolTip="Copy message">
+                                            <Grid>
+                                                <Path Data="M 2,5 L 2,14 L 11,14 M 5,2 L 14,2 L 14,11 L 5,11 Z"
+                                                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                      StrokeThickness="1.5" Width="14" Height="14" Stretch="Uniform"
+                                                      Visibility="{Binding IsCopied, Converter={StaticResource InverseBoolToVisConverter}}"/>
+                                                <Path Data="M 3,8 L 6,11 L 13,3"
+                                                      Stroke="{DynamicResource SuccessBrush}"
+                                                      StrokeThickness="2" Width="14" Height="14" Stretch="Uniform"
+                                                      Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
+                                            </Grid>
+                                        </Button>
+                                        <StackPanel>
+                                            <mdxam:MarkdownScrollViewer Markdown="{Binding Content}" Foreground="{DynamicResource TextPrimaryBrush}"
+                                                                        HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled" Margin="0" Padding="0" FontSize="15"/>
+                                            <Rectangle Width="8" Height="14" Fill="{DynamicResource AccentPrimaryBrush}" HorizontalAlignment="Left" Margin="0,2,0,0"
+                                                       Visibility="{Binding IsStreaming, Converter={StaticResource BoolToVisConverter}}">
+                                                <Rectangle.Style>
+                                                    <Style TargetType="Rectangle">
+                                                        <Style.Triggers>
+                                                            <EventTrigger RoutedEvent="Loaded">
+                                                                <BeginStoryboard>
+                                                                    <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                                                        <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.15" Duration="0:0:0.45"/>
+                                                                    </Storyboard>
+                                                                </BeginStoryboard>
+                                                            </EventTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Rectangle.Style>
+                                            </Rectangle>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
 
-
-                            <!-- Assistant Message -->
-                            <Border CornerRadius="7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Left"
-                                    Background="{DynamicResource AssistantBubbleBackgroundBrush}"
-                                    BorderThickness="0"
-                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=assistant}">
-                                <DockPanel LastChildFill="True">
-                                    <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}" 
-                                            Foreground="{DynamicResource TextSecondaryBrush}" 
-                                            Style="{StaticResource ChatActionButtonStyle}" 
-                                            VerticalAlignment="Top" 
-                                            Margin="10,0,0,0" 
-                                            ToolTip="Copy message">
-                                        <Grid>
-                                            <Path Data="M 2,5 L 2,14 L 11,14 M 5,2 L 14,2 L 14,11 L 5,11 Z" 
-                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" 
-                                                  StrokeThickness="1.5" Width="14" Height="14" Stretch="Uniform" 
-                                                  Visibility="{Binding IsCopied, Converter={StaticResource InverseBoolToVisConverter}}"/>
-                                            <Path Data="M 3,8 L 6,11 L 13,3" 
-                                                  Stroke="{DynamicResource SuccessBrush}" 
-                                                  StrokeThickness="2" Width="14" Height="14" Stretch="Uniform" 
-                                                  Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
-                                        </Grid>
-                                    </Button>
-                                    <StackPanel>
-                                        <mdxam:MarkdownScrollViewer Markdown="{Binding Content}" Foreground="{DynamicResource TextPrimaryBrush}" 
-                                                                    HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled" Margin="0" Padding="0"/>
-                                        
-                                        <!-- Tool Calls indicator inside assistant -->
-                                        <ItemsControl ItemsSource="{Binding ToolCalls}" Margin="0,5,0,0">
-                                            <ItemsControl.ItemTemplate>
-                                                <DataTemplate>
-                                                    <Border Background="Transparent" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="5" Padding="10,5" Margin="0,2">
-                                                        <StackPanel Orientation="Horizontal">
-                                                            <TextBlock Text="⚙" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,5,0"/>
-                                                            <TextBlock Text="{Binding Name, StringFormat='Running {0}...'}" Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" FontSize="12"/>
-                                                        </StackPanel>
-                                                    </Border>
-                                                </DataTemplate>
-                                            </ItemsControl.ItemTemplate>
-                                        </ItemsControl>
-
-                                        <!-- Generating indicator -->
-                                        <TextBlock Text="Generating..." FontStyle="Italic" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,5,0,0">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                                    <Style.Triggers>
-                                                        <MultiDataTrigger>
-                                                            <MultiDataTrigger.Conditions>
-                                                                <Condition Binding="{Binding IsStreaming}" Value="True"/>
-                                                                <Condition Binding="{Binding Content}" Value=""/>
-                                                                <Condition Binding="{Binding ToolCalls.Count}" Value="0"/>
-                                                            </MultiDataTrigger.Conditions>
-                                                            <Setter Property="Visibility" Value="Visible"/>
-                                                        </MultiDataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                    </StackPanel>
-                                </DockPanel>
-                            </Border>
-                        </Grid>
-                    </DataTemplate>
-                </ListBox.ItemTemplate>
-            </ListBox>
+                <!-- Empty state -->
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Messages.Count}" Value="0">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+                    <Border Width="64" Height="64" CornerRadius="18" Background="{DynamicResource AccentSoftBrush}" HorizontalAlignment="Center">
+                        <TextBlock Text="K" FontSize="30" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <TextBlock Text="Start a conversation" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" HorizontalAlignment="Center" Margin="0,16,0,4"/>
+                    <TextBlock Text="Pick a model below and send your first message." FontSize="12.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
 
             <!-- Input Area -->
-            <Border Grid.Row="2" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="15">
+            <Border Grid.Row="2" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,12">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    
-                    <ComboBox Grid.Column="0" VerticalAlignment="Bottom" Width="220" Margin="0,0,10,0" Height="40"
-                              ItemsSource="{Binding AvailableModels}" SelectedItem="{Binding SelectedModelId}" 
-                              Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                    
-                    <TextBox x:Name="InputTextBox" Grid.Column="1" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
-                             MinLines="1" MaxLines="5" TextWrapping="Wrap" AcceptsReturn="True" 
-                             PreviewKeyDown="InputTextBox_PreviewKeyDown"
-                             Background="{DynamicResource InputBackgroundBrush}" 
-                             Foreground="{DynamicResource TextPrimaryBrush}" 
-                             BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
-                             Padding="10" VerticalContentAlignment="Center"
-                             VerticalScrollBarVisibility="Auto"/>
-                    
-                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0">
-                        <TextBlock Text="➤" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+                    <StackPanel Grid.Column="0" VerticalAlignment="Bottom" Margin="0,0,10,0">
+                        <TextBlock Text="M O D E L" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="4,0,0,3"/>
+                        <ComboBox Width="210" Height="40"
+                                  ItemsSource="{Binding AvailableModels}" SelectedItem="{Binding SelectedModelId}"
+                                  ToolTip="Choose which model answers your messages"
+                                  Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    </StackPanel>
+
+                    <Grid Grid.Column="1">
+                        <TextBox x:Name="InputTextBox" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                                 MinLines="1" MaxLines="6" TextWrapping="Wrap" AcceptsReturn="True"
+                                 PreviewKeyDown="InputTextBox_PreviewKeyDown"
+                                 Background="{DynamicResource InputBackgroundBrush}"
+                                 Foreground="{DynamicResource TextPrimaryBrush}"
+                                 BorderThickness="1" BorderBrush="{DynamicResource BorderMidBrush}"
+                                 Padding="12,10" VerticalContentAlignment="Center"
+                                 VerticalScrollBarVisibility="Auto" FontSize="15"/>
+                        <!-- State-aware placeholder -->
+                        <TextBlock IsHitTestVisible="False" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="15"
+                                   Foreground="{DynamicResource TextMutedBrush}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Setter Property="Text" Value="Message Klydis…"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsModelReady}" Value="False">
+                                            <Setter Property="Text" Value="Load a model below to start chatting"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsModelLoading}" Value="True">
+                                            <Setter Property="Text" Value="Model is loading — you can type while you wait…"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsGenerating}" Value="True">
+                                            <Setter Property="Text" Value="Klydis is responding…"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding Text, ElementName=InputTextBox}" Value="">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <!-- Shortcut hint: only while focused and empty -->
+                        <TextBlock Text="Shift+Enter for new line" IsHitTestVisible="False"
+                                   Margin="0,0,14,0" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11"
+                                   Foreground="{DynamicResource TextMutedBrush}" Opacity="0.7">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding IsKeyboardFocused, ElementName=InputTextBox}" Value="True"/>
+                                                <Condition Binding="{Binding Text, ElementName=InputTextBox}" Value=""/>
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </MultiDataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Grid>
+
+                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
+                        <Path Data="M 2,8 L 13,8 M 8,3 L 13,8 L 8,13" Stroke="{DynamicResource TextInverse}" StrokeThickness="2" Width="15" Height="14" Stretch="Uniform" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
                     </Button>
 
-                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="#E81123" BorderThickness="0">
-                        <TextBlock Text="■" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="0" Padding="0" ToolTip="Stop generating">
+                        <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ErrorBrush}"/>
                     </Button>
                 </Grid>
             </Border>
