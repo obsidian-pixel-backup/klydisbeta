@@ -290,12 +290,14 @@
     </Style>
 
     <!-- ScrollBar Style -->
-    <Style TargetType="ScrollBar">
+    <Style TargetType="{x:Type ScrollBar}">
         <Setter Property="Background" Value="Transparent"/>
-        <Setter Property="Width" Value="4"/>
+        <Setter Property="Width" Value="3"/>
+        <Setter Property="MaxWidth" Value="3"/>
+        <Setter Property="MinWidth" Value="3"/>
         <Setter Property="Template">
             <Setter.Value>
-                <ControlTemplate TargetType="ScrollBar">
+                <ControlTemplate TargetType="{x:Type ScrollBar}">
                     <Border Background="{TemplateBinding Background}">
                         <Track x:Name="PART_Track" IsDirectionReversed="true">
                             <Track.Thumb>
@@ -319,11 +321,16 @@
         </Setter>
         <Style.Triggers>
             <Trigger Property="IsMouseOver" Value="True">
-                <Setter Property="Width" Value="6"/>
+                <Setter Property="Width" Value="3"/>
+                <Setter Property="MaxWidth" Value="3"/>
             </Trigger>
             <Trigger Property="Orientation" Value="Horizontal">
                 <Setter Property="Width" Value="Auto"/>
-                <Setter Property="Height" Value="4"/>
+                <Setter Property="Height" Value="3"/>
+                <Setter Property="MaxHeight" Value="3"/>
+                <Setter Property="MinHeight" Value="3"/>
+                <Setter Property="MaxWidth" Value="Infinity"/>
+                <Setter Property="MinWidth" Value="0"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -339,18 +346,40 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
-                    <Border Background="{TemplateBinding Background}" BorderThickness="3,0,0,0" BorderBrush="Transparent" x:Name="border">
+                    <Grid Background="{TemplateBinding Background}">
+                        <Border x:Name="Indicator" Width="3" HorizontalAlignment="Left" VerticalAlignment="Center" Background="{DynamicResource AccentPrimaryBrush}" Height="0" CornerRadius="0,2,2,0"/>
                         <Viewbox Width="20" Height="20" HorizontalAlignment="Center" VerticalAlignment="Center">
                             <ContentPresenter/>
                         </Viewbox>
-                    </Border>
+                    </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
                         </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter Property="Foreground" Value="{DynamicResource AccentPrimaryBrush}"/>
-                            <Setter TargetName="border" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Indicator" Storyboard.TargetProperty="Height" To="28" Duration="0:0:0.2">
+                                            <DoubleAnimation.EasingFunction>
+                                                <QuadraticEase EasingMode="EaseOut"/>
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="Indicator" Storyboard.TargetProperty="Height" To="0" Duration="0:0:0.15">
+                                            <DoubleAnimation.EasingFunction>
+                                                <QuadraticEase EasingMode="EaseIn"/>
+                                            </DoubleAnimation.EasingFunction>
+                                        </DoubleAnimation>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>

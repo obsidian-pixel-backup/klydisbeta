@@ -4,9 +4,124 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
              xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
+             xmlns:mdxam="clr-namespace:MdXaml;assembly=MdXaml"
              mc:Ignorable="d" 
              d:DesignHeight="600" d:DesignWidth="800"
              Background="{DynamicResource PanelBackgroundBrush}">
+
+    <UserControl.Resources>
+        <Style x:Key="PremiumThinkingExpanderStyle" TargetType="Expander">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Expander">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <ToggleButton Grid.Row="0"
+                                          IsChecked="{Binding IsExpanded, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                          OverridesDefaultStyle="True" Background="Transparent" 
+                                          Foreground="{TemplateBinding Foreground}"
+                                          Cursor="Hand">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="Transparent" Padding="0,5">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Path x:Name="Arrow" Data="M 1,2 L 5,6 L 9,2" 
+                                                      Stroke="{TemplateBinding Foreground}" StrokeThickness="1.5" 
+                                                      HorizontalAlignment="Center" VerticalAlignment="Center" 
+                                                      RenderTransformOrigin="0.5,0.5" Width="10" Height="8" Margin="0,0,8,0">
+                                                    <Path.RenderTransform>
+                                                        <RotateTransform Angle="-90"/>
+                                                    </Path.RenderTransform>
+                                                </Path>
+                                                <ContentPresenter Content="{TemplateBinding Content}" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Trigger.EnterActions>
+                                                    <BeginStoryboard>
+                                                        <Storyboard>
+                                                            <DoubleAnimation Storyboard.TargetName="Arrow" Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" To="0" Duration="0:0:0.25">
+                                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                                            </DoubleAnimation>
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </Trigger.EnterActions>
+                                                <Trigger.ExitActions>
+                                                    <BeginStoryboard>
+                                                        <Storyboard>
+                                                            <DoubleAnimation Storyboard.TargetName="Arrow" Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" To="-90" Duration="0:0:0.25">
+                                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                                            </DoubleAnimation>
+                                                        </Storyboard>
+                                                    </BeginStoryboard>
+                                                </Trigger.ExitActions>
+                                            </Trigger>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Arrow" Property="Opacity" Value="0.8"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                                <ContentPresenter Content="{TemplateBinding Header}"/>
+                            </ToggleButton>
+
+                            <Border x:Name="ExpandSite" Grid.Row="1" Opacity="0">
+                                <Border.LayoutTransform>
+                                    <ScaleTransform ScaleY="0" />
+                                </Border.LayoutTransform>
+                                <Border.RenderTransform>
+                                    <TranslateTransform Y="-10"/>
+                                </Border.RenderTransform>
+                                
+                                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" 
+                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}" 
+                                                  Focusable="false" />
+                            </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsExpanded" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(FrameworkElement.LayoutTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.3">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.3">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="0" Duration="0:0:0.3">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(FrameworkElement.LayoutTransform).(ScaleTransform.ScaleY)" To="0" Duration="0:0:0.2">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseIn"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.2">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseIn"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="-10" Duration="0:0:0.2">
+                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseIn"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
 
     <Grid>
         <Grid.ColumnDefinitions>
@@ -309,14 +424,15 @@
                                                   Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
                                         </Grid>
                                     </Button>
-                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource UserBubbleTextBrush}"/>
+                                     <mdxam:MarkdownScrollViewer Markdown="{Binding Content}" Foreground="{DynamicResource UserBubbleTextBrush}" 
+                                                                 HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled" Margin="0" Padding="0"/>
                                 </DockPanel>
                             </Border>
 
                             <!-- Thought (Thinking) Message -->
                             <Border CornerRadius="7" Padding="0" MaxWidth="600" HorizontalAlignment="Left" Margin="0,5"
                                     Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=thought}">
-                                <Expander Header="Thinking Process" IsExpanded="{Binding IsThinkingExpanded}" 
+                                <Expander Style="{StaticResource PremiumThinkingExpanderStyle}" Header="Thinking Process" IsExpanded="{Binding IsThinkingExpanded}" 
                                           Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Width="600">
                                     <Border Background="{DynamicResource ThinkingBubbleBackgroundBrush}" 
                                             BorderBrush="{DynamicResource ThinkingBubbleBorderBrush}" BorderThickness="1" 
@@ -369,7 +485,8 @@
                                         </Grid>
                                     </Button>
                                     <StackPanel>
-                                        <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                        <mdxam:MarkdownScrollViewer Markdown="{Binding Content}" Foreground="{DynamicResource TextPrimaryBrush}" 
+                                                                    HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled" Margin="0" Padding="0"/>
                                         
                                         <!-- Tool Calls indicator inside assistant -->
                                         <ItemsControl ItemsSource="{Binding ToolCalls}" Margin="0,5,0,0">

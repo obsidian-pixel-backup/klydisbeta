@@ -112,7 +112,7 @@ public partial class ChatViewModel : ObservableObject
 
         if (Sessions.Count > 0)
         {
-            await SelectSessionAsync(Sessions[0]);
+            SelectedSession = Sessions[0];
         }
         else
         {
@@ -425,7 +425,7 @@ public partial class ChatViewModel : ObservableObject
         Sessions.Remove(session);
         if (Sessions.Count > 0)
         {
-            await SelectSessionAsync(Sessions[0]);
+            SelectedSession = Sessions[0];
         }
         else
         {

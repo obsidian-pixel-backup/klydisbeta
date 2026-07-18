@@ -36,6 +36,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     private readonly ILogger<InferenceEngine> _logger;
     private LLamaWeights? _weights;
     private LLamaContext? _context;
+    private ModelParams? _modelParams;
     private InteractiveExecutor? _executor;
     private string _lastEvaluatedPrompt = string.Empty;
 
@@ -108,6 +109,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
             parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
             parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
 
+            _modelParams = parameters;
             _weights = LLamaWeights.LoadFromFile(parameters);
             _context = _weights.CreateContext(parameters);
             
@@ -159,6 +161,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 else
                 {
                     _logger.LogDebug("Slow-path inference triggered. Re-evaluating entire prompt.");
+                    _context.Dispose();
+                    _context = _weights.CreateContext(_modelParams!);
                     _executor = new InteractiveExecutor(_context); // Reset the executor state
                     _lastEvaluatedPrompt = string.Empty;
                 }
