@@ -1,0 +1,165 @@
+<UserControl x:Class="Klydis.App.Views.ModelLibraryView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
+             mc:Ignorable="d" 
+             d:DesignHeight="800" d:DesignWidth="1000">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="20">
+            <!-- Header -->
+            <Grid Margin="0,0,0,20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="200" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Model Library" FontSize="28" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" />
+                <Button Grid.Column="2" Content="🔄 Scan" Command="{Binding ScanCommand}" Margin="0,0,20,0" Style="{StaticResource SecondaryButton}" />
+                <StackPanel Grid.Column="3" VerticalAlignment="Center">
+                    <TextBlock Text="VRAM Usage" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" />
+                    <ProgressBar Minimum="0" Maximum="100" Value="{Binding VramUsagePercent}" Height="10" Margin="0,5,0,0"
+                                 Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" />
+                </StackPanel>
+            </Grid>
+
+            <!-- Local Models Section -->
+            <TextBlock Text="Local Models" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10" />
+            <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" 
+                     Margin="0,0,0,20"
+                     Tag="Search local models..." />
+
+            <ItemsControl ItemsSource="{Binding FilteredModels}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <UniformGrid Columns="2" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type viewmodels:ModelCardViewModel}">
+                        <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Margin="10" Padding="15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                            <StackPanel>
+                                <Grid>
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" FontSize="16" Foreground="{DynamicResource TextPrimaryBrush}" />
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                        <Border Background="{DynamicResource AccentPrimaryBrush}" CornerRadius="7" Padding="5,2" Margin="0,0,5,0">
+                                            <TextBlock Text="{Binding ParameterSize}" FontSize="11" Foreground="{DynamicResource TextInverse}" />
+                                        </Border>
+                                        <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="7" Padding="5,2">
+                                            <TextBlock Text="{Binding QuantType}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" />
+                                        </Border>
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock Text="{Binding Architecture}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,5,0,0" />
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <TextBlock Text="{Binding FileSizeGb}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,15,0" />
+                                    <TextBlock Text="{Binding Source}" Foreground="{DynamicResource TextSecondaryBrush}" />
+                                </StackPanel>
+                                <Grid Margin="0,15,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- Add a style for hover effect inside the border via trigger if desired, omitted for brevity -->
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <!-- Simulating green check or red warning depending on fit -->
+                                        <TextBlock Text="✓ Fits in VRAM" Foreground="{DynamicResource SuccessBrush}" 
+                                                   Visibility="{Binding CanFitInVram, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                        <TextBlock Text="⚠ Exceeds VRAM" Foreground="{DynamicResource ErrorBrush}" 
+                                                   Visibility="{Binding CanFitInVram, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
+                                    </StackPanel>
+                                    
+                                    <Button Grid.Column="1" Content="Load" Command="{Binding DataContext.LoadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding ModelId}"
+                                            Style="{StaticResource PrimaryButton}"
+                                            Visibility="{Binding IsLoaded, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
+                                    <Button Grid.Column="1" Content="Unload" Command="{Binding DataContext.UnloadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                            Style="{StaticResource SecondaryButton}"
+                                            Visibility="{Binding IsLoaded, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <!-- Note: You'd need a real converter here like ZeroToVisibilityConverter -->
+            <TextBlock Text="No models found. Download models from Hugging Face below." 
+                       Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" Margin="10"
+                       Visibility="{Binding FilteredModels.Count, Converter={StaticResource BooleanToVisibilityConverter}}" />
+
+            <Border Height="1" Background="{DynamicResource BorderBrush}" Margin="0,30" />
+
+            <!-- Hugging Face Section -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                <TextBlock Text="🤗" FontSize="20" Margin="0,0,10,0" />
+                <TextBlock Text="Download Models" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" />
+            </StackPanel>
+            
+            <Grid Margin="0,0,0,20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox Text="{Binding HfSearchText, UpdateSourceTrigger=PropertyChanged}" 
+                         Tag="Search Hugging Face for GGUF models..." />
+                <Button Grid.Column="1" Content="Search" Command="{Binding HfSearchCommand}" Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" />
+            </Grid>
+
+            <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="15" Margin="0,0,0,20"
+                    Visibility="{Binding IsDownloading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding DownloadStatus}" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,5" />
+                    <ProgressBar Minimum="0" Maximum="100" Value="{Binding DownloadProgress}" Height="10"
+                                 Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" />
+                </StackPanel>
+            </Border>
+
+            <ItemsControl ItemsSource="{Binding HfResults}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type viewmodels:HfModelCardViewModel}">
+                        <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Margin="0,0,0,10" Padding="15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding RepoId}" FontWeight="Bold" FontSize="16" Foreground="{DynamicResource TextPrimaryBrush}" />
+                                        <TextBlock Text="{Binding Author}" Foreground="{DynamicResource TextSecondaryBrush}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <TextBlock Text="{Binding Downloads, StringFormat='⬇ {0}'}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,15,0" />
+                                        <TextBlock Text="{Binding Likes, StringFormat='♥ {0}'}" Foreground="{DynamicResource TextSecondaryBrush}" />
+                                    </StackPanel>
+                                </Grid>
+                                <!-- Expandable file list simplified -->
+                                <ItemsControl ItemsSource="{Binding GgufFiles}" Margin="0,15,0,0">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,5">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding FileName}" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,10,0" />
+                                                    <TextBlock Text="{Binding Size}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,10,0" />
+                                                    <TextBlock Text="{Binding QuantType}" Foreground="{DynamicResource TextSecondaryBrush}" />
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Content="Download" Style="{StaticResource SecondaryButton}"
+                                                        Command="{Binding DataContext.DownloadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" 
+                                                        CommandParameter="{Binding}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

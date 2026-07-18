@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Klydis.Core</RootNamespace>
+    <AssemblyName>Klydis.Core</AssemblyName>
+    <Description>Klydis Core - Self-contained LLM inference engine with zero external dependencies</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- In-process GGUF inference - replaces Ollama entirely -->
+    <PackageReference Include="LLamaSharp" Version="0.27.0" />
+    <PackageReference Include="LLamaSharp.Backend.Cuda12" Version="0.27.0" />
+    <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.27.0" />
+    
+    <!-- SQLite for message/session storage -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    
+    <!-- Structured logging -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+    
+    <!-- WMI for system profiling (Windows) -->
+    <PackageReference Include="System.Management" Version="10.0.10" />
+  </ItemGroup>
+
+</Project>

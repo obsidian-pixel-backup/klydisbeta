@@ -1,0 +1,44 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="ThemeColors.xaml" />
+    </ResourceDictionary.MergedDictionaries>
+
+    <!-- Strict Backgrounds - ALL Blue Charcoal -->
+    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="SidebarBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="TitleBarBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="StatusBarBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="BackgroundTertiary" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="InputBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="ButtonBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    
+    <!-- Border Brush for Separation - Thin Air for subtle, Fluorescent Blue for strong -->
+    <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource ColorThinAir}" />
+    <SolidColorBrush x:Key="BorderBrushStrong" Color="{StaticResource ColorFluorescentBlue}" />
+    
+    <!-- Fonts - Thin Air -->
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="{StaticResource ColorThinAir}" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="{StaticResource ColorThinAir}" />
+    <SolidColorBrush x:Key="TextInverse" Color="{StaticResource ColorBlueCharcoal}" />
+    
+    <!-- Accents - Fluorescent Blue -->
+    <SolidColorBrush x:Key="AccentPrimaryBrush" Color="{StaticResource ColorFluorescentBlue}" />
+    <SolidColorBrush x:Key="AccentSecondaryBrush" Color="{StaticResource ColorFluorescentBlue}" />
+    
+    <!-- Chat Bubbles -->
+    <SolidColorBrush x:Key="UserBubbleBackgroundBrush" Color="{StaticResource ColorFluorescentBlue}" />
+    <SolidColorBrush x:Key="UserBubbleTextBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    
+    <SolidColorBrush x:Key="AssistantBubbleBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="AssistantBubbleBorderBrush" Color="{StaticResource ColorFluorescentBlue}" />
+    <SolidColorBrush x:Key="ThinkingBubbleBackgroundBrush" Color="{StaticResource ColorBlueCharcoal}" />
+    <SolidColorBrush x:Key="ThinkingBubbleBorderBrush" Color="{StaticResource ColorThinAir}" />
+
+    <!-- Utilities -->
+    <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource ColorSuccess}" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ColorError}" />
+
+</ResourceDictionary>

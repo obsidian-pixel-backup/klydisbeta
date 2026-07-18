@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <StartupObject>Klydis.App.Program</StartupObject>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Klydis.App</RootNamespace>
+    <AssemblyName>Klydis</AssemblyName>
+    <Description>Klydis - Self-contained local LLM orchestrator with premium UI</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Klydis.Core\Klydis.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Dependency injection -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.10" />
+    
+    <!-- MVVM support -->
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    
+    <!-- Markdown rendering -->
+    <PackageReference Include="Markdig" Version="0.40.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="runtimes\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

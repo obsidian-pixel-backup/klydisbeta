@@ -1,0 +1,118 @@
+<UserControl x:Class="Klydis.App.Views.SystemMonitorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
+             mc:Ignorable="d" 
+             d:DesignHeight="800" d:DesignWidth="1000">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="20">
+            <TextBlock Text="System Monitor" FontSize="28" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,20" />
+
+            <Grid Margin="0,0,0,20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- GPU Section -->
+                <Border Grid.Column="0" Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Margin="0,0,10,0" Padding="15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="GPU" FontWeight="SemiBold" FontSize="18" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10" />
+                        <TextBlock Text="{Binding GpuName}" FontSize="16" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,15" />
+                        
+                        <TextBlock Text="VRAM Usage" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,0,5" />
+                        <ProgressBar Minimum="0" Maximum="{Binding VramTotalMb}" Value="{Binding VramUsedMb}" Height="15" Margin="0,0,0,5"
+                                     Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" />
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
+                            <TextBlock Text="{Binding VramUsedMb}" Foreground="{DynamicResource TextPrimaryBrush}" />
+                            <TextBlock Text=" / " Foreground="{DynamicResource TextSecondaryBrush}" />
+                            <TextBlock Text="{Binding VramTotalMb}" Foreground="{DynamicResource TextSecondaryBrush}" />
+                            <TextBlock Text=" MB" Foreground="{DynamicResource TextSecondaryBrush}" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Temperature: " Foreground="{DynamicResource TextSecondaryBrush}" />
+                            <TextBlock Text="{Binding GpuTemperature}" Foreground="{DynamicResource TextPrimaryBrush}" />
+                            <TextBlock Text=" °C" Foreground="{DynamicResource TextPrimaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- CPU and RAM Section -->
+                <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                    <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Margin="0,0,0,10" Padding="15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                        <StackPanel>
+                            <TextBlock Text="CPU" FontWeight="SemiBold" FontSize="18" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10" />
+                            <TextBlock Text="{Binding CpuName}" FontSize="16" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,15" />
+                            
+                            <TextBlock Text="Usage" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,0,5" />
+                            <ProgressBar Minimum="0" Maximum="100" Value="{Binding CpuUsagePercent}" Height="15" Margin="0,0,0,5"
+                                         Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                        <StackPanel>
+                            <TextBlock Text="RAM" FontWeight="SemiBold" FontSize="18" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10" />
+                            <ProgressBar Minimum="0" Maximum="{Binding RamTotalGb}" Value="{Binding RamUsedGb}" Height="15" Margin="0,0,0,5"
+                                         Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" />
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding RamUsedGb, StringFormat={}{0:F1}}" Foreground="{DynamicResource TextPrimaryBrush}" />
+                                <TextBlock Text=" / " Foreground="{DynamicResource TextSecondaryBrush}" />
+                                <TextBlock Text="{Binding RamTotalGb, StringFormat={}{0:F1}}" Foreground="{DynamicResource TextSecondaryBrush}" />
+                                <TextBlock Text=" GB System Total" Foreground="{DynamicResource TextSecondaryBrush}" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                <TextBlock Text="{Binding AppRamUsedMb}" Foreground="{DynamicResource TextPrimaryBrush}" />
+                                <TextBlock Text=" MB App (Model) Usage" Foreground="{DynamicResource TextSecondaryBrush}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+
+            <!-- Performance Section -->
+            <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Margin="0,0,0,20" Padding="15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                <StackPanel>
+                    <TextBlock Text="Performance" FontWeight="SemiBold" FontSize="18" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,15" />
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding CurrentTokensPerSecond, StringFormat={}{0:F2}}" FontSize="36" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" />
+                        <TextBlock Text=" tokens/sec" FontSize="16" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Bottom" Margin="10,0,0,6" />
+                    </StackPanel>
+                    
+                    <ItemsControl ItemsSource="{Binding TokensPerSecondHistory}" Height="60" Margin="0,15,0,0">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <UniformGrid Rows="1" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="{DynamicResource AccentPrimaryBrush}" Opacity="0.5" VerticalAlignment="Bottom" 
+                                        Height="{Binding}" Margin="1,0" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- Active Models Section -->
+            <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                <StackPanel>
+                    <TextBlock Text="Active Models" FontWeight="SemiBold" FontSize="18" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,15" />
+                    <ItemsControl ItemsSource="{Binding LoadedModels}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="7" Padding="10" Margin="0,0,0,5">
+                                    <TextBlock Text="{Binding}" Foreground="{DynamicResource TextPrimaryBrush}" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

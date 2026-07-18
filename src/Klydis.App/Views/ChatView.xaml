@@ -1,0 +1,204 @@
+<UserControl x:Class="Klydis.App.Views.ChatView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
+             mc:Ignorable="d" 
+             d:DesignHeight="600" d:DesignWidth="800"
+             Background="{DynamicResource PanelBackgroundBrush}">
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="250"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Session List Panel -->
+        <Border Grid.Column="0" Background="{DynamicResource SidebarBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <Button Margin="10" Padding="8" Command="{Binding CreateNewSessionCommand}" Background="{DynamicResource ButtonBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="+" Margin="0,0,8,0" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                        <TextBlock Text="New Chat"/>
+                    </StackPanel>
+                </Button>
+
+                <ListBox Grid.Row="1" ItemsSource="{Binding Sessions}" SelectedItem="{Binding SelectedSession}" Background="Transparent" BorderThickness="0" Margin="0,0,0,10">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="10,8" Margin="5,2" Background="Transparent" BorderThickness="3,0,0,0" BorderBrush="Transparent">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding Title}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding LastMessagePreview}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                                <Border.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Rename"/>
+                                        <MenuItem Header="Delete" Command="{Binding DataContext.DeleteSessionCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
+                                    </ContextMenu>
+                                </Border.ContextMenu>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Grid>
+        </Border>
+
+        <!-- Chat Area -->
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="50"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Top Bar -->
+            <Border Grid.Row="0" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Background="{DynamicResource PanelBackgroundBrush}">
+                <Grid Margin="15,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    
+                    <TextBlock Text="{Binding SessionTitle}" VerticalAlignment="Center" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <!-- Tokens per second removed from header -->
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Message List -->
+            <ListBox x:Name="MessagesList" Grid.Row="1" ItemsSource="{Binding Messages}" 
+                      Background="Transparent" BorderThickness="0" 
+                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                      VirtualizingPanel.IsVirtualizing="True"
+                      VirtualizingPanel.ScrollUnit="Pixel"
+                      Padding="0,0,0,80">
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="Focusable" Value="False"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListBoxItem">
+                                    <ContentPresenter/>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="15,10">
+                            <!-- User Message -->
+                            <Border CornerRadius="7,7,0,7" Padding="15,10" MaxWidth="600" HorizontalAlignment="Right"
+                                    Background="{DynamicResource UserBubbleBackgroundBrush}"
+                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=user}">
+                                <DockPanel LastChildFill="True">
+                                    <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}" 
+                                            Foreground="{DynamicResource UserBubbleTextBrush}" 
+                                            Style="{StaticResource ChatActionButtonStyle}" 
+                                            VerticalAlignment="Top" 
+                                            Margin="10,0,0,0" 
+                                            ToolTip="Copy message">
+                                        <Grid>
+                                            <Path Data="M 2,5 L 2,14 L 11,14 M 5,2 L 14,2 L 14,11 L 5,11 Z" 
+                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" 
+                                                  StrokeThickness="1.5" Width="14" Height="14" Stretch="Uniform" 
+                                                  Visibility="{Binding IsCopied, Converter={StaticResource InverseBoolToVisConverter}}"/>
+                                            <Path Data="M 3,8 L 6,11 L 13,3" 
+                                                  Stroke="{DynamicResource SuccessBrush}" 
+                                                  StrokeThickness="2" Width="14" Height="14" Stretch="Uniform" 
+                                                  Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
+                                        </Grid>
+                                    </Button>
+                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource UserBubbleTextBrush}"/>
+                                </DockPanel>
+                            </Border>
+
+                            <!-- Thought (Thinking) Message -->
+                            <Border CornerRadius="7" Padding="0" MaxWidth="600" HorizontalAlignment="Left" Margin="0,5"
+                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=thought}">
+                                <Expander Header="Thinking Process" IsExpanded="{Binding IsThinkingExpanded}" 
+                                          Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Width="600">
+                                    <Border Background="{DynamicResource ThinkingBubbleBackgroundBrush}" 
+                                            BorderBrush="{DynamicResource ThinkingBubbleBorderBrush}" BorderThickness="1" 
+                                            Padding="12,10" CornerRadius="7" Margin="0,5,0,0">
+                                        <TextBlock Text="{Binding Content}" FontStyle="Italic" TextWrapping="Wrap" 
+                                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                    </Border>
+                                </Expander>
+                            </Border>
+
+                            <!-- Assistant Message -->
+                            <Border CornerRadius="7,7,7,0" Padding="15,10" MaxWidth="600" HorizontalAlignment="Left"
+                                    Background="{DynamicResource AssistantBubbleBackgroundBrush}"
+                                    BorderThickness="0"
+                                    Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=assistant}">
+                                <DockPanel LastChildFill="True">
+                                    <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}" 
+                                            Foreground="{DynamicResource TextSecondaryBrush}" 
+                                            Style="{StaticResource ChatActionButtonStyle}" 
+                                            VerticalAlignment="Top" 
+                                            Margin="10,0,0,0" 
+                                            ToolTip="Copy message">
+                                        <Grid>
+                                            <Path Data="M 2,5 L 2,14 L 11,14 M 5,2 L 14,2 L 14,11 L 5,11 Z" 
+                                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" 
+                                                  StrokeThickness="1.5" Width="14" Height="14" Stretch="Uniform" 
+                                                  Visibility="{Binding IsCopied, Converter={StaticResource InverseBoolToVisConverter}}"/>
+                                            <Path Data="M 3,8 L 6,11 L 13,3" 
+                                                  Stroke="{DynamicResource SuccessBrush}" 
+                                                  StrokeThickness="2" Width="14" Height="14" Stretch="Uniform" 
+                                                  Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
+                                        </Grid>
+                                    </Button>
+                                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                </DockPanel>
+                            </Border>
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+
+            <!-- Input Area -->
+            <Border Grid.Row="2" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="15">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    
+                    <ComboBox Grid.Column="0" VerticalAlignment="Bottom" Width="220" Margin="0,0,10,0" Height="40"
+                              ItemsSource="{Binding AvailableModels}" SelectedItem="{Binding SelectedModelId}" 
+                              Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    
+                    <TextBox x:Name="InputTextBox" Grid.Column="1" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                             MinLines="1" MaxLines="5" TextWrapping="Wrap" AcceptsReturn="True" 
+                             PreviewKeyDown="InputTextBox_PreviewKeyDown"
+                             Background="{DynamicResource InputBackgroundBrush}" 
+                             Foreground="{DynamicResource TextPrimaryBrush}" 
+                             BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
+                             Padding="10" VerticalContentAlignment="Center"
+                             VerticalScrollBarVisibility="Auto"/>
+                    
+                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0">
+                        <TextBlock Text="➤" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Button>
+
+                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="#E81123" BorderThickness="0">
+                        <TextBlock Text="■" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Button>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

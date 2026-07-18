@@ -1,0 +1,35 @@
+<Application x:Class="Klydis.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:converters="clr-namespace:Klydis.App.Converters"
+             xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
+             xmlns:views="clr-namespace:Klydis.App.Views">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/ThemeStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <converters:EnumToBooleanConverter x:Key="EnumToBooleanConverter" />
+            <converters:BoolToColorConverter x:Key="BoolToColorConverter" />
+            <converters:RoleToVisibilityConverter x:Key="RoleToVisibilityConverter" />
+            <converters:StringToVisibilityConverter x:Key="StringToVisibilityConverter" />
+            <converters:BoolToVisConverter x:Key="BoolToVisConverter" />
+            <converters:InverseBoolToVisConverter x:Key="InverseBoolToVisConverter" />
+            <converters:BoolToVisConverter x:Key="BooleanToVisibilityConverter" />
+            <converters:InverseBoolToVisConverter x:Key="InverseBooleanToVisibilityConverter" />
+            
+            <!-- View to ViewModel Bindings -->
+            <DataTemplate DataType="{x:Type viewmodels:ChatViewModel}">
+                <views:ChatView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type viewmodels:ModelLibraryViewModel}">
+                <views:ModelLibraryView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type viewmodels:SystemMonitorViewModel}">
+                <views:SystemMonitorView />
+            </DataTemplate>
+            <!-- Add SettingsView when created -->
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

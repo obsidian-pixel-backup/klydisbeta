@@ -1,0 +1,88 @@
+# ============================================
+# .NET / C# / Visual Studio .gitignore
+# ============================================
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio cache/options directory
+.vs/
+
+# MSTest test Results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# NuGet Packages
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+# Rider
+.idea/
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+*.dll
+*.exe
+*.pdb
+*.cache
+*.ilk
+*.lib
+*.obj
+*.so
+*.dylib
+
+# NuGet
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# ASP.NET
+ScaffoldingReadMe.txt
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Application logs
+*.log
+fatal_error.txt
+hard_log.txt
+llama_native.log
+
+# GGUF model files (large binary models)
+*.gguf
+
+# Native runtime binaries (downloaded via NuGet or manually)
+**/runtimes/**/native/**/*.dll
+**/runtimes/**/native/**/*.so
+**/runtimes/**/native/**/*.dylib
+
+# Publish output
+publish/
