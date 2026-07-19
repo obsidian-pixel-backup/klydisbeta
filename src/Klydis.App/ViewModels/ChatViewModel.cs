@@ -742,7 +742,10 @@ public partial class ChatViewModel : ObservableObject
                     Timestamp = msg.Timestamp
                 });
             }
-            chatEngineMessages.Add(new ChatMessage(msg.Role, msg.Content));
+            if (!msg.IsConsolidated)
+            {
+                chatEngineMessages.Add(new ChatMessage(msg.Role, msg.Content));
+            }
         }
         
         _chatEngine?.LoadHistory(chatEngineMessages, Guid.Parse(session.Id));

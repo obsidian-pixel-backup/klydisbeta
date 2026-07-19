@@ -62,6 +62,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     public bool IsModelLoaded => _weights != null && _context != null;
 
     /// <summary>
+    /// Gets the loaded context size budget.
+    /// </summary>
+    public uint ContextSize => _modelParams?.ContextSize ?? 4096;
+
+    /// <summary>
     /// Gets the path of the currently loaded model.
     /// </summary>
     public string? CurrentModelPath { get; private set; }

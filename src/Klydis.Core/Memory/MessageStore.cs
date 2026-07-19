@@ -33,7 +33,8 @@ public record MessageRecord(
     string Content,
     DateTime Timestamp,
     int TokenCount,
-    string? ToolCallsJson
+    string? ToolCallsJson,
+    bool IsConsolidated = false
 );
 
 /// <summary>
@@ -109,6 +110,7 @@ public class MessageStore
                 timestamp TEXT NOT NULL,
                 token_count INTEGER DEFAULT 0,
                 tool_calls_json TEXT,
+                is_consolidated INTEGER DEFAULT 0,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
@@ -142,6 +144,17 @@ public class MessageStore
         {
             await using var alterCmd = connection.CreateCommand();
             alterCmd.CommandText = "ALTER TABLE sessions ADD COLUMN is_pinned INTEGER DEFAULT 0;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
+
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE messages ADD COLUMN is_consolidated INTEGER DEFAULT 0;";
             await alterCmd.ExecuteNonQueryAsync();
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
@@ -287,8 +300,8 @@ public class MessageStore
         
         await using var command = connection.CreateCommand();
         command.CommandText = @"
-            INSERT INTO messages (session_id, role, content, timestamp, token_count, tool_calls_json)
-            VALUES (@sessionId, @role, @content, @timestamp, @tokenCount, @toolCallsJson);
+            INSERT INTO messages (session_id, role, content, timestamp, token_count, tool_calls_json, is_consolidated)
+            VALUES (@sessionId, @role, @content, @timestamp, @tokenCount, @toolCallsJson, 0);
             
             UPDATE sessions SET updated_at = @timestamp WHERE id = @sessionId;
         ";
@@ -380,6 +393,7 @@ public class MessageStore
             
         command.Parameters.AddWithValue("@sessionId", sessionId);
         command.Parameters.AddWithValue("@query", query);
+        command.Parameters.AddWithValue("@topK", topK);
         
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -488,7 +502,29 @@ public class MessageStore
             Content: reader.GetString(reader.GetOrdinal("content")),
             Timestamp: DateTime.Parse(reader.GetString(reader.GetOrdinal("timestamp"))),
             TokenCount: reader.GetInt32(reader.GetOrdinal("token_count")),
-            ToolCallsJson: reader.IsDBNull(reader.GetOrdinal("tool_calls_json")) ? null : reader.GetString(reader.GetOrdinal("tool_calls_json"))
+            ToolCallsJson: reader.IsDBNull(reader.GetOrdinal("tool_calls_json")) ? null : reader.GetString(reader.GetOrdinal("tool_calls_json")),
+            IsConsolidated: !reader.IsDBNull(reader.GetOrdinal("is_consolidated")) && reader.GetInt32(reader.GetOrdinal("is_consolidated")) == 1
         );
+    }
+
+    /// <summary>
+    /// Marks a list of messages as consolidated in the database.
+    /// </summary>
+    public async Task MarkMessagesAsConsolidatedAsync(IEnumerable<int> messageIds)
+    {
+        if (messageIds == null || !messageIds.Any()) return;
+
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE messages SET is_consolidated = 1 WHERE id = @id";
+        var idParam = command.Parameters.Add("@id", SqliteType.Integer);
+        
+        foreach (var id in messageIds)
+        {
+            idParam.Value = id;
+            await command.ExecuteNonQueryAsync();
+        }
     }
 }

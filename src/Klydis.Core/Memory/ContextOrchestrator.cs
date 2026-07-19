@@ -18,8 +18,6 @@ namespace Klydis.Core.Memory
     {
         private readonly MessageStore _store;
         private readonly IInferenceEngine _inferenceEngine;
-        private readonly Klydis.Core.Inference.ModelPool _modelPool;
-        private readonly Klydis.Core.Models.ModelRegistry _modelRegistry;
         private readonly ILogger<ContextOrchestrator> _logger;
 
         /// <summary>
@@ -28,14 +26,10 @@ namespace Klydis.Core.Memory
         public ContextOrchestrator(
             MessageStore store, 
             IInferenceEngine inferenceEngine, 
-            Klydis.Core.Inference.ModelPool modelPool,
-            Klydis.Core.Models.ModelRegistry modelRegistry,
             ILogger<ContextOrchestrator> logger)
         {
             _store = store;
             _inferenceEngine = inferenceEngine;
-            _modelPool = modelPool;
-            _modelRegistry = modelRegistry;
             _logger = logger;
         }
 
@@ -113,24 +107,6 @@ namespace Klydis.Core.Memory
             return promptBuilder.ToString();
         }
 
-        private async Task<IInferenceEngine> GetFastEngineAsync()
-        {
-            // Try to find the smallest model by file size for fast intermediary tasks
-            var fastModel = _modelRegistry.GetAllModels()
-                .Where(m => m.FileSizeBytes > 0)
-                .OrderBy(m => m.FileSizeBytes)
-                .FirstOrDefault();
-
-            if (fastModel != null)
-            {
-                _logger.LogInformation("Routing task to Fast Model: {ModelName}", fastModel.DisplayName);
-                return await _modelPool.EnsureLoadedAsync(fastModel.Id);
-            }
-            
-            _logger.LogInformation("No fast model found in registry. Falling back to primary engine.");
-            return _inferenceEngine;
-        }
-
         /// <summary>
         /// Consolidates older, archived messages into a compact world state using the inference engine.
         /// </summary>
@@ -140,11 +116,18 @@ namespace Klydis.Core.Memory
             if (session == null) return;
 
             var messages = await _store.GetMessagesAsync(sessionId, null);
+            var unconsolidated = messages.Where(m => !m.IsConsolidated).ToList();
 
             // Simple heuristic to identify overflow. You could also keep track of what was last summarized.
-            var (_, overflow) = PartitionContext(messages, 2048); // Arbitrary context budget for memory
+            var (_, overflow) = PartitionContext(unconsolidated, 2048); // Arbitrary context budget for memory
 
             if (overflow.Count == 0) return;
+
+            if (!_inferenceEngine.IsModelLoaded)
+            {
+                _logger.LogWarning("Consolidation skipped: No model is currently loaded in the primary engine.");
+                return;
+            }
 
             _logger.LogInformation("Consolidating {Count} messages into world state for session {SessionId}", overflow.Count, sessionId);
 
@@ -152,11 +135,10 @@ namespace Klydis.Core.Memory
             
             string summarizationPrompt = $"Current World State:\n{session.WorldState ?? "None"}\n\nNew Interactions to incorporate:\n{textToSummarize}\n\nTask: Update the World State to concisely reflect these new interactions without losing crucial long-term information. Respond with ONLY the new updated world state text.";
 
-            // Phase 2: Route task to a faster/smaller model to avoid blocking the massive UI model
-            var engine = await GetFastEngineAsync();
-            string newWorldState = await engine.GenerateTextAsync(summarizationPrompt);
+            string newWorldState = await _inferenceEngine.GenerateTextAsync(summarizationPrompt);
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
+            await _store.MarkMessagesAsConsolidatedAsync(overflow.Select(m => m.Id));
         }
 
         /// <summary>

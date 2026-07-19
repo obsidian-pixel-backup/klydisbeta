@@ -40,6 +40,16 @@ public interface IInferenceEngine
     /// Architecture of the loaded model.
     /// </summary>
     string Architecture { get; }
+
+    /// <summary>
+    /// Indicates whether a model is currently loaded.
+    /// </summary>
+    bool IsModelLoaded { get; }
+
+    /// <summary>
+    /// The loaded context size budget of the model.
+    /// </summary>
+    uint ContextSize { get; }
     
     /// <summary>
     /// Streams tokens for a given prompt.
@@ -57,6 +67,7 @@ public class ChatEngine(
     PromptTemplateEngine promptEngine,
     ToolExecutor toolExecutor,
     Klydis.Core.Memory.MessageStore messageStore,
+    Klydis.Core.Memory.ContextOrchestrator contextOrchestrator,
     ILogger<ChatEngine> logger)
 {
     private readonly List<ChatMessage> _history = new();
@@ -150,7 +161,14 @@ public class ChatEngine(
         [EnumeratorCancellation] CancellationToken ct)
     {
         var templateType = promptEngine.DetectTemplate(inferenceEngine.Architecture);
-        var stopTokens = promptEngine.GetStopTokens(templateType);
+        var nativeStopTokens = promptEngine.GetStopTokens(templateType);
+        var stopTokensList = new List<string>(nativeStopTokens)
+        {
+            "</tool_call>",
+            "</|tool_call|>",
+            "<|/tool_call|>"
+        };
+        var stopTokens = stopTokensList.ToArray();
         var tools = await toolExecutor.GetToolDefinitionsAsync();
         var toolsSchema = toolExecutor.FormatToolsForPrompt(tools);
 
@@ -161,15 +179,65 @@ public class ChatEngine(
         {
             iterationCount++;
             
-        var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nIMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING:\n1. If you need to think or plan, use <think>...</think> tags FIRST.\n2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.\n3. To use a tool, output a JSON block exactly like this: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>\n4. You can provide normal text context before or after tool calls, but keep it outside of think tags.\n5. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.\n6. DO NOT repeat the exact same tool call if it just failed or returned an error. Adjust your approach or ask the user for help.";
-        var messages = new List<ChatMessage> { new(ChatRole.System, sysPrompt) };
-        messages.AddRange(_history);
+        var session = await messageStore.GetSessionAsync(CurrentSessionId.ToString());
+        var worldStateHeader = (session != null && !string.IsNullOrWhiteSpace(session.WorldState))
+            ? $"\n\nLong-term Memory / World State (summarized older context):\n{session.WorldState}"
+            : "";
 
-        var prompt = promptEngine.ApplyTemplate(messages, templateType);
+        var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nIMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING:\n1. If you need to think or plan, use <think>...</think> tags FIRST.\n2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.\n3. To use a tool, output a JSON block exactly like this: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>\n4. You can provide normal text context before or after tool calls, but keep it outside of think tags.\n5. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.\n6. DO NOT repeat the exact same tool call if it just failed or returned an error. Adjust your approach or ask the user for help.{worldStateHeader}";
+        
+        var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
         
         // Calculate system prompt size for context shifting (TokensKeep)
-        var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { new(ChatRole.System, sysPrompt) }, templateType);
+        var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType);
         int sysPromptTokens = inferenceEngine.GetTokenCount(sysOnlyPrompt);
+
+        // Sliding context window calculation
+        int maxBudget = (int)inferenceEngine.ContextSize;
+        int reservedForResponse = 2048; // Budget reserved for LLM response generation
+        int targetBudget = Math.Max(maxBudget - reservedForResponse, 1024);
+
+        var activeMessages = new List<ChatMessage>();
+        int currentTokens = sysPromptTokens;
+        bool hasDroppedMessages = false;
+
+        // Iterate backwards from the most recent history message
+        for (int i = _history.Count - 1; i >= 0; i--)
+        {
+            var msg = _history[i];
+            int msgTokens = inferenceEngine.GetTokenCount(msg.Content) + 20; // 20 tokens for formatting overhead
+            if (currentTokens + msgTokens <= targetBudget)
+            {
+                activeMessages.Insert(0, msg);
+                currentTokens += msgTokens;
+            }
+            else
+            {
+                hasDroppedMessages = true;
+                logger.LogInformation("Context limit reached. Dropping older message from active prompt.");
+            }
+        }
+
+        if (hasDroppedMessages)
+        {
+            // Trigger context consolidation in the background to summarize the dropped messages
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await contextOrchestrator.ConsolidateWorldStateAsync(CurrentSessionId.ToString());
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Failed to consolidate world state automatically.");
+                }
+            });
+        }
+
+        var messages = new List<ChatMessage> { sysPromptMsg };
+        messages.AddRange(activeMessages);
+
+        var prompt = promptEngine.ApplyTemplate(messages, templateType);
 
         var fullResponseBuilder = new StringBuilder();
         bool isThinking = false;
