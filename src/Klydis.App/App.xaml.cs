@@ -8,6 +8,7 @@ using Klydis.Core.Inference;
 using Klydis.Core.Chat;
 using Klydis.Core.Memory;
 using Klydis.App.ViewModels;
+using Klydis.App.Services;
 
 namespace Klydis.App;
 
@@ -49,6 +50,10 @@ public partial class App : Application
         ConfigureServices(serviceCollection);
 
         ServiceProvider = serviceCollection.BuildServiceProvider();
+
+        // Apply the persisted theme before any window is shown, so there is no
+        // flash of the default palette.
+        ServiceProvider.GetRequiredService<ThemeService>().LoadAndApplyPersistedTheme();
 
         try
         {
@@ -106,6 +111,7 @@ public partial class App : Application
         services.AddSingleton<GpuProfiler>();
         services.AddSingleton<SystemProfiler>();
         services.AddSingleton<OffloadStrategy>();
+        services.AddSingleton<ThemeService>();
 
         // ViewModels
         services.AddTransient<MainViewModel>();

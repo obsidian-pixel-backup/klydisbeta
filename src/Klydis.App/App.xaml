@@ -7,6 +7,12 @@
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
+                <!-- Index 0/1: active mode + accent, hot-swapped at runtime by ThemeService.
+                     Kept as two independent dictionaries so light/dark and the brand
+                     color can be chosen separately, mirroring Windows' own
+                     Mode / Themes split in Settings > Personalization. -->
+                <ResourceDictionary Source="Themes/Modes/Dark.xaml" />
+                <ResourceDictionary Source="Themes/Accents/FluorescentDark.xaml" />
                 <ResourceDictionary Source="Themes/ThemeStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
@@ -44,7 +50,9 @@
             <DataTemplate DataType="{x:Type viewmodels:SystemMonitorViewModel}">
                 <views:SystemMonitorView />
             </DataTemplate>
-            <!-- Add SettingsView when created -->
+            <DataTemplate DataType="{x:Type viewmodels:SettingsViewModel}">
+                <views:SettingsView />
+            </DataTemplate>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

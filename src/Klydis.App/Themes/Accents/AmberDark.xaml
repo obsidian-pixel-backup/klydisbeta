@@ -1,0 +1,14 @@
+﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Amber accent, Dark mode variant. Bright/vivid shade paired with the
+         dark-mode TextInverse (near-black), matching the brand bubble pairing. -->
+    <SolidColorBrush x:Key="AccentPrimaryBrush" Color="#FFC24B" />
+    <SolidColorBrush x:Key="AccentSecondaryBrush" Color="#FFE0A3" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#332711" />
+    <SolidColorBrush x:Key="BorderBrushStrong" Color="#FFC24B" />
+
+    <SolidColorBrush x:Key="UserBubbleBackgroundBrush" Color="#FFC24B" />
+    <SolidColorBrush x:Key="UserBubbleTextBrush" Color="#2B1D02" />
+
+</ResourceDictionary>

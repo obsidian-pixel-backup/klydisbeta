@@ -58,6 +58,17 @@ public partial class SystemMonitorViewModel : ObservableObject
     [ObservableProperty]
     private double _modelMemoryMb;
 
+    // "Normal" / "Warning" / "Critical" — drives the status bar text color via
+    // DataTriggers in MainWindow.xaml, so a maxed-out resource is visible at a glance.
+    [ObservableProperty]
+    private string _cpuSeverity = "Normal";
+
+    [ObservableProperty]
+    private string _ramSeverity = "Normal";
+
+    [ObservableProperty]
+    private string _vramSeverity = "Normal";
+
     public SystemMonitorViewModel(Klydis.Core.Hardware.SystemProfiler systemProfiler, Klydis.Core.Inference.InferenceEngine inferenceEngine)
     {
         _systemProfiler = systemProfiler;
@@ -89,6 +100,16 @@ public partial class SystemMonitorViewModel : ObservableObject
         RefreshCommand.Execute(null);
     }
 
+    // >=90% used is critical (red), >=70% is a warning (amber); below that is normal.
+    private static string ClassifySeverity(double used, double total)
+    {
+        if (total <= 0) return "Normal";
+        var ratio = used / total;
+        if (ratio >= 0.9) return "Critical";
+        if (ratio >= 0.7) return "Warning";
+        return "Normal";
+    }
+
     [RelayCommand]
     private async Task RefreshAsync()
     {
@@ -101,12 +122,15 @@ public partial class SystemMonitorViewModel : ObservableObject
             VramTotalMb = profile.Gpu.TotalVramMb;
             VramFreePercent = VramTotalMb > 0 ? 100.0 * (VramTotalMb - VramUsedMb) / VramTotalMb : 0;
             GpuTemperature = profile.Gpu.Temperature;
+            VramSeverity = ClassifySeverity(VramUsedMb, VramTotalMb);
         }
 
         CpuName = profile.System.CpuName;
         CpuUsagePercent = profile.System.CpuUsagePercent;
         RamTotalGb = profile.System.TotalRamGb;
         RamUsedGb = Math.Round(RamTotalGb - profile.System.AvailableRamGb, 2);
+        CpuSeverity = ClassifySeverity(CpuUsagePercent, 100.0);
+        RamSeverity = ClassifySeverity(RamUsedGb, RamTotalGb);
 
         using var process = System.Diagnostics.Process.GetCurrentProcess();
         AppRamUsedMb = (int)(process.WorkingSet64 / (1024 * 1024));

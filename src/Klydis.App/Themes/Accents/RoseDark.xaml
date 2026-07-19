@@ -1,0 +1,14 @@
+﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Rose accent, Dark mode variant. Bright/vivid shade paired with the
+         dark-mode TextInverse (near-black), matching the brand bubble pairing. -->
+    <SolidColorBrush x:Key="AccentPrimaryBrush" Color="#FF8FB3" />
+    <SolidColorBrush x:Key="AccentSecondaryBrush" Color="#FFCBDD" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#331420" />
+    <SolidColorBrush x:Key="BorderBrushStrong" Color="#FF8FB3" />
+
+    <SolidColorBrush x:Key="UserBubbleBackgroundBrush" Color="#FF8FB3" />
+    <SolidColorBrush x:Key="UserBubbleTextBrush" Color="#2B0A16" />
+
+</ResourceDictionary>

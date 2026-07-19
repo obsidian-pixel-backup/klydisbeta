@@ -1,0 +1,17 @@
+﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Violet accent, Light mode variant. Deepened shade so white
+         (TextInverse) text stays legible on accent-filled controls; hover is a
+         darker step (a safe direction that can only improve contrast further). -->
+    <SolidColorBrush x:Key="AccentPrimaryBrush" Color="#6A3FD1" />
+    <SolidColorBrush x:Key="AccentSecondaryBrush" Color="#5730A8" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#EDE7FB" />
+    <SolidColorBrush x:Key="BorderBrushStrong" Color="#6A3FD1" />
+
+    <!-- Bubble stays the theme's bright shade regardless of mode: it carries its
+         own background, so it reads fine on both a white and a dark page. -->
+    <SolidColorBrush x:Key="UserBubbleBackgroundBrush" Color="#B18CFF" />
+    <SolidColorBrush x:Key="UserBubbleTextBrush" Color="#1A0F33" />
+
+</ResourceDictionary>

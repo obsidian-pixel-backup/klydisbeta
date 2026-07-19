@@ -1,0 +1,14 @@
+﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Fluorescent accent, Dark mode variant. Bright/vivid shade paired with the
+         dark-mode TextInverse (near-black), matching the brand bubble pairing. -->
+    <SolidColorBrush x:Key="AccentPrimaryBrush" Color="#50E8F4" />
+    <SolidColorBrush x:Key="AccentSecondaryBrush" Color="#C7F8FE" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#093A45" />
+    <SolidColorBrush x:Key="BorderBrushStrong" Color="#50E8F4" />
+
+    <SolidColorBrush x:Key="UserBubbleBackgroundBrush" Color="#50E8F4" />
+    <SolidColorBrush x:Key="UserBubbleTextBrush" Color="#001619" />
+
+</ResourceDictionary>

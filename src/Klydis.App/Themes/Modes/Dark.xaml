@@ -1,0 +1,41 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Dark mode: neutrals only. Accent color lives in Themes/Accents/*Dark.xaml
+         and is merged alongside this at apply time, so any accent theme can be
+         combined with either mode. -->
+
+    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#001619" />
+    <SolidColorBrush x:Key="SidebarBackgroundBrush" Color="#032027" />
+    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#001619" />
+    <SolidColorBrush x:Key="TitleBarBackgroundBrush" Color="#001619" />
+    <SolidColorBrush x:Key="StatusBarBackgroundBrush" Color="#001619" />
+    <SolidColorBrush x:Key="BackgroundTertiary" Color="#032027" />
+    <SolidColorBrush x:Key="InputBackgroundBrush" Color="#032027" />
+    <SolidColorBrush x:Key="ButtonBackgroundBrush" Color="#062A33" />
+
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#032027" />
+    <SolidColorBrush x:Key="SurfaceElevatedBrush" Color="#062A33" />
+    <SolidColorBrush x:Key="SurfaceHoverBrush" Color="#0B3540" />
+
+    <SolidColorBrush x:Key="BorderBrush" Color="#0D3944" />
+    <SolidColorBrush x:Key="BorderMidBrush" Color="#17545F" />
+
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#C7F8FE" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#8FC9D3" />
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#578E9B" />
+    <SolidColorBrush x:Key="TextInverse" Color="#001619" />
+
+    <SolidColorBrush x:Key="AssistantBubbleBackgroundBrush" Color="#062A33" />
+    <SolidColorBrush x:Key="AssistantBubbleBorderBrush" Color="#0D3944" />
+    <SolidColorBrush x:Key="ThinkingBubbleBackgroundBrush" Color="#032027" />
+    <SolidColorBrush x:Key="ThinkingBubbleBorderBrush" Color="#0D3944" />
+    <SolidColorBrush x:Key="ToolBubbleBackgroundBrush" Color="#032027" />
+    <SolidColorBrush x:Key="SystemBubbleBackgroundBrush" Color="Transparent" />
+    <SolidColorBrush x:Key="ErrorBubbleBackgroundBrush" Color="#2A161B" />
+
+    <SolidColorBrush x:Key="SuccessBrush" Color="#3FB950" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#F87171" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#D29922" />
+
+</ResourceDictionary>

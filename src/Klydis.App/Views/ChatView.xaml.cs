@@ -1,9 +1,12 @@
+using System;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using Klydis.App.ViewModels;
+using MdXaml;
 
 namespace Klydis.App.Views;
 
@@ -13,6 +16,15 @@ namespace Klydis.App.Views;
 public partial class ChatView : UserControl
 {
     private ScrollViewer? _scrollViewer;
+
+    // Velocity-based (inertia) smooth scroll, driven by CompositionTarget.Rendering.
+    // A real mouse wheel fires a burst of several notches within ~100-200ms; restarting
+    // a fixed-duration DoubleAnimation on every notch made those bursts fight each other
+    // and stutter. Accumulating an impulse into one velocity value that decays every
+    // rendered frame absorbs a whole burst as one continuous motion instead.
+    private double _scrollVelocity;
+    private DateTime _lastScrollRenderTime;
+    private bool _scrollAnimating;
 
     public ChatView()
     {
@@ -113,6 +125,9 @@ public partial class ChatView : UserControl
             bool nearBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset < 120;
             if (force || nearBottom)
             {
+                // Stop any in-flight wheel momentum first, otherwise its next frame
+                // tick fires moments later and yanks the view back off the end.
+                StopScrollAnimation();
                 _scrollViewer.ScrollToEnd();
             }
         }, System.Windows.Threading.DispatcherPriority.Background);
@@ -135,6 +150,131 @@ public partial class ChatView : UserControl
         }
 
         return null;
+    }
+
+    private void MessagesList_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        // Several message templates nest their own ScrollViewer (markdown content,
+        // tool output, thinking panels). Those would otherwise swallow the wheel
+        // event whenever the cursor happened to be over them, making the outer
+        // chat pane randomly "stop scrolling". Always drive the outer scroll
+        // ourselves and mark the event handled before it can reach a nested one.
+        _scrollViewer ??= FindScrollViewer(MessagesList);
+        if (_scrollViewer == null)
+        {
+            return;
+        }
+
+        // Add an impulse rather than jumping/animating to a computed target directly.
+        // A trackpad or a fast wheel fires many events per rendered frame; accumulating
+        // into one velocity value that OnScrollRendering integrates and decays every
+        // frame absorbs a whole burst as one continuous motion. Computing a fresh
+        // animation target from VerticalOffset on every single event (the previous
+        // approach) reads a value that lags the true position between frames, so
+        // high-frequency input kept restarting from a stale point and barely moved.
+        _scrollVelocity = Math.Clamp(_scrollVelocity - e.Delta * 6.0, -6000, 6000);
+
+        if (!_scrollAnimating)
+        {
+            _scrollAnimating = true;
+            _lastScrollRenderTime = DateTime.Now;
+            CompositionTarget.Rendering += OnScrollRendering;
+        }
+
+        e.Handled = true;
+    }
+
+    private void OnScrollRendering(object? sender, EventArgs e)
+    {
+        if (_scrollViewer == null)
+        {
+            StopScrollAnimation();
+            return;
+        }
+
+        var now = DateTime.Now;
+        double dt = Math.Min((now - _lastScrollRenderTime).TotalSeconds, 0.05);
+        _lastScrollRenderTime = now;
+
+        double max = _scrollViewer.ScrollableHeight;
+        double newOffset = _scrollViewer.VerticalOffset + _scrollVelocity * dt;
+
+        if (newOffset < 0)
+        {
+            newOffset = 0;
+            _scrollVelocity = 0;
+        }
+        else if (newOffset > max)
+        {
+            newOffset = max;
+            _scrollVelocity = 0;
+        }
+
+        _scrollViewer.ScrollToVerticalOffset(newOffset);
+
+        // Exponential friction: velocity decays to ~5% of itself every second.
+        _scrollVelocity *= Math.Pow(0.05, dt);
+
+        if (Math.Abs(_scrollVelocity) < 4)
+        {
+            StopScrollAnimation();
+        }
+    }
+
+    private void StopScrollAnimation()
+    {
+        if (_scrollAnimating)
+        {
+            CompositionTarget.Rendering -= OnScrollRendering;
+            _scrollAnimating = false;
+        }
+        _scrollVelocity = 0;
+    }
+
+    private void MarkdownViewer_Loaded(object sender, RoutedEventArgs e)
+    {
+        // MdXaml's built-in renderer hardcodes its own colors (light table
+        // striping, off-theme heading tint) unless these Engine properties are
+        // set; MdXaml.Markdown applies them unconditionally when non-null
+        // (see MdXaml.Markdown.TableEvalutor and the heading/paragraph builders).
+        if (sender is not MarkdownScrollViewer viewer)
+        {
+            return;
+        }
+
+        Style Res(string key) => (Style)viewer.FindResource(key);
+
+        var engine = viewer.Engine;
+        engine.TableStyle = Res("MdTableStyle");
+        engine.TableHeaderStyle = Res("MdTableHeaderStyle");
+        engine.TableBodyStyle = Res("MdTableBodyStyle");
+        engine.Heading1Style = Res("MdHeading1Style");
+        engine.Heading2Style = Res("MdHeading2Style");
+        engine.Heading3Style = Res("MdHeading3Style");
+        engine.Heading4Style = Res("MdHeadingMinorStyle");
+        engine.Heading5Style = Res("MdHeadingMinorStyle");
+        engine.Heading6Style = Res("MdHeadingMinorStyle");
+        engine.NormalParagraphStyle = Res("MdParagraphStyle");
+        engine.CodeStyle = Res("MdInlineCodeStyle");
+        engine.CodeBlockStyle = Res("MdCodeBlockStyle");
+        engine.BlockquoteStyle = Res("MdBlockquoteStyle");
+        engine.LinkStyle = Res("MdLinkStyle");
+
+        // MdXaml parses Markdown -> FlowDocument once, at the moment the Markdown
+        // property is first set, baking these styles in as local values at that
+        // instant. For content bound in one shot (returning to an already-loaded
+        // session, e.g. after navigating to Settings and back) that first parse
+        // races Loaded and usually wins, so it runs with the Engine styles still
+        // null - reverting to MdXaml's own illegible-on-dark defaults. Streamed
+        // messages don't hit this, since Loaded fires while content is still
+        // empty. Forcing one re-parse here, now that the styles are guaranteed
+        // set, makes the result deterministic either way.
+        var content = viewer.Markdown;
+        if (!string.IsNullOrEmpty(content))
+        {
+            viewer.Markdown = string.Empty;
+            viewer.Markdown = content;
+        }
     }
 
     private void HeaderTitleEdit_IsVisibleChanged(object sender, System.Windows.DependencyPropertyChangedEventArgs e)
