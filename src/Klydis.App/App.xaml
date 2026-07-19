@@ -11,7 +11,7 @@
                      Kept as two independent dictionaries so light/dark and the brand
                      color can be chosen separately, mirroring Windows' own
                      Mode / Themes split in Settings > Personalization. -->
-                <ResourceDictionary Source="Themes/Modes/Dark.xaml" />
+                <ResourceDictionary Source="Themes/Backgrounds/OceanDark.xaml" />
                 <ResourceDictionary Source="Themes/Accents/FluorescentDark.xaml" />
                 <ResourceDictionary Source="Themes/ThemeStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>

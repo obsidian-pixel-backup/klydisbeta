@@ -59,6 +59,11 @@ public partial class App : Application
         {
             // Initialize required core services
             var modelRegistry = ServiceProvider.GetRequiredService<ModelRegistry>();
+            var modelDiscovery = ServiceProvider.GetRequiredService<ModelDiscoveryService>();
+            
+            modelDiscovery.ModelDiscovered += (path) => { _ = modelRegistry.SyncWithDiskAsync(); };
+            modelDiscovery.ModelDeleted += (path) => { _ = modelRegistry.SyncWithDiskAsync(); };
+
             await modelRegistry.LoadAsync();
             await modelRegistry.SyncWithDiskAsync();
 
@@ -101,6 +106,7 @@ public partial class App : Application
         services.AddSingleton<Klydis.Core.Chat.IInferenceEngine>(sp => sp.GetRequiredService<InferenceEngine>());
         services.AddSingleton<ModelRegistry>();
         services.AddSingleton<ModelDiscoveryService>();
+        services.AddSingleton<System.Net.Http.HttpClient>();
         services.AddSingleton<HuggingFaceClient>();
         services.AddSingleton<MessageStore>();
         services.AddSingleton<ContextOrchestrator>();

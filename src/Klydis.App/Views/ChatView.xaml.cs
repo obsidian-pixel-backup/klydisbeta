@@ -112,8 +112,27 @@ public partial class ChatView : UserControl
         }
     }
 
+    private DateTime _lastScrollTime = DateTime.MinValue;
+    private bool _scrollPending = false;
+
     private void ScrollToBottom(bool force)
     {
+        if (!force && (DateTime.Now - _lastScrollTime).TotalMilliseconds < 50)
+        {
+            if (!_scrollPending)
+            {
+                _scrollPending = true;
+                Dispatcher.InvokeAsync(async () => 
+                {
+                    await Task.Delay(50);
+                    _scrollPending = false;
+                    ScrollToBottom(false);
+                }, System.Windows.Threading.DispatcherPriority.Background);
+            }
+            return;
+        }
+
+        _lastScrollTime = DateTime.Now;
         Dispatcher.InvokeAsync(() =>
         {
             _scrollViewer ??= FindScrollViewer(MessagesList);
@@ -272,8 +291,8 @@ public partial class ChatView : UserControl
         var content = viewer.Markdown;
         if (!string.IsNullOrEmpty(content))
         {
-            viewer.Markdown = string.Empty;
-            viewer.Markdown = content;
+            viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, string.Empty);
+            viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, content);
         }
     }
 

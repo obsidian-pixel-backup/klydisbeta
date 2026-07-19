@@ -47,15 +47,99 @@ public partial class ModelLibraryViewModel : ObservableObject
     private bool _hfIsSearching;
 
     [ObservableProperty]
-    private double _downloadProgress;
+    private ObservableCollection<ActiveDownloadViewModel> _activeDownloads = new();
+
+    public bool HasActiveDownloads => ActiveDownloads.Count > 0;
 
     [ObservableProperty]
-    private string _downloadStatus = string.Empty;
+    private double _totalDownloadProgress;
+
+    private void UpdateTotalDownloadProgress()
+    {
+        if (ActiveDownloads.Count == 0)
+        {
+            TotalDownloadProgress = 0;
+            return;
+        }
+
+        double total = 0;
+        foreach (var download in ActiveDownloads)
+        {
+            total += download.Progress;
+        }
+        TotalDownloadProgress = total / ActiveDownloads.Count;
+    }
 
     [ObservableProperty]
-    private bool _isDownloading;
+    private ObservableCollection<HfModelCardViewModel> _popularModels = new();
+
+    [ObservableProperty]
+    private ObservableCollection<HfModelCardViewModel> _newestModels = new();
+
+    [ObservableProperty]
+    private ObservableCollection<HfModelCardViewModel> _highestRatedModels = new();
+
+    [ObservableProperty]
+    private bool _filterVisionOnly;
+
+    [ObservableProperty]
+    private bool _filterThinkingOnly;
+
+    [ObservableProperty]
+    private string _selectedSizeFilter = "All Sizes";
+
+    [ObservableProperty]
+    private ObservableCollection<string> _availableSizeFilters = new() { "All Sizes", "< 7B", "7B - 14B", "14B - 35B", "> 35B" };
+
+    [ObservableProperty]
+    private string _selectedRoleFilter = "All Roles";
+
+
+    [ObservableProperty]
+    private ObservableCollection<string> _availableRoleFilters = new() { "All Roles", "Chat", "Code", "Instruct", "Vision", "Researcher", "UI Designer", "None" };
+
+    [ObservableProperty]
+    private ModelCardViewModel? _selectedLocalModel;
+
+    partial void OnSelectedLocalModelChanged(ModelCardViewModel? value)
+    {
+        if (value != null && !value.IsLoaded)
+        {
+            _ = LoadModelAsync(value.ModelId);
+        }
+    }
+
+    partial void OnFilterVisionOnlyChanged(bool value) { FilterModels(); ApplyHfFilters(); }
+    partial void OnFilterThinkingOnlyChanged(bool value) { FilterModels(); ApplyHfFilters(); }
+    partial void OnSelectedSizeFilterChanged(string value) { FilterModels(); }
+    partial void OnSelectedRoleFilterChanged(string value) { FilterModels(); }
+
+    private void ApplyHfFilters()
+    {
+        var view1 = System.Windows.Data.CollectionViewSource.GetDefaultView(HfResults);
+        var view2 = System.Windows.Data.CollectionViewSource.GetDefaultView(PopularModels);
+        var view3 = System.Windows.Data.CollectionViewSource.GetDefaultView(NewestModels);
+        var view4 = System.Windows.Data.CollectionViewSource.GetDefaultView(HighestRatedModels);
+
+        Predicate<object> filter = (obj) =>
+        {
+            if (obj is HfModelCardViewModel card)
+            {
+                if (FilterVisionOnly && !card.IsVision) return false;
+                if (FilterThinkingOnly && !card.IsThinking) return false;
+                return true;
+            }
+            return false;
+        };
+
+        if (view1 != null) { view1.Filter = filter; view1.Refresh(); }
+        if (view2 != null) { view2.Filter = filter; view2.Refresh(); }
+        if (view3 != null) { view3.Filter = filter; view3.Refresh(); }
+        if (view4 != null) { view4.Filter = filter; view4.Refresh(); }
+    }
 
     private readonly Klydis.Core.Models.ModelRegistry _registry;
+    private readonly Klydis.Core.Models.HuggingFaceClient _hfClient;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
     private readonly Klydis.Core.Hardware.GpuProfiler _gpuProfiler;
     private readonly Klydis.Core.Hardware.SystemProfiler _systemProfiler;
@@ -64,18 +148,25 @@ public partial class ModelLibraryViewModel : ObservableObject
 
     public ModelLibraryViewModel(
         Klydis.Core.Models.ModelRegistry registry,
+        Klydis.Core.Models.HuggingFaceClient hfClient,
         Klydis.Core.Inference.InferenceEngine inferenceEngine,
         Klydis.Core.Hardware.GpuProfiler gpuProfiler,
         Klydis.Core.Hardware.SystemProfiler systemProfiler,
         Klydis.Core.Hardware.OffloadStrategy offloadStrategy)
     {
         _registry = registry;
+        _hfClient = hfClient;
         _inferenceEngine = inferenceEngine;
         _gpuProfiler = gpuProfiler;
         _systemProfiler = systemProfiler;
         _offloadStrategy = offloadStrategy;
         FilteredModels = new ObservableCollection<ModelCardViewModel>(Models);
+        
+        _registry.RegistryChanged += OnRegistryChanged;
+        
         _ = ScanAsync();
+        _ = LoadHfModelsAsync();
+        _ = ResumeActiveDownloadsAsync();
 
         _timer = new DispatcherTimer
         {
@@ -83,6 +174,23 @@ public partial class ModelLibraryViewModel : ObservableObject
         };
         _timer.Tick += async (s, e) => await UpdateVramUsageAsync();
         _timer.Start();
+    }
+
+    private void OnRegistryChanged()
+    {
+        if (System.Windows.Application.Current != null)
+        {
+            System.Windows.Application.Current.Dispatcher.Invoke(() => { _ = PopulateModelsAsync(); });
+        }
+    }
+
+    private async Task ResumeActiveDownloadsAsync()
+    {
+        var activeDownloads = await _registry.GetActiveDownloadsAsync();
+        foreach (var download in activeDownloads)
+        {
+            _ = StartDownloadAsync(download.RepoId, download.FileName, download.DestinationPath);
+        }
     }
 
     private async Task UpdateVramUsageAsync()
@@ -102,16 +210,39 @@ public partial class ModelLibraryViewModel : ObservableObject
 
     private void FilterModels()
     {
-        if (string.IsNullOrWhiteSpace(SearchText))
+        var query = Models.AsEnumerable();
+
+        if (!string.IsNullOrWhiteSpace(SearchText))
         {
-            FilteredModels = new ObservableCollection<ModelCardViewModel>(Models);
+            query = query.Where(m => m.DisplayName.Contains(SearchText, StringComparison.OrdinalIgnoreCase) || 
+                                     m.Architecture.Contains(SearchText, StringComparison.OrdinalIgnoreCase));
         }
-        else
+
+        if (FilterVisionOnly) query = query.Where(m => m.IsVision);
+        if (FilterThinkingOnly) query = query.Where(m => m.IsThinking);
+
+        if (SelectedRoleFilter != "All Roles")
         {
-            var filtered = Models.Where(m => m.DisplayName.Contains(SearchText, StringComparison.OrdinalIgnoreCase) || 
-                                             m.Architecture.Contains(SearchText, StringComparison.OrdinalIgnoreCase));
-            FilteredModels = new ObservableCollection<ModelCardViewModel>(filtered);
+            query = query.Where(m => string.Equals(m.Role, SelectedRoleFilter, StringComparison.OrdinalIgnoreCase));
         }
+
+        if (SelectedSizeFilter != "All Sizes")
+        {
+            query = query.Where(m => 
+            {
+                if (!double.TryParse(m.ParameterSize, out double size)) return false;
+                return SelectedSizeFilter switch
+                {
+                    "< 7B" => size < 7,
+                    "7B - 14B" => size >= 7 && size <= 14,
+                    "14B - 35B" => size > 14 && size <= 35,
+                    "> 35B" => size > 35,
+                    _ => true
+                };
+            });
+        }
+
+        FilteredModels = new ObservableCollection<ModelCardViewModel>(query);
     }
 
     [RelayCommand]
@@ -119,6 +250,12 @@ public partial class ModelLibraryViewModel : ObservableObject
     {
         IsScanning = true;
         await _registry.SyncWithDiskAsync();
+        await PopulateModelsAsync();
+        IsScanning = false;
+    }
+
+    private async Task PopulateModelsAsync()
+    {
         
         var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
         if (gpuInfo != null)
@@ -128,11 +265,30 @@ public partial class ModelLibraryViewModel : ObservableObject
             VramUsagePercent = VramTotalMb > 0 ? 100.0 * VramUsageMb / VramTotalMb : 0;
         }
 
+        foreach (var existingModel in Models)
+        {
+            existingModel.PropertyChanged -= ModelCard_PropertyChanged;
+        }
         Models.Clear();
         foreach (var model in _registry.GetAllModels())
         {
             var estimatedVramMb = (int)(model.EstimatedVramMb ?? 0L);
-            Models.Add(new ModelCardViewModel
+            bool isVision = model.DisplayName.Contains("vision", StringComparison.OrdinalIgnoreCase) || 
+                            model.DisplayName.Contains("llava", StringComparison.OrdinalIgnoreCase) || 
+                            model.DisplayName.Contains("pixtral", StringComparison.OrdinalIgnoreCase) ||
+                            model.DisplayName.Contains("qwen-vl", StringComparison.OrdinalIgnoreCase) ||
+                            (model.Architecture != null && (
+                                model.Architecture.Contains("clip", StringComparison.OrdinalIgnoreCase) || 
+                                model.Architecture.Contains("llava", StringComparison.OrdinalIgnoreCase) ||
+                                model.Architecture.Contains("qwen2vl", StringComparison.OrdinalIgnoreCase) ||
+                                model.Architecture.Contains("mllama", StringComparison.OrdinalIgnoreCase)
+                            ));
+
+            bool isThinking = model.DisplayName.Contains("think", StringComparison.OrdinalIgnoreCase) || 
+                              model.DisplayName.Contains("-r1", StringComparison.OrdinalIgnoreCase) ||
+                              (model.Architecture != null && model.Architecture.Contains("deepseek2", StringComparison.OrdinalIgnoreCase));
+
+            var card = new ModelCardViewModel
             {
                 ModelId = model.Id,
                 DisplayName = model.DisplayName,
@@ -143,12 +299,24 @@ public partial class ModelLibraryViewModel : ObservableObject
                 FileName = model.FileName,
                 EstimatedVramMb = estimatedVramMb,
                 ContextLength = (int)(model.ContextLength ?? 8192L),
-                CanFitInVram = gpuInfo == null || estimatedVramMb <= gpuInfo.TotalVramMb
-            });
+                CanFitInVram = gpuInfo == null || estimatedVramMb <= gpuInfo.TotalVramMb,
+                Role = model.Role ?? "None",
+                IsVision = isVision,
+                IsThinking = isThinking
+            };
+            card.PropertyChanged += ModelCard_PropertyChanged;
+            Models.Add(card);
         }
         
         FilterModels();
-        IsScanning = false;
+    }
+
+    private async void ModelCard_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ModelCardViewModel.Role) && sender is ModelCardViewModel card)
+        {
+            await _registry.UpdateModelRoleAsync(card.ModelId, card.Role);
+        }
     }
 
     [RelayCommand]
@@ -160,48 +328,59 @@ public partial class ModelLibraryViewModel : ObservableObject
         if (modelInfo == null) return;
 
         CurrentlyLoadedModelId = modelId;
+        foreach (var m in Models) m.IsLoaded = (m.ModelId == modelId);
         
         var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
         var systemInfo = await _systemProfiler.GetSystemInfoAsync();
         
-        // Read GGUF metadata for dynamic sizing
-        var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
-        int totalLayers = metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32;
-        long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
-        
-        // Cap context length to a practical default. The model's trained context (often 1M+)
-        // is far too large for initial allocation. 32768 tokens is a practical default that
-        // fits comfortably in VRAM while allowing long conversations.
-        int rawContextLength = (int)(metadata?.ContextLength ?? 8192);
-        int contextLength = Math.Min(rawContextLength, 32768);
-        
-        // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
-        // For Q8_0 KV cache, sizeof(element) = 1 byte. For FP16, sizeof(element) = 2 bytes.
-        // We use 1 byte since we configure Q8_0 KV cache in InferenceEngine.
-        long kvCachePerLayerBytes = 2048; // Safe default: 2 * 8 * 128 * 1 = 2048
-        if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCountKv.HasValue)
+        try
         {
-            long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
-            // K + V (2) * HeadCountKv * headDim * 1 byte (Q8_0 quantized KV cache)
-            kvCachePerLayerBytes = 2 * metadata.HeadCountKv.Value * headDim * 1;
+            // Read GGUF metadata for dynamic sizing
+            var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
+            int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
+            long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
+            
+            // Cap context length to a practical default. The model's trained context (often 1M+)
+            // is far too large for initial allocation. 32768 tokens is a practical default that
+            // fits comfortably in VRAM while allowing long conversations.
+            int rawContextLength = (int)(metadata?.ContextLength ?? 8192);
+            int contextLength = Math.Min(rawContextLength, 32768);
+            
+            // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
+            // For Q8_0 KV cache, sizeof(element) = 1 byte. For FP16, sizeof(element) = 2 bytes.
+            // We use 1 byte since we configure Q8_0 KV cache in InferenceEngine.
+            long kvCachePerLayerBytes = 2048; // Safe default: 2 * 8 * 128 * 1 = 2048
+            if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCount.Value > 0 && metadata.HeadCountKv.HasValue)
+            {
+                long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
+                // K + V (2) * HeadCountKv * headDim * 1 byte (Q8_0 quantized KV cache)
+                kvCachePerLayerBytes = 2 * metadata.HeadCountKv.Value * headDim * 1;
+            }
+
+            var plan = _offloadStrategy.CalculatePlan(
+                totalLayers, 
+                layerSizeBytes, 
+                kvCachePerLayerBytes, 
+                contextLength, 
+                gpuInfo, 
+                systemInfo, 
+                Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
+
+            await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
         }
-
-        var plan = _offloadStrategy.CalculatePlan(
-            totalLayers, 
-            layerSizeBytes, 
-            kvCachePerLayerBytes, 
-            contextLength, 
-            gpuInfo, 
-            systemInfo, 
-            Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
-
-        await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
+        catch (Exception)
+        {
+            // Ensure UI handles the failure cleanly instead of crashing
+            CurrentlyLoadedModelId = string.Empty;
+            foreach (var m in Models) m.IsLoaded = false;
+        }
     }
 
     [RelayCommand]
     private async Task UnloadModelAsync()
     {
         CurrentlyLoadedModelId = string.Empty;
+        foreach (var m in Models) m.IsLoaded = false;
         _inferenceEngine.UnloadModel();
         await Task.CompletedTask;
     }
@@ -212,19 +391,152 @@ public partial class ModelLibraryViewModel : ObservableObject
         var model = Models.FirstOrDefault(m => m.ModelId == modelId);
         if (model != null)
         {
+            var modelInfo = _registry.GetModel(modelId);
+            if (modelInfo != null)
+            {
+                if (CurrentlyLoadedModelId == modelId)
+                {
+                    await UnloadModelAsync();
+                }
+
+                try
+                {
+                    if (System.IO.File.Exists(modelInfo.FilePath))
+                    {
+                        System.IO.File.Delete(modelInfo.FilePath);
+                    }
+                    await _registry.RemoveModelAsync(modelId);
+                }
+                catch (Exception)
+                {
+                    // Ignore or log file deletion errors
+                }
+            }
+
             Models.Remove(model);
             FilterModels();
         }
-        await Task.CompletedTask;
+    }
+
+    [ObservableProperty]
+    private bool _isHfCategoriesVisible = true;
+
+    partial void OnHfSearchTextChanged(string value)
+    {
+        IsHfCategoriesVisible = string.IsNullOrWhiteSpace(value);
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            _ = HfSearchAsync();
+        }
+        else
+        {
+            HfResults.Clear();
+        }
+    }
+
+    [RelayCommand]
+    private async Task LoadHfModelsAsync()
+    {
+        try
+        {
+            // Populate Popular
+            var popular = await _hfClient.SearchModelsAsync("", 10, "downloads");
+            PopularModels.Clear();
+            foreach (var m in popular) PopularModels.Add(CreateHfCard(m));
+
+            // Populate Newest
+            var newest = await _hfClient.SearchModelsAsync("", 10, "createdAt");
+            NewestModels.Clear();
+            foreach (var m in newest) NewestModels.Add(CreateHfCard(m));
+
+            // Populate Highest Rated (Likes)
+            var highestRated = await _hfClient.SearchModelsAsync("", 10, "likes");
+            HighestRatedModels.Clear();
+            foreach (var m in highestRated) HighestRatedModels.Add(CreateHfCard(m));
+            
+            ApplyHfFilters();
+        }
+        catch (Exception) { /* Ignored for beta */ }
+    }
+
+    private HfModelCardViewModel CreateHfCard(Klydis.Core.Models.HfModelInfo info)
+    {
+        bool isVision = info.RepoId.Contains("vision", StringComparison.OrdinalIgnoreCase) || 
+                        info.RepoId.Contains("llava", StringComparison.OrdinalIgnoreCase) || 
+                        info.RepoId.Contains("pixtral", StringComparison.OrdinalIgnoreCase) ||
+                        info.RepoId.Contains("qwen-vl", StringComparison.OrdinalIgnoreCase) ||
+                        info.Tags.Any(t => t.Contains("vision", StringComparison.OrdinalIgnoreCase) || 
+                                           t.Contains("image", StringComparison.OrdinalIgnoreCase) ||
+                                           t.Contains("vlm", StringComparison.OrdinalIgnoreCase) ||
+                                           t.Contains("multimodal", StringComparison.OrdinalIgnoreCase)) ||
+                        info.PipelineTag.Contains("image", StringComparison.OrdinalIgnoreCase) ||
+                        info.PipelineTag.Contains("vision", StringComparison.OrdinalIgnoreCase);
+
+        bool isThinking = info.RepoId.Contains("think", StringComparison.OrdinalIgnoreCase) || 
+                          info.RepoId.Contains("-r1", StringComparison.OrdinalIgnoreCase) ||
+                          info.Tags.Any(t => t.Contains("think", StringComparison.OrdinalIgnoreCase) ||
+                                             t.Contains("chain-of-thought", StringComparison.OrdinalIgnoreCase) ||
+                                             t.Contains("reasoning", StringComparison.OrdinalIgnoreCase));
+
+        var card = new HfModelCardViewModel
+        {
+            RepoId = info.RepoId,
+            Author = info.Author,
+            ModelName = info.ModelName,
+            Downloads = info.Downloads.ToString(),
+            Likes = info.Likes,
+            Tags = info.Tags,
+            IsVision = isVision,
+            IsThinking = isThinking
+        };
+
+        _ = LoadGgufFilesAsync(card, info.RepoId);
+        return card;
+    }
+
+    private async Task LoadGgufFilesAsync(HfModelCardViewModel card, string repoId)
+    {
+        try
+        {
+            var files = await _hfClient.GetModelFilesAsync(repoId);
+            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+            {
+                foreach (var file in files)
+                {
+                    long estimatedVramMb = (long)((file.SizeBytes / (1024.0 * 1024.0)) * 1.2);
+                    bool fitsInVram = VramTotalMb == 0 || estimatedVramMb <= VramTotalMb;
+
+                    card.GgufFiles.Add(new HfFileViewModel
+                    {
+                        FileName = file.Filename,
+                        Size = (file.SizeBytes / (1024.0 * 1024.0 * 1024.0)).ToString("F2") + " GB",
+                        QuantType = file.QuantType,
+                        RepoId = repoId,
+                        CanFitInVram = fitsInVram
+                    });
+                }
+            });
+        }
+        catch { }
     }
 
     [RelayCommand]
     private async Task HfSearchAsync()
     {
-        if (string.IsNullOrWhiteSpace(HfSearchText)) return;
         HfIsSearching = true;
-        // Simulate search
-        await Task.Delay(1000);
+        try
+        {
+            string query = HfSearchText;
+            if (FilterVisionOnly) query += " vision";
+            if (FilterThinkingOnly) query += " think";
+            
+            var results = await _hfClient.SearchModelsAsync(query, 20, "downloads");
+            HfResults.Clear();
+            foreach (var m in results) HfResults.Add(CreateHfCard(m));
+            
+            ApplyHfFilters();
+        }
+        catch (Exception) { }
         HfIsSearching = false;
     }
 
@@ -232,14 +544,64 @@ public partial class ModelLibraryViewModel : ObservableObject
     private async Task DownloadModelAsync(HfFileViewModel file)
     {
         if (file == null) return;
-        IsDownloading = true;
-        DownloadStatus = $"Downloading {file.FileName}...";
-        for (int i = 0; i <= 100; i += 10)
+        
+        string destPath = System.IO.Path.Combine(_registry.ModelsDirectory, file.FileName);
+        
+        await StartDownloadAsync(file.RepoId, file.FileName, destPath);
+    }
+
+    private async Task StartDownloadAsync(string repoId, string fileName, string destPath)
+    {
+        var downloadVm = new ActiveDownloadViewModel
         {
-            DownloadProgress = i;
-            await Task.Delay(200);
+            FileName = fileName,
+            Status = $"Downloading {fileName}...",
+            Progress = 0
+        };
+
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        {
+            ActiveDownloads.Add(downloadVm);
+            OnPropertyChanged(nameof(HasActiveDownloads));
+        });
+
+        var progress = new Progress<Klydis.Core.Models.DownloadProgress>(p =>
+        {
+            downloadVm.Progress = p.PercentComplete;
+            downloadVm.Status = $"Downloading {fileName}... {(p.BytesDownloaded / (1024.0*1024.0)):F1} MB / {(p.TotalBytes / (1024.0*1024.0)):F1} MB ({p.SpeedBytesPerSecond / (1024.0*1024.0):F1} MB/s)";
+            System.Windows.Application.Current.Dispatcher.Invoke(() => UpdateTotalDownloadProgress());
+        });
+
+        var record = new Klydis.Core.Models.ActiveDownloadRecord(repoId, fileName, destPath, DateTime.UtcNow);
+        await _registry.AddActiveDownloadAsync(record);
+
+        try
+        {
+            await Task.Run(async () =>
+            {
+                await _hfClient.DownloadModelAsync(repoId, fileName, destPath, progress, downloadVm.CancellationTokenSource.Token);
+            });
+            downloadVm.Status = "Download complete.";
+            await _registry.RemoveActiveDownloadAsync(repoId, fileName);
+            await _registry.SyncWithDiskAsync();
+            await ScanAsync(); // Refresh local list
         }
-        DownloadStatus = "Download complete.";
-        IsDownloading = false;
+        catch (OperationCanceledException)
+        {
+            downloadVm.Status = "Download cancelled.";
+        }
+        catch (Exception ex)
+        {
+            downloadVm.Status = $"Download failed: {ex.Message}";
+        }
+        finally
+        {
+            await Task.Delay(3000); // Show complete status for a bit
+            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+            {
+                ActiveDownloads.Remove(downloadVm);
+                OnPropertyChanged(nameof(HasActiveDownloads));
+            });
+        }
     }
 }

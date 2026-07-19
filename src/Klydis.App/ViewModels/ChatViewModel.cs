@@ -39,6 +39,7 @@ public partial class ChatViewModel : ObservableObject
 {
     private readonly ChatEngine? _chatEngine;
     private CancellationTokenSource? _generationCts;
+    private bool _userExplicitlyUnloaded;
 
     [ObservableProperty]
     private string _inputText = string.Empty;
@@ -108,7 +109,16 @@ public partial class ChatViewModel : ObservableObject
         SelectedRiskLevel = _toolExecutor.CurrentRiskLevel;
         
         RefreshModels();
+        _registry.RegistryChanged += OnRegistryChanged;
         _ = InitializeSessionsAsync();
+    }
+
+    private void OnRegistryChanged()
+    {
+        if (System.Windows.Application.Current != null)
+        {
+            System.Windows.Application.Current.Dispatcher.Invoke(RefreshModels);
+        }
     }
 
     private void ToolExecutor_ToolApprovalRequested(object? sender, ToolApprovalEventArgs e)
@@ -164,9 +174,19 @@ public partial class ChatViewModel : ObservableObject
     {
         if (string.IsNullOrEmpty(value)) return;
         
+        _userExplicitlyUnloaded = false;
+
         var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.DisplayName == value);
         if (modelInfo != null)
         {
+            if (_inferenceEngine.IsModelLoaded && _inferenceEngine.CurrentModelPath == modelInfo.FilePath)
+            {
+                // Prevent infinite loop when WPF clears ComboBox ItemsSource
+                IsModelLoading = false;
+                IsModelReady = true;
+                return;
+            }
+
             try
             {
                 // Load state is app chrome, not conversation content: it is shown
@@ -206,11 +226,23 @@ public partial class ChatViewModel : ObservableObject
                 
                 await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
                 IsModelReady = true;
+
+                // Remember the previously loaded model
+                var updatedModel = modelInfo with { LastUsedAt = DateTime.UtcNow };
+                await _registry.UpsertModelAsync(updatedModel);
             }
             catch (Exception ex)
             {
+                string nativeLog = "";
+                try
+                {
+                    var logLines = System.IO.File.ReadLines("llama_native.log").TakeLast(15).ToList();
+                    nativeLog = "\n\nNative Log:\n" + string.Join("\n", logLines);
+                }
+                catch { }
+
                 System.Diagnostics.Debug.WriteLine($"Failed to load model: {ex}");
-                Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}", Timestamp = DateTime.Now });
+                Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
             }
             finally
             {
@@ -229,15 +261,45 @@ public partial class ChatViewModel : ObservableObject
 
     private void RefreshModels()
     {
+        var currentSelected = SelectedModelId;
         AvailableModels.Clear();
-        foreach (var model in _registry.GetAllModels())
+        
+        var models = _registry.GetAllModels().OrderBy(m => m.DisplayName).ToList();
+        
+        foreach (var model in models)
         {
             AvailableModels.Add(model.DisplayName);
         }
-        if (AvailableModels.Count > 0)
+        
+        if (!string.IsNullOrEmpty(currentSelected) && AvailableModels.Contains(currentSelected))
         {
-            SelectedModelId = AvailableModels[0];
+            SelectedModelId = currentSelected;
         }
+        else if (AvailableModels.Count > 0 && !_userExplicitlyUnloaded)
+        {
+            var mostRecentlyUsed = _registry.GetAllModels().OrderByDescending(m => m.LastUsedAt).FirstOrDefault();
+            if (mostRecentlyUsed != null)
+            {
+                SelectedModelId = mostRecentlyUsed.DisplayName;
+            }
+            else
+            {
+                SelectedModelId = AvailableModels[0];
+            }
+        }
+        else
+        {
+            SelectedModelId = string.Empty;
+        }
+    }
+
+    [RelayCommand]
+    private void UnloadModel()
+    {
+        _inferenceEngine.UnloadModel();
+        IsModelReady = false;
+        _userExplicitlyUnloaded = true;
+        SelectedModelId = string.Empty;
     }
 
     [RelayCommand]
@@ -272,7 +334,7 @@ public partial class ChatViewModel : ObservableObject
         var typingIndicator = new ChatMessageViewModel { Role = "typing", Timestamp = DateTime.Now };
         Messages.Add(typingIndicator);
 
-        void OnUi(Action action) => System.Windows.Application.Current.Dispatcher.Invoke(action);
+        void OnUi(Action action) => System.Windows.Application.Current.Dispatcher.InvokeAsync(action, System.Windows.Threading.DispatcherPriority.Background);
 
         void AppendMessage(ChatMessageViewModel message)
         {
@@ -300,9 +362,8 @@ public partial class ChatViewModel : ObservableObject
         {
             if (thoughtMessage != null)
             {
-                thoughtMessage.IsThinkingExpanded = false;
                 thoughtMessage.IsStreaming = false;
-                thoughtMessage = null;
+                // Wait for a real token to collapse it, so it remains open if stream ends here
             }
         }
 
@@ -310,13 +371,31 @@ public partial class ChatViewModel : ObservableObject
         {
             if (_chatEngine != null)
             {
+                int _throttleCounter = 0;
                 await foreach (var evt in _chatEngine.StreamResponseAsync(userMessage, _generationCts.Token))
                 {
+                    if (++_throttleCounter % 10 == 0)
+                    {
+                        await Task.Delay(1); // Yield UI thread to process queued Dispatcher messages
+                    }
+
                     switch (evt.Type)
                     {
                         case ChatStreamEventType.Token:
                             OnUi(() =>
                             {
+                                if (thoughtMessage != null)
+                                {
+                                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                                    {
+                                        Messages.Remove(thoughtMessage);
+                                    }
+                                    else
+                                    {
+                                        thoughtMessage.IsThinkingExpanded = false;
+                                    }
+                                    thoughtMessage = null;
+                                }
                                 if (assistantMessage == null)
                                 {
                                     assistantMessage = new ChatMessageViewModel
@@ -336,6 +415,11 @@ public partial class ChatViewModel : ObservableObject
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
+                                if (thoughtMessage != null)
+                                {
+                                    thoughtMessage.IsThinkingExpanded = false;
+                                    thoughtMessage.IsStreaming = false;
+                                }
                                 thoughtMessage = new ChatMessageViewModel
                                 {
                                     Role = "thought",
@@ -357,13 +441,39 @@ public partial class ChatViewModel : ObservableObject
                             });
                             break;
                         case ChatStreamEventType.ThinkingEnd:
-                            OnUi(CloseThoughtBubble);
+                            OnUi(() =>
+                            {
+                                if (thoughtMessage != null)
+                                {
+                                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                                    {
+                                        Messages.Remove(thoughtMessage);
+                                        thoughtMessage = null;
+                                    }
+                                    else
+                                    {
+                                        CloseThoughtBubble();
+                                    }
+                                }
+                            });
                             break;
                         case ChatStreamEventType.ToolCall:
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
-                                CloseThoughtBubble();
+                                if (thoughtMessage != null)
+                                {
+                                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                                    {
+                                        Messages.Remove(thoughtMessage);
+                                    }
+                                    else
+                                    {
+                                        thoughtMessage.IsThinkingExpanded = false;
+                                        thoughtMessage.IsStreaming = false;
+                                    }
+                                    thoughtMessage = null;
+                                }
                                 var toolMessage = new ChatMessageViewModel
                                 {
                                     Role = "toolcall",
@@ -395,6 +505,17 @@ public partial class ChatViewModel : ObservableObject
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
+                                if (thoughtMessage != null)
+                                {
+                                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                                    {
+                                        Messages.Remove(thoughtMessage);
+                                    }
+                                    else
+                                    {
+                                        thoughtMessage.IsThinkingExpanded = false;
+                                    }
+                                }
                                 CloseThoughtBubble();
                                 if (pendingToolCall != null)
                                 {
@@ -409,6 +530,28 @@ public partial class ChatViewModel : ObservableObject
                                     Content = evt.Content,
                                     Timestamp = DateTime.Now
                                 });
+                            });
+                            break;
+                        case ChatStreamEventType.StreamEnd:
+                            OnUi(() =>
+                            {
+                                if (thoughtMessage != null)
+                                {
+                                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                                    {
+                                        Messages.Remove(thoughtMessage);
+                                    }
+                                    else
+                                    {
+                                        thoughtMessage.IsStreaming = false;
+                                    }
+                                    thoughtMessage = null;
+                                }
+                                CloseAssistantBubble();
+                                if (pendingToolCall != null)
+                                {
+                                    pendingToolCall = null;
+                                }
                             });
                             break;
                     }
@@ -449,7 +592,17 @@ public partial class ChatViewModel : ObservableObject
             OnUi(() =>
             {
                 CloseAssistantBubble();
-                CloseThoughtBubble();
+                if (thoughtMessage != null)
+                {
+                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                    {
+                        Messages.Remove(thoughtMessage);
+                    }
+                    else
+                    {
+                        CloseThoughtBubble();
+                    }
+                }
                 Messages.Remove(typingIndicator);
             });
             IsGenerating = false;
@@ -563,7 +716,7 @@ public partial class ChatViewModel : ObservableObject
                     {
                         Role = "thought",
                         Content = thinking,
-                        IsThinkingExpanded = false,
+                        IsThinkingExpanded = string.IsNullOrWhiteSpace(StripToolCallBlocks(content)),
                         Timestamp = msg.Timestamp
                     });
                 }

@@ -27,6 +27,18 @@ public partial class AccentSwatch : ObservableObject
     private bool _isSelected;
 }
 
+/// <summary>
+/// One tile in the Background gallery. <see cref="Swatch"/> is a fixed preview color.
+/// </summary>
+public partial class BackgroundSwatch : ObservableObject
+{
+    public string Name { get; init; } = string.Empty;
+    public Brush Swatch { get; init; } = Brushes.Gray;
+
+    [ObservableProperty]
+    private bool _isSelected;
+}
+
 public partial class SettingsViewModel : ObservableObject
 {
     private readonly ThemeService _themeService;
@@ -40,7 +52,11 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private AccentTheme _selectedAccent;
 
+    [ObservableProperty]
+    private BackgroundTheme _selectedBackground;
+
     public ObservableCollection<AccentSwatch> AccentSwatches { get; } = new();
+    public ObservableCollection<BackgroundSwatch> BackgroundSwatches { get; } = new();
 
     public string AppVersion { get; }
     public string AppDescription { get; }
@@ -50,6 +66,7 @@ public partial class SettingsViewModel : ObservableObject
         _themeService = themeService;
         _selectedMode = themeService.CurrentMode;
         _selectedAccent = themeService.CurrentAccent;
+        _selectedBackground = themeService.CurrentBackground;
 
         foreach (var (name, hex) in new[]
                  {
@@ -66,6 +83,22 @@ public partial class SettingsViewModel : ObservableObject
                 Name = name,
                 Swatch = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)),
                 IsSelected = accent == _selectedAccent
+            });
+        }
+
+        foreach (var (name, hex) in new[]
+                 {
+                     ("Ocean", "#001619"),
+                     ("Obsidian", "#0D0D0D"),
+                     ("Midnight", "#000B18")
+                 })
+        {
+            var bg = System.Enum.Parse<BackgroundTheme>(name);
+            BackgroundSwatches.Add(new BackgroundSwatch
+            {
+                Name = name,
+                Swatch = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)),
+                IsSelected = bg == _selectedBackground
             });
         }
 
@@ -109,6 +142,23 @@ public partial class SettingsViewModel : ObservableObject
         foreach (var swatch in AccentSwatches)
         {
             swatch.IsSelected = swatch.Name == accentName;
+        }
+    }
+
+    [RelayCommand]
+    private void SelectBackground(string backgroundName)
+    {
+        if (!System.Enum.TryParse<BackgroundTheme>(backgroundName, out var bg) || bg == SelectedBackground)
+        {
+            return;
+        }
+
+        SelectedBackground = bg;
+        _themeService.ApplyBackground(bg);
+
+        foreach (var swatch in BackgroundSwatches)
+        {
+            swatch.IsSelected = swatch.Name == backgroundName;
         }
     }
 }

@@ -16,6 +16,12 @@ public partial class HfFileViewModel : ObservableObject
 
     [ObservableProperty]
     private string _quantType = string.Empty;
+
+    [ObservableProperty]
+    private string _repoId = string.Empty;
+
+    [ObservableProperty]
+    private bool _canFitInVram = true;
 }
 
 /// <summary>
@@ -25,6 +31,12 @@ public partial class HfModelCardViewModel : ObservableObject
 {
     [ObservableProperty]
     private string _repoId = string.Empty;
+
+    [ObservableProperty]
+    private bool _isVision;
+
+    [ObservableProperty]
+    private bool _isThinking;
 
     [ObservableProperty]
     private string _author = string.Empty;

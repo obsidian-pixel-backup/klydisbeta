@@ -469,12 +469,14 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
             var html = await page.InnerHTMLAsync("body");
             
             // Convert to Markdown
+#pragma warning disable CS0618
             var config = new ReverseMarkdown.Config
             {
                 GithubFlavored = true,
                 RemoveComments = true,
                 SmartHrefHandling = true
             };
+#pragma warning restore CS0618
             var converter = new ReverseMarkdown.Converter(config);
             var markdown = converter.Convert(html);
             

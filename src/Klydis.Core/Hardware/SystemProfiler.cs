@@ -3,6 +3,8 @@ using System.Management; // Note: Requires the 'System.Management' NuGet package
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
+#pragma warning disable CA1416
+
 namespace Klydis.Core.Hardware;
 
 /// <summary>

@@ -31,6 +31,17 @@ public enum AccentTheme
 }
 
 /// <summary>
+/// The background color identity applied underneath the active mode.
+/// </summary>
+public enum BackgroundTheme
+{
+    Ocean,
+    Obsidian,
+    Midnight
+}
+
+
+/// <summary>
 /// Composes the active palette from two independent, hot-swappable
 /// ResourceDictionaries — a mode (neutrals) and an accent (brand color) — and
 /// persists both choices. App-layer only: reads/writes a small JSON file under
@@ -50,6 +61,8 @@ public class ThemeService
     /// <summary>The actually-applied mode (Dark or Light) after resolving System.</summary>
     public ThemeMode EffectiveMode { get; private set; } = ThemeMode.Dark;
 
+    public BackgroundTheme CurrentBackground { get; private set; } = BackgroundTheme.Ocean;
+
     public AccentTheme CurrentAccent { get; private set; } = AccentTheme.Fluorescent;
 
     public event Action? AppearanceChanged;
@@ -68,6 +81,7 @@ public class ThemeService
     public void LoadAndApplyPersistedTheme()
     {
         var mode = ThemeMode.Dark;
+        var background = BackgroundTheme.Ocean;
         var accent = AccentTheme.Fluorescent;
         try
         {
@@ -78,6 +92,7 @@ public class ThemeService
                 if (settings != null)
                 {
                     if (Enum.TryParse<ThemeMode>(settings.Mode, out var parsedMode)) mode = parsedMode;
+                    if (Enum.TryParse<BackgroundTheme>(settings.Background, out var parsedBackground)) background = parsedBackground;
                     if (Enum.TryParse<AccentTheme>(settings.Accent, out var parsedAccent)) accent = parsedAccent;
                 }
             }
@@ -87,12 +102,14 @@ public class ThemeService
             // Corrupt or missing settings file: fall back to the defaults.
         }
 
-        Apply(mode, accent, persist: false);
+        Apply(mode, background, accent, persist: false);
     }
 
-    public void ApplyMode(ThemeMode mode) => Apply(mode, CurrentAccent, persist: true);
+    public void ApplyMode(ThemeMode mode) => Apply(mode, CurrentBackground, CurrentAccent, persist: true);
 
-    public void ApplyAccent(AccentTheme accent) => Apply(CurrentMode, accent, persist: true);
+    public void ApplyBackground(BackgroundTheme background) => Apply(CurrentMode, background, CurrentAccent, persist: true);
+
+    public void ApplyAccent(AccentTheme accent) => Apply(CurrentMode, CurrentBackground, accent, persist: true);
 
     /// <summary>
     /// Re-resolves and re-applies the palette if the current mode selection is
@@ -102,25 +119,26 @@ public class ThemeService
     {
         if (CurrentMode == ThemeMode.System)
         {
-            Apply(ThemeMode.System, CurrentAccent, persist: false);
+            Apply(ThemeMode.System, CurrentBackground, CurrentAccent, persist: false);
         }
     }
 
-    private void Apply(ThemeMode mode, AccentTheme accent, bool persist)
+    private void Apply(ThemeMode mode, BackgroundTheme background, AccentTheme accent, bool persist)
     {
         var effectiveMode = mode == ThemeMode.System
             ? (IsSystemInLightMode() ? ThemeMode.Light : ThemeMode.Dark)
             : mode;
 
-        var modeUri = new Uri($"Themes/Modes/{effectiveMode}.xaml", UriKind.Relative);
+        var backgroundUri = new Uri($"Themes/Backgrounds/{background}{effectiveMode}.xaml", UriKind.Relative);
         var accentUri = new Uri($"Themes/Accents/{accent}{effectiveMode}.xaml", UriKind.Relative);
 
         var merged = Application.Current.Resources.MergedDictionaries;
-        merged[ModeDictionaryIndex] = new ResourceDictionary { Source = modeUri };
+        merged[ModeDictionaryIndex] = new ResourceDictionary { Source = backgroundUri };
         merged[AccentDictionaryIndex] = new ResourceDictionary { Source = accentUri };
 
         CurrentMode = mode;
         EffectiveMode = effectiveMode;
+        CurrentBackground = background;
         CurrentAccent = accent;
         AppearanceChanged?.Invoke();
 
@@ -128,7 +146,7 @@ public class ThemeService
         {
             try
             {
-                var json = JsonSerializer.Serialize(new UiSettings { Mode = mode.ToString(), Accent = accent.ToString() });
+                var json = JsonSerializer.Serialize(new UiSettings { Mode = mode.ToString(), Background = background.ToString(), Accent = accent.ToString() });
                 File.WriteAllText(_settingsPath, json);
             }
             catch
@@ -155,6 +173,7 @@ public class ThemeService
     private class UiSettings
     {
         public string Mode { get; set; } = "Dark";
+        public string Background { get; set; } = "Ocean";
         public string Accent { get; set; } = "Fluorescent";
     }
 }

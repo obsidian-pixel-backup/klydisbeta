@@ -165,20 +165,48 @@ public static class GgufMetadataReader
         };
     }
 
-    private static object ReadGgufArray(BinaryReader reader)
+    private static object? ReadGgufArray(BinaryReader reader)
     {
         var itemType = (GgufValueType)reader.ReadUInt32();
         ulong count = reader.ReadUInt64();
         
-        if (count > int.MaxValue / 8 || reader.BaseStream.Position + (long)count > reader.BaseStream.Length)
-            throw new InvalidDataException("Array length exceeds reasonable bounds.");
-
-        var list = new List<object?>();
-        for (ulong i = 0; i < count; i++)
+        long itemSize = GetFixedItemSize(itemType);
+        if (itemSize > 0)
         {
-            list.Add(ReadGgufValue(reader, itemType));
+            reader.BaseStream.Seek((long)(count * (ulong)itemSize), SeekOrigin.Current);
         }
-        return list;
+        else
+        {
+            for (ulong i = 0; i < count; i++)
+            {
+                if (itemType == GgufValueType.String)
+                {
+                    ulong len = reader.ReadUInt64();
+                    reader.BaseStream.Seek((long)len, SeekOrigin.Current);
+                }
+                else if (itemType == GgufValueType.Array)
+                {
+                    ReadGgufArray(reader);
+                }
+                else
+                {
+                    ReadGgufValue(reader, itemType);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static long GetFixedItemSize(GgufValueType type)
+    {
+        return type switch
+        {
+            GgufValueType.Uint8 or GgufValueType.Int8 or GgufValueType.Bool => 1,
+            GgufValueType.Uint16 or GgufValueType.Int16 => 2,
+            GgufValueType.Uint32 or GgufValueType.Int32 or GgufValueType.Float32 => 4,
+            GgufValueType.Uint64 or GgufValueType.Int64 or GgufValueType.Float64 => 8,
+            _ => -1
+        };
     }
 
     private static string GetFileTypeString(uint fileType)

@@ -1,0 +1,37 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#000B18" />
+    <SolidColorBrush x:Key="SidebarBackgroundBrush" Color="#041528" />
+    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#000B18" />
+    <SolidColorBrush x:Key="TitleBarBackgroundBrush" Color="#000B18" />
+    <SolidColorBrush x:Key="StatusBarBackgroundBrush" Color="#000B18" />
+    <SolidColorBrush x:Key="BackgroundTertiary" Color="#041528" />
+    <SolidColorBrush x:Key="InputBackgroundBrush" Color="#041528" />
+    <SolidColorBrush x:Key="ButtonBackgroundBrush" Color="#092340" />
+
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#041528" />
+    <SolidColorBrush x:Key="SurfaceElevatedBrush" Color="#092340" />
+    <SolidColorBrush x:Key="SurfaceHoverBrush" Color="#0D3055" />
+
+    <SolidColorBrush x:Key="BorderBrush" Color="#113257" />
+    <SolidColorBrush x:Key="BorderMidBrush" Color="#1C4B7D" />
+
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#E0F0FF" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#9EC8F5" />
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#669BD1" />
+    <SolidColorBrush x:Key="TextInverse" Color="#000B18" />
+
+    <SolidColorBrush x:Key="AssistantBubbleBackgroundBrush" Color="#092340" />
+    <SolidColorBrush x:Key="AssistantBubbleBorderBrush" Color="#113257" />
+    <SolidColorBrush x:Key="ThinkingBubbleBackgroundBrush" Color="#041528" />
+    <SolidColorBrush x:Key="ThinkingBubbleBorderBrush" Color="#113257" />
+    <SolidColorBrush x:Key="ToolBubbleBackgroundBrush" Color="#041528" />
+    <SolidColorBrush x:Key="SystemBubbleBackgroundBrush" Color="Transparent" />
+    <SolidColorBrush x:Key="ErrorBubbleBackgroundBrush" Color="#2A161B" />
+
+    <SolidColorBrush x:Key="SuccessBrush" Color="#3FB950" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#F87171" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#D29922" />
+
+</ResourceDictionary>

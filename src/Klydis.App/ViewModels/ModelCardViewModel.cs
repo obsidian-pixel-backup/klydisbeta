@@ -12,6 +12,12 @@ public partial class ModelCardViewModel : ObservableObject
     private string _modelId = string.Empty;
 
     [ObservableProperty]
+    private bool _isVision;
+
+    [ObservableProperty]
+    private bool _isThinking;
+
+    [ObservableProperty]
     private string _displayName = string.Empty;
 
     [ObservableProperty]
@@ -49,4 +55,18 @@ public partial class ModelCardViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _canFitInVram;
+
+    [ObservableProperty]
+    private string? _role;
+
+    public System.Collections.ObjectModel.ObservableCollection<string> AvailableRoles { get; } = new()
+    {
+        "None",
+        "Chat",
+        "Code",
+        "Instruct",
+        "Vision",
+        "Researcher",
+        "UI Designer"
+    };
 }

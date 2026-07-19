@@ -23,6 +23,11 @@ public class ModelDiscoveryService : IDisposable
     public event Action<string>? ModelDiscovered;
 
     /// <summary>
+    /// Event fired when a model file is deleted.
+    /// </summary>
+    public event Action<string>? ModelDeleted;
+
+    /// <summary>
     /// Configurable paths to scan.
     /// </summary>
     public List<string> ScanPaths { get; } = new();
@@ -53,6 +58,7 @@ public class ModelDiscoveryService : IDisposable
             };
             
             _modelsWatcher.Created += OnFileCreated;
+            _modelsWatcher.Deleted += OnFileDeleted;
             _modelsWatcher.Renamed += OnFileRenamed;
             _modelsWatcher.EnableRaisingEvents = true;
         }
@@ -136,6 +142,12 @@ public class ModelDiscoveryService : IDisposable
         ModelDiscovered?.Invoke(e.FullPath);
     }
 
+    private void OnFileDeleted(object sender, FileSystemEventArgs e)
+    {
+        _logger.LogInformation("Model file deleted via watcher: {Path}", e.FullPath);
+        ModelDeleted?.Invoke(e.FullPath);
+    }
+
     private void OnFileRenamed(object sender, RenamedEventArgs e)
     {
         if (e.FullPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
@@ -153,6 +165,7 @@ public class ModelDiscoveryService : IDisposable
         if (_modelsWatcher != null)
         {
             _modelsWatcher.Created -= OnFileCreated;
+            _modelsWatcher.Deleted -= OnFileDeleted;
             _modelsWatcher.Renamed -= OnFileRenamed;
             _modelsWatcher.Dispose();
         }

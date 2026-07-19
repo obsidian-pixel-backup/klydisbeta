@@ -39,6 +39,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     private ModelParams? _modelParams;
     private InteractiveExecutor? _executor;
     private string _lastEvaluatedPrompt = string.Empty;
+    private readonly SemaphoreSlim _modelLock = new SemaphoreSlim(1, 1);
 
     /// <summary>
     /// Event fired when a token is generated, providing the token text and current tokens/second rate.
@@ -79,46 +80,52 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     /// </summary>
     public Task LoadModelAsync(string modelPath, Klydis.Core.Hardware.OffloadPlan offloadPlan)
     {
-        return Task.Run(() =>
+        return Task.Run(async () =>
         {
-            _logger.LogInformation("Loading model from {ModelPath} with {GpuLayers} GPU layers.", modelPath, offloadPlan.GpuLayers);
-
-            UnloadModel();
-
-            // Configure model parameters for maximum GPU throughput
-            var parameters = new ModelParams(modelPath)
+            await _modelLock.WaitAsync();
+            try
             {
-                ContextSize = (uint)offloadPlan.RecommendedContextSize,
-                GpuLayerCount = offloadPlan.GpuLayers, // -1 = offload ALL layers including output head
-                BatchSize = (uint)offloadPlan.RecommendedBatchSize,
-                UBatchSize = (uint)offloadPlan.RecommendedBatchSize, // Align physical batch size with BatchSize
-                FlashAttention = true,
-                Threads = Math.Max(Environment.ProcessorCount / 2, 1),
-                BatchThreads = Math.Max(Environment.ProcessorCount / 2, 1),
-                // Pin model weights in RAM to prevent OS paging — critical for GPU DMA transfers
-                UseMemoryLock = true,
-                // Memory map the model file for faster loading and lower memory pressure
-                UseMemorymap = true,
-                // Enable tensor parallelism across GPUs
-                SplitMode = LLama.Native.GPUSplitMode.Row,
-                // Explicitly target GPU 0 as main
-                MainGpu = 0
-            };
-            
-            // Use native Q8_0 KV cache to halve VRAM usage with negligible quality loss
-            parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
-            parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
+                _logger.LogInformation("Loading model from {ModelPath} with {GpuLayers} GPU layers.", modelPath, offloadPlan.GpuLayers);
 
-            _modelParams = parameters;
-            _weights = LLamaWeights.LoadFromFile(parameters);
-            _context = _weights.CreateContext(parameters);
-            
-            // Using InteractiveExecutor for hybrid fast-path prefix caching
-            _executor = new InteractiveExecutor(_context);
-            _lastEvaluatedPrompt = string.Empty;
+                UnloadModelInternal();
 
-            CurrentModelPath = modelPath;
-            _logger.LogInformation("Model loaded successfully.");
+                // Configure model parameters for maximum GPU throughput
+                var parameters = new ModelParams(modelPath)
+                {
+                    ContextSize = (uint)offloadPlan.RecommendedContextSize,
+                    GpuLayerCount = offloadPlan.GpuLayers, // -1 = offload ALL layers including output head
+                    BatchSize = (uint)offloadPlan.RecommendedBatchSize,
+                    UBatchSize = (uint)offloadPlan.RecommendedBatchSize, // Align physical batch size with BatchSize
+                    FlashAttention = true,
+                    Threads = Math.Max(Environment.ProcessorCount / 2, 1),
+                    BatchThreads = Math.Max(Environment.ProcessorCount / 2, 1),
+                    // Pin model weights in RAM to prevent OS paging — critical for GPU DMA transfers
+                    UseMemoryLock = false,
+                    // Disable Memory map to prevent file bounds corruption errors on Windows,
+                    // forcing weights directly into RAM.
+                    UseMemorymap = false
+                };
+                
+                // Use native Q8_0 KV cache to halve VRAM usage with negligible quality loss
+                parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
+                parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
+
+                _modelParams = parameters;
+                _weights = LLamaWeights.LoadFromFile(parameters);
+                _context = _weights.CreateContext(parameters);
+                
+                // Using InteractiveExecutor for hybrid fast-path prefix caching
+                _executor = new InteractiveExecutor(_context);
+                _lastEvaluatedPrompt = string.Empty;
+
+                CurrentModelPath = modelPath;
+                _logger.LogInformation("Model loaded successfully.");
+            }
+            finally
+            {
+                _modelLock.Release();
+            }
+
             ModelStateChanged?.Invoke(true, modelPath);
         });
     }
@@ -129,86 +136,115 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     public async IAsyncEnumerable<string> GenerateAsync(
         string prompt, 
         InferenceParams inferenceParams, 
+        bool triggerEvents = true,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        if (!IsModelLoaded || _executor == null || _context == null)
-            throw new InvalidOperationException("Model is not loaded.");
-
-        _logger.LogDebug("Starting token generation.");
-
-        var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+        await _modelLock.WaitAsync(ct);
+        try
         {
-            SingleWriter = true,
-            SingleReader = true
-        });
+            if (!IsModelLoaded || _executor == null || _context == null)
+                throw new InvalidOperationException("Model is not loaded.");
 
-        // Run generation on a background thread to prevent UI backpressure from slowing down the GPU
-        _ = Task.Run(async () =>
-        {
-            try
+            _logger.LogDebug("Starting token generation.");
+
+            var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
             {
-                var stopwatch = Stopwatch.StartNew();
-                int tokenCount = 0;
-                bool isFirstToken = true;
-                string textToEvaluate = prompt;
+                SingleWriter = true,
+                SingleReader = true
+            });
 
-                // HYBRID EXECUTOR LOGIC: Fast-path for appends, Slow-path for edits/deletes
-                if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt))
+            var generationTask = Task.Run(async () =>
+            {
+                try
                 {
-                    textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
-                    _logger.LogDebug("Fast-path inference triggered. Evaluating delta of {DeltaLength} chars.", textToEvaluate.Length);
-                }
-                else
-                {
-                    _logger.LogDebug("Slow-path inference triggered. Re-evaluating entire prompt.");
-                    _context.Dispose();
-                    _context = _weights.CreateContext(_modelParams!);
-                    _executor = new InteractiveExecutor(_context); // Reset the executor state
-                    _lastEvaluatedPrompt = string.Empty;
-                }
+                    var stopwatch = Stopwatch.StartNew();
+                    int tokenCount = 0;
+                    bool isFirstToken = true;
+                    string textToEvaluate = prompt;
 
-                var generatedContent = new System.Text.StringBuilder();
-
-                await foreach (var token in _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: ct))
-                {
-                    if (isFirstToken)
+                    // HYBRID EXECUTOR LOGIC: Fast-path for appends, Slow-path for edits/deletes
+                    if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt))
                     {
-                        isFirstToken = false;
-                        stopwatch.Restart(); // Reset stopwatch after prompt processing to measure pure generation t/s
+                        textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
+                        _logger.LogDebug("Fast-path inference triggered. Evaluating delta of {DeltaLength} chars.", textToEvaluate.Length);
                     }
                     else
                     {
-                        tokenCount++;
+                        _logger.LogDebug("Slow-path inference triggered. Re-evaluating entire prompt.");
+                        _context?.Dispose();
+                        _context = _weights!.CreateContext(_modelParams!);
+                        _executor = new InteractiveExecutor(_context); // Reset the executor state
+                        _lastEvaluatedPrompt = string.Empty;
+                    }
+
+                    var generatedContent = new System.Text.StringBuilder();
+
+                    await foreach (var token in _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: ct))
+                    {
+                        if (isFirstToken)
+                        {
+                            isFirstToken = false;
+                            stopwatch.Restart(); // Reset stopwatch after prompt processing to measure pure generation t/s
+                        }
+                        else
+                        {
+                            tokenCount++;
+                        }
+                        
+                        generatedContent.Append(token);
+                        
+                        float tokensPerSecond = tokenCount > 0 ? (float)(tokenCount / stopwatch.Elapsed.TotalSeconds) : 0;
+                        if (triggerEvents)
+                        {
+                            TokenGenerated?.Invoke(token, tokensPerSecond);
+                        }
+                        
+                        await channel.Writer.WriteAsync(token, ct);
                     }
                     
-                    generatedContent.Append(token);
-                    
-                    float tokensPerSecond = tokenCount > 0 ? (float)(tokenCount / stopwatch.Elapsed.TotalSeconds) : 0;
-                    TokenGenerated?.Invoke(token, tokensPerSecond);
-                    
-                    await channel.Writer.WriteAsync(token, ct);
+                    // Update the state hash to include both the input prompt and the generated response
+                    _lastEvaluatedPrompt = prompt + generatedContent.ToString();
                 }
-                
-                // Update the state hash to include both the input prompt and the generated response
-                _lastEvaluatedPrompt = prompt + generatedContent.ToString();
-            }
-            catch (Exception ex)
+                catch (OperationCanceledException)
+                {
+                    _logger.LogDebug("Background generation was canceled.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error in background generation");
+                }
+                finally
+                {
+                    channel.Writer.Complete();
+                }
+            }, CancellationToken.None);
+
+            try
             {
-                _logger.LogError(ex, "Error in background generation");
+                // Yield tokens from the channel
+                await foreach (var token in channel.Reader.ReadAllAsync(ct))
+                {
+                    yield return token;
+                }
             }
             finally
             {
-                channel.Writer.Complete();
+                // Ensure the background task has fully exited before we release the model lock.
+                // Otherwise, a canceled request might leave the background task running,
+                // and a subsequent request could dispose the context while it is still in use!
+                try { await generationTask.ConfigureAwait(false); } catch { }
+                if (triggerEvents)
+                {
+                    TokenGenerated?.Invoke(string.Empty, 0f);
+                }
             }
-        }, ct);
 
-        // Yield tokens from the channel
-        await foreach (var token in channel.Reader.ReadAllAsync(ct))
-        {
-            yield return token;
+            _logger.LogDebug("Finished token generation.");
         }
-
-        _logger.LogDebug("Finished token generation.");
+        finally
+        {
+            _modelLock.Release();
+        }
     }
 
     public IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, CancellationToken ct)
@@ -226,14 +262,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 RepeatPenalty = 1.1f
             }
         };
-        return GenerateAsync(prompt, inferenceParams, ct);
+        return GenerateAsync(prompt, inferenceParams, true, ct);
     }
 
     public async Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default)
     {
         var inferenceParams = new InferenceParams { MaxTokens = -1 };
         var sb = new System.Text.StringBuilder();
-        await foreach (var token in GenerateAsync(prompt, inferenceParams, ct))
+        await foreach (var token in GenerateAsync(prompt, inferenceParams, false, ct))
         {
             sb.Append(token);
         }
@@ -250,7 +286,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         CancellationToken ct = default)
     {
         var prompt = template.Format(messages);
-        return GenerateAsync(prompt, inferenceParams, ct);
+        return GenerateAsync(prompt, inferenceParams, true, ct);
     }
 
     /// <summary>
@@ -258,16 +294,39 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     /// </summary>
     public int GetTokenCount(string text)
     {
-        if (_context == null)
-            throw new InvalidOperationException("Model is not loaded.");
+        _modelLock.Wait();
+        try
+        {
+            if (_context == null)
+                throw new InvalidOperationException("Model is not loaded.");
 
-        return _context.Tokenize(text, special: true).Length;
+            return _context.Tokenize(text, special: true).Length;
+        }
+        finally
+        {
+            _modelLock.Release();
+        }
     }
 
     /// <summary>
     /// Unloads the model and frees native resources and VRAM.
     /// </summary>
     public void UnloadModel()
+    {
+        _modelLock.Wait();
+        try
+        {
+            UnloadModelInternal();
+        }
+        finally
+        {
+            _modelLock.Release();
+        }
+        
+        ModelStateChanged?.Invoke(false, null);
+    }
+
+    private void UnloadModelInternal()
     {
         if (_executor != null)
         {
@@ -288,7 +347,6 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
         CurrentModelPath = null;
         _logger.LogInformation("Model unloaded and native resources freed.");
-        ModelStateChanged?.Invoke(false, null);
     }
 
     /// <summary>
@@ -297,5 +355,6 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     public void Dispose()
     {
         UnloadModel();
+        _modelLock.Dispose();
     }
 }

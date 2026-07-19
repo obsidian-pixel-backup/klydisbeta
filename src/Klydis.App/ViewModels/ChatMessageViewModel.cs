@@ -34,6 +34,24 @@ public partial class ChatMessageViewModel : ObservableObject
     private string _content = string.Empty;
 
     [ObservableProperty]
+    private string _renderedContent = string.Empty;
+
+    private DateTime _lastRenderUpdate = DateTime.MinValue;
+
+    partial void OnContentChanged(string? oldValue, string newValue)
+    {
+        RenderedContent = newValue;
+    }
+
+    partial void OnIsStreamingChanged(bool oldValue, bool newValue)
+    {
+        if (!newValue)
+        {
+            RenderedContent = Content;
+        }
+    }
+
+    [ObservableProperty]
     private bool _isStreaming;
 
     [ObservableProperty]

@@ -41,5 +41,6 @@ public record ModelInfo(
     ModelSource Source,
     DateTime InstalledAt,
     DateTime LastUsedAt,
-    string? ChecksumSha256
+    string? ChecksumSha256,
+    string? Role = null
 );

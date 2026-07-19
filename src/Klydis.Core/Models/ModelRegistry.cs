@@ -23,6 +23,16 @@ public class ModelRegistry
     private ConcurrentDictionary<string, ModelInfo> _models = new();
 
     /// <summary>
+    /// Event fired when the model registry changes.
+    /// </summary>
+    public event Action? RegistryChanged;
+
+    /// <summary>
+    /// Gets the directory where models are stored.
+    /// </summary>
+    public string ModelsDirectory => _modelsDirectory;
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="ModelRegistry"/> class.
     /// </summary>
     /// <param name="logger">The logger instance.</param>
@@ -56,9 +66,15 @@ public class ModelRegistry
             
             if (models != null)
             {
-                _models = new ConcurrentDictionary<string, ModelInfo>(
-                    models.ToDictionary(m => m.Id)
-                );
+                var dict = new ConcurrentDictionary<string, ModelInfo>();
+                foreach (var m in models)
+                {
+                    if (m != null && !string.IsNullOrEmpty(m.Id))
+                    {
+                        dict[m.Id] = m;
+                    }
+                }
+                _models = dict;
             }
         }
         catch (Exception ex)
@@ -80,6 +96,18 @@ public class ModelRegistry
         await _lock.WaitAsync();
         try
         {
+            await SaveInternalAsync();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private async Task SaveInternalAsync()
+    {
+        try
+        {
             var options = new JsonSerializerOptions { WriteIndented = true };
             string json = JsonSerializer.Serialize(_models.Values, options);
             await File.WriteAllTextAsync(_registryFilePath, json);
@@ -88,9 +116,46 @@ public class ModelRegistry
         {
             _logger.LogError(ex, "Failed to save model registry.");
         }
-        finally
+    }
+
+    public async Task AddActiveDownloadAsync(ActiveDownloadRecord record)
+    {
+        string path = Path.Combine(_modelsDirectory, "active_downloads.json");
+        var list = await GetActiveDownloadsAsync();
+        list.RemoveAll(d => d.FileName == record.FileName && d.RepoId == record.RepoId);
+        list.Add(record);
+        
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(list, options));
+    }
+
+    public async Task RemoveActiveDownloadAsync(string repoId, string fileName)
+    {
+        string path = Path.Combine(_modelsDirectory, "active_downloads.json");
+        var list = await GetActiveDownloadsAsync();
+        int removed = list.RemoveAll(d => d.FileName == fileName && d.RepoId == repoId);
+        
+        if (removed > 0)
         {
-            _lock.Release();
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(list, options));
+        }
+    }
+
+    public async Task<List<ActiveDownloadRecord>> GetActiveDownloadsAsync()
+    {
+        string path = Path.Combine(_modelsDirectory, "active_downloads.json");
+        if (!File.Exists(path)) return new List<ActiveDownloadRecord>();
+
+        try
+        {
+            string json = await File.ReadAllTextAsync(path);
+            return JsonSerializer.Deserialize<List<ActiveDownloadRecord>>(json) ?? new List<ActiveDownloadRecord>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to read active downloads.");
+            return new List<ActiveDownloadRecord>();
         }
     }
 
@@ -118,6 +183,7 @@ public class ModelRegistry
     {
         _models[model.Id] = model;
         await SaveAsync();
+        RegistryChanged?.Invoke();
     }
 
     /// <summary>
@@ -129,6 +195,22 @@ public class ModelRegistry
         if (_models.TryRemove(id, out _))
         {
             await SaveAsync();
+            RegistryChanged?.Invoke();
+        }
+    }
+
+    /// <summary>
+    /// Updates the role of a model.
+    /// </summary>
+    /// <param name="id">The model ID.</param>
+    /// <param name="role">The new role.</param>
+    public async Task UpdateModelRoleAsync(string id, string? role)
+    {
+        if (_models.TryGetValue(id, out var model))
+        {
+            _models[id] = model with { Role = role };
+            await SaveAsync();
+            RegistryChanged?.Invoke();
         }
     }
 
@@ -137,45 +219,92 @@ public class ModelRegistry
     /// </summary>
     public async Task SyncWithDiskAsync()
     {
-        _logger.LogInformation("Syncing model registry with disk...");
-
-        var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        
-        if (Directory.Exists(_modelsDirectory))
+        await _lock.WaitAsync();
+        try
         {
-            var ggufFiles = Directory.EnumerateFiles(_modelsDirectory, "*.gguf", SearchOption.TopDirectoryOnly);
-            
-            foreach (var file in ggufFiles)
+            _logger.LogInformation("Syncing model registry with disk...");
+
+            bool changed = false;
+
+            // Deduplicate existing entries by FilePath (case-insensitive)
+            var duplicates = _models.Values
+                .GroupBy(m => m.FilePath, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .ToList();
+
+            foreach (var group in duplicates)
             {
-                existingFiles.Add(file);
-                
-                // Check if file is already registered
-                var existingModel = _models.Values.FirstOrDefault(m => m.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
-                if (existingModel == null)
+                // Keep the best model in the group:
+                // 1. Prefer HuggingFace source, then Local, then Discovered
+                // 2. Prefer the one with a defined Role
+                // 3. Prefer the one with the newest InstalledAt
+                var bestModel = group
+                    .OrderByDescending(m => m.Source == ModelSource.HuggingFace)
+                    .ThenByDescending(m => m.Source == ModelSource.Local)
+                    .ThenByDescending(m => !string.IsNullOrEmpty(m.Role))
+                    .ThenByDescending(m => m.InstalledAt)
+                    .First();
+
+                foreach (var duplicateModel in group)
                 {
-                    _logger.LogInformation("Found new GGUF file: {File}", file);
-                    await RegisterDiscoveredModelAsync(file);
+                    if (duplicateModel.Id != bestModel.Id)
+                    {
+                        _logger.LogInformation("Removing duplicate model registration for path {Path} (ID: {Id})", duplicateModel.FilePath, duplicateModel.Id);
+                        if (_models.TryRemove(duplicateModel.Id, out _))
+                        {
+                            changed = true;
+                        }
+                    }
                 }
             }
+
+            var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            
+            if (Directory.Exists(_modelsDirectory))
+            {
+                var ggufFiles = Directory.EnumerateFiles(_modelsDirectory, "*.gguf", SearchOption.TopDirectoryOnly);
+                
+                foreach (var file in ggufFiles)
+                {
+                    existingFiles.Add(file);
+                    
+                    // Check if file is already registered
+                    var existingModel = _models.Values.FirstOrDefault(m => m.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
+                    if (existingModel == null)
+                    {
+                        _logger.LogInformation("Found new GGUF file: {File}", file);
+                        await RegisterDiscoveredModelAsync(file);
+                        changed = true;
+                    }
+                }
+            }
+
+            // Remove models that no longer exist on disk
+            var modelsToRemove = _models.Values
+                .Where(m => (m.Source == ModelSource.Local || m.Source == ModelSource.Discovered) && !File.Exists(m.FilePath))
+                .ToList();
+
+            foreach (var missingModel in modelsToRemove)
+            {
+                _logger.LogInformation("Removing missing model from registry: {Id}", missingModel.Id);
+                if (_models.TryRemove(missingModel.Id, out _))
+                {
+                    changed = true;
+                }
+            }
+
+            if (changed)
+            {
+                await SaveInternalAsync();
+                RegistryChanged?.Invoke();
+            }
+            
+            _logger.LogInformation("Sync complete.");
         }
-
-        // Remove models that no longer exist on disk
-        var modelsToRemove = _models.Values
-            .Where(m => (m.Source == ModelSource.Local || m.Source == ModelSource.Discovered) && !File.Exists(m.FilePath))
-            .ToList();
-
-        foreach (var missingModel in modelsToRemove)
+        finally
         {
-            _logger.LogInformation("Removing missing model from registry: {Id}", missingModel.Id);
-            _models.TryRemove(missingModel.Id, out _);
+            _lock.Release();
         }
-
-        if (modelsToRemove.Any() || existingFiles.Any())
-        {
-            await SaveAsync();
-        }
-        
-        _logger.LogInformation("Sync complete.");
     }
 
     private async Task RegisterDiscoveredModelAsync(string filePath)
@@ -212,7 +341,8 @@ public class ModelRegistry
                 Source: ModelSource.Discovered,
                 InstalledAt: DateTime.UtcNow,
                 LastUsedAt: DateTime.UtcNow,
-                ChecksumSha256: null
+                ChecksumSha256: null,
+                Role: null
             );
 
             _models[id] = model;

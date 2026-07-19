@@ -10,6 +10,10 @@ public class Program
     [STAThread]
     public static void Main()
     {
+        // Force LLamaSharp to load the CUDA backend globally before ANY native calls are made.
+        // This ensures NVIDIA GPUs will properly utilize CUDA offloading instead of silently falling back to CPU.
+        LLama.Native.NativeLibraryConfig.All.WithCuda();
+
         try
         {
             // Configure process PATH to include CUDA toolkit bin directories.
@@ -52,95 +56,6 @@ public class Program
                 }
             }
 
-            // Dynamically copy cuda12 native libraries to cuda13 folder if the host system uses CUDA 13+
-            // and LLamaSharp's loader tries to load from cuda13, but the NuGet package only came with cuda12.
-            // Also copies ggml-cpu.dll from avx2/ since the CUDA loader requires it as a dependency.
-            try
-            {
-                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                var nativeDir = Path.Combine(baseDir, "runtimes", "win-x64", "native");
-                var cuda12Dir = Path.Combine(nativeDir, "cuda12");
-                var cuda13Dir = Path.Combine(nativeDir, "cuda13");
-                var avx2Dir = Path.Combine(nativeDir, "avx2");
-
-                if (Directory.Exists(cuda12Dir))
-                {
-                    var cuda12Files = Directory.GetFiles(cuda12Dir);
-                    
-                    // Critical DLLs that MUST be present for CUDA backend to load successfully.
-                    // If ANY of these are missing, the loader will silently fall back to CPU (avx2).
-                    var criticalDlls = new[] { "llama.dll", "ggml.dll", "ggml-base.dll", "ggml-cuda.dll" };
-
-                    bool needsRecopy = false;
-                    if (Directory.Exists(cuda13Dir))
-                    {
-                        var cuda13Files = Directory.GetFiles(cuda13Dir);
-                        
-                        // Check completeness: file count AND presence of all critical DLLs
-                        var existingFileNames = cuda13Files.Select(f => Path.GetFileName(f).ToLowerInvariant()).ToArray();
-                        bool hasCriticalFiles = criticalDlls.All(dll => existingFileNames.Contains(dll.ToLowerInvariant()));
-                        
-                        if (cuda13Files.Length < cuda12Files.Length || !hasCriticalFiles)
-                        {
-                            try { File.AppendAllText("llama_native.log", $"[CUDA] cuda13/ incomplete ({cuda13Files.Length} files, critical={hasCriticalFiles}). Deleting and re-copying...{Environment.NewLine}"); } catch {}
-                            Directory.Delete(cuda13Dir, true);
-                            needsRecopy = true;
-                        }
-                    }
-                    else
-                    {
-                        needsRecopy = true;
-                    }
-
-                    if (needsRecopy)
-                    {
-                        Directory.CreateDirectory(cuda13Dir);
-
-                        // Copy ALL CUDA 12 DLLs (ggml-base, ggml-cuda, ggml, llama, mtmd)
-                        int copiedCount = 0;
-                        foreach (var file in cuda12Files)
-                        {
-                            var fileName = Path.GetFileName(file);
-                            var destFile = Path.Combine(cuda13Dir, fileName);
-                            File.Copy(file, destFile, true);
-                            copiedCount++;
-                        }
-                        try { File.AppendAllText("llama_native.log", $"[CUDA] Copied {copiedCount} files from cuda12/ to cuda13/{Environment.NewLine}"); } catch {}
-
-                        // Also copy ggml-cpu.dll from avx2 — the CUDA loader requires it as a dependency
-                        if (Directory.Exists(avx2Dir))
-                        {
-                            var cpuDll = Path.Combine(avx2Dir, "ggml-cpu.dll");
-                            if (File.Exists(cpuDll))
-                            {
-                                File.Copy(cpuDll, Path.Combine(cuda13Dir, "ggml-cpu.dll"), true);
-                                try { File.AppendAllText("llama_native.log", $"[CUDA] Copied ggml-cpu.dll from avx2/ to cuda13/{Environment.NewLine}"); } catch {}
-                            }
-                        }
-
-                        // Verify all critical files are now present
-                        var finalFiles = Directory.GetFiles(cuda13Dir).Select(f => Path.GetFileName(f).ToLowerInvariant()).ToArray();
-                        var missingCritical = criticalDlls.Where(dll => !finalFiles.Contains(dll.ToLowerInvariant())).ToArray();
-                        if (missingCritical.Length > 0)
-                        {
-                            try { File.AppendAllText("llama_native.log", $"[CUDA] WARNING: Still missing critical DLLs after copy: {string.Join(", ", missingCritical)}{Environment.NewLine}"); } catch {}
-                        }
-                        else
-                        {
-                            try { File.AppendAllText("llama_native.log", $"[CUDA] cuda13/ ready with {finalFiles.Length} files. All critical DLLs present.{Environment.NewLine}"); } catch {}
-                        }
-                    }
-                    else
-                    {
-                        try { File.AppendAllText("llama_native.log", $"[CUDA] cuda13/ already complete. Skipping copy.{Environment.NewLine}"); } catch {}
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                try { File.AppendAllText("llama_native.log", $"[CUDA] FATAL: Failed to copy CUDA 12 -> 13: {ex}{Environment.NewLine}"); } catch {}
-            }
-
             // Copy the active backend's DLLs directly to the application execution root folder.
             // In llama.cpp (b1000+), dynamic backend libraries (like ggml-cuda.dll, ggml-cpu-*.dll)
             // MUST reside in the same folder as llama.dll / the main executable to be loaded successfully.
@@ -153,7 +68,17 @@ public class Program
                 var system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
                 bool isCudaSupported = File.Exists(Path.Combine(system32, "nvcuda.dll"));
                 
-                string sourceSubFolder = isCudaSupported ? "cuda13" : "avx2";
+                string sourceSubFolder = "avx2";
+                if (isCudaSupported)
+                {
+                    if (Directory.Exists(Path.Combine(nativeDir, "cuda13")))
+                        sourceSubFolder = "cuda13";
+                    else if (Directory.Exists(Path.Combine(nativeDir, "cuda12")))
+                        sourceSubFolder = "cuda12";
+                    else if (Directory.Exists(Path.Combine(nativeDir, "cuda11")))
+                        sourceSubFolder = "cuda11";
+                }
+                
                 var sourcePath = Path.Combine(nativeDir, sourceSubFolder);
                 
                 if (Directory.Exists(sourcePath))

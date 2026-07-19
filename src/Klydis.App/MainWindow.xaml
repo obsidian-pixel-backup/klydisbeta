@@ -125,6 +125,12 @@
                                  Command="{Binding NavigateCommand}" CommandParameter="Models">
                         <Path Data="M 2,14 L 2,4 C 2,2 14,2 14,4 L 14,14 Z M 5,7 L 11,7" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}" StrokeThickness="1.5" Fill="Transparent"/>
                     </RadioButton>
+                    <StackPanel Margin="0,-5,0,5" Visibility="{Binding ModelLibraryViewModel.HasActiveDownloads, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <ProgressBar Minimum="0" Maximum="100" Value="{Binding ModelLibraryViewModel.TotalDownloadProgress}" 
+                                     Height="4" Margin="8,0,8,2" Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" BorderThickness="0" />
+                        <TextBlock Text="{Binding ModelLibraryViewModel.TotalDownloadProgress, StringFormat={}{0:F0}%}" 
+                                   Foreground="{DynamicResource AccentPrimaryBrush}" FontSize="9" HorizontalAlignment="Center" FontWeight="SemiBold" />
+                    </StackPanel>
                     <RadioButton Style="{DynamicResource ActivityTabStyle}" GroupName="ActivityBar" 
                                  IsChecked="{Binding ActivePanel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Monitor}"
                                  Command="{Binding NavigateCommand}" CommandParameter="Monitor">
@@ -153,6 +159,12 @@
                 </Grid.ColumnDefinitions>
                 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Unload" Command="{Binding ChatViewModel.UnloadModelCommand}" 
+                            Visibility="{Binding IsModelLoaded, Converter={StaticResource BoolToVisConverter}}"
+                            Margin="0,0,10,0" Padding="8,2"
+                            Background="Transparent" Foreground="{DynamicResource TextMutedBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            ToolTip="Unload the current model"/>
                     <Ellipse Width="8" Height="8" Margin="0,0,6,0"
                              Visibility="{Binding ChatViewModel.IsModelLoading, Converter={StaticResource InverseBoolToVisConverter}}">
                         <Ellipse.Style>

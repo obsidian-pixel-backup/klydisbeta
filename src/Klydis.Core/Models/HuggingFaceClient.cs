@@ -50,7 +50,8 @@ public record HfModelInfo(
     int Likes,
     DateTimeOffset LastModified,
     string[] Tags,
-    string Description
+    string Description,
+    string PipelineTag = ""
 );
 
 /// <summary>
@@ -126,10 +127,10 @@ public partial class HuggingFaceClient
     /// <param name="limit">The maximum number of results to return.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A list of model information records.</returns>
-    public async Task<List<HfModelInfo>> SearchModelsAsync(string query, int limit = 20, CancellationToken ct = default)
+    public async Task<List<HfModelInfo>> SearchModelsAsync(string query, int limit = 20, string sort = "downloads", CancellationToken ct = default)
     {
-        var encodedQuery = Uri.EscapeDataString(query);
-        var url = $"https://huggingface.co/api/models?search={encodedQuery}&filter=gguf&sort=downloads&direction=-1&limit={limit}";
+        var encodedQuery = string.IsNullOrWhiteSpace(query) ? "" : $"search={Uri.EscapeDataString(query)}&";
+        var url = $"https://huggingface.co/api/models?{encodedQuery}filter=gguf&sort={sort}&direction=-1&limit={limit}";
 
         _logger.LogInformation("Searching Hugging Face models with query: {Query}", query);
 
@@ -146,6 +147,15 @@ public partial class HuggingFaceClient
         foreach (var element in jsonDocs)
         {
             var id = element.GetProperty("id").GetString() ?? string.Empty;
+            
+            // Filter out MTP architectures since they are unsupported by the current LLamaSharp version
+            if (id.Contains("-mtp", StringComparison.OrdinalIgnoreCase) || 
+                id.Contains("mtp-", StringComparison.OrdinalIgnoreCase) || 
+                id.EndsWith("-mtp", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             var parts = id.Split('/');
             var author = parts.Length > 1 ? parts[0] : "unknown";
             var modelName = parts.Length > 1 ? parts[1] : id;
@@ -155,11 +165,13 @@ public partial class HuggingFaceClient
                 ? tg.EnumerateArray().Select(t => t.GetString() ?? string.Empty).ToArray()
                 : [];
             
+            var pipelineTag = element.TryGetProperty("pipeline_tag", out var pt) ? pt.GetString() ?? string.Empty : string.Empty;
+
             var lastModified = element.TryGetProperty("lastModified", out var lm) 
                 ? lm.GetDateTimeOffset() 
                 : DateTimeOffset.UtcNow;
 
-            results.Add(new HfModelInfo(id, author, modelName, downloads, likes, lastModified, tags, ""));
+            results.Add(new HfModelInfo(id, author, modelName, downloads, likes, lastModified, tags, "", pipelineTag));
         }
 
         return results;
@@ -188,7 +200,12 @@ public partial class HuggingFaceClient
 
         var ggufFiles = siblings.EnumerateArray()
             .Select(s => s.GetProperty("rfilename").GetString())
-            .Where(f => !string.IsNullOrEmpty(f) && f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !string.IsNullOrEmpty(f) && 
+                        f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) &&
+                        !f.Contains("-mtp", StringComparison.OrdinalIgnoreCase) &&
+                        !f.Contains("mtp-", StringComparison.OrdinalIgnoreCase) &&
+                        !repoId.Contains("-mtp", StringComparison.OrdinalIgnoreCase) &&
+                        !repoId.Contains("mtp-", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         foreach (var filename in ggufFiles)
@@ -252,7 +269,7 @@ public partial class HuggingFaceClient
         IProgress<DownloadProgress> progress, 
         CancellationToken ct = default)
     {
-        var url = $"https://huggingface.co/resolve/{repoId}/main/{filename}";
+        var url = $"https://huggingface.co/{repoId}/resolve/main/{filename}";
         
         var dir = Path.GetDirectoryName(destinationPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -260,17 +277,20 @@ public partial class HuggingFaceClient
             Directory.CreateDirectory(dir);
         }
 
-        var fileInfo = new FileInfo(destinationPath);
-        long existingBytes = fileInfo.Exists ? fileInfo.Length : 0;
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        if (existingBytes > 0)
+        if (File.Exists(destinationPath))
         {
-            request.Headers.Range = new RangeHeaderValue(existingBytes, null);
+            _logger.LogInformation("File already fully downloaded at {Path}.", destinationPath);
+            var fi = new FileInfo(destinationPath);
+            progress?.Report(new DownloadProgress(fi.Length, fi.Length, 0, 0, 100));
+            return;
         }
 
+        string tempFilePath = destinationPath + ".download";
+        var fileInfo = new FileInfo(tempFilePath);
+        long existingBytes = fileInfo.Exists ? fileInfo.Length : 0;
+
         _logger.LogInformation("Starting download of {Filename} from {RepoId} to {Path}. Resuming from {Bytes} bytes.", 
-            filename, repoId, destinationPath, existingBytes);
+            filename, repoId, tempFilePath, existingBytes);
 
         using var response = await SendWithRetryAsync(() => 
         {
@@ -303,7 +323,7 @@ public partial class HuggingFaceClient
         }
 
         using var contentStream = await response.Content.ReadAsStreamAsync(ct);
-        using var fileStream = new FileStream(destinationPath, canResume ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
+        var fileStream = new FileStream(tempFilePath, canResume ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
 
         var buffer = new byte[81920];
         long totalDownloaded = existingBytes;
@@ -343,6 +363,11 @@ public partial class HuggingFaceClient
                 lastReportTime = sw.Elapsed;
             }
         }
+
+        fileStream.Dispose();
+        
+        if (File.Exists(destinationPath)) File.Delete(destinationPath);
+        File.Move(tempFilePath, destinationPath);
 
         progress?.Report(new DownloadProgress(totalDownloaded, totalBytes > 0 ? totalBytes : totalDownloaded, 0, 0, 100));
         _logger.LogInformation("Download of {Filename} completed successfully.", filename);
