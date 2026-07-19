@@ -117,7 +117,7 @@ public partial class ChatViewModel : ObservableObject
     {
         if (System.Windows.Application.Current != null)
         {
-            System.Windows.Application.Current.Dispatcher.Invoke(RefreshModels);
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(RefreshModels);
         }
     }
 
@@ -142,7 +142,7 @@ public partial class ChatViewModel : ObservableObject
     private async Task InitializeSessionsAsync()
     {
         var dbSessions = await _messageStore.GetSessionsAsync();
-        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
             Sessions.Clear();
             foreach (var session in dbSessions)
@@ -618,7 +618,7 @@ public partial class ChatViewModel : ObservableObject
                     var newTitle = CleanTitle(await _chatEngine!.GenerateTitleAsync(userMessage, responseText));
                     if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat")
                     {
-                        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                         {
                             SessionTitle = newTitle;
                             SelectedSession.Title = newTitle;

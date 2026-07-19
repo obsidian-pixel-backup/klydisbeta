@@ -84,7 +84,7 @@ public partial class SystemMonitorViewModel : ObservableObject
 
     private void OnTokenGenerated(string token, float tokensPerSecond)
     {
-        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
             CurrentTokensPerSecond = Math.Round(tokensPerSecond, 2);
             TokensPerSecondHistory.Add(CurrentTokensPerSecond);
@@ -135,7 +135,7 @@ public partial class SystemMonitorViewModel : ObservableObject
         using var process = System.Diagnostics.Process.GetCurrentProcess();
         AppRamUsedMb = (int)(process.WorkingSet64 / (1024 * 1024));
 
-        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
             LoadedModels.Clear();
             if (_inferenceEngine.IsModelLoaded && !string.IsNullOrEmpty(_inferenceEngine.CurrentModelPath))

@@ -294,18 +294,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     /// </summary>
     public int GetTokenCount(string text)
     {
-        _modelLock.Wait();
-        try
-        {
-            if (_context == null)
-                throw new InvalidOperationException("Model is not loaded.");
+        var context = _context;
+        if (context == null)
+            throw new InvalidOperationException("Model is not loaded.");
 
-            return _context.Tokenize(text, special: true).Length;
-        }
-        finally
-        {
-            _modelLock.Release();
-        }
+        return context.Tokenize(text, special: true).Length;
     }
 
     /// <summary>
