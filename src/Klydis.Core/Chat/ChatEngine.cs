@@ -151,7 +151,7 @@ public class ChatEngine(
     {
         var templateType = promptEngine.DetectTemplate(inferenceEngine.Architecture);
         var stopTokens = promptEngine.GetStopTokens(templateType);
-        var tools = toolExecutor.GetToolDefinitions();
+        var tools = await toolExecutor.GetToolDefinitionsAsync();
         var toolsSchema = toolExecutor.FormatToolsForPrompt(tools);
 
         int iterationCount = 0;

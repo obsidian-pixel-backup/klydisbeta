@@ -25,6 +25,10 @@
     
     <!-- WMI for system profiling (Windows) -->
     <PackageReference Include="System.Management" Version="10.0.10" />
+
+    <!-- Playwright for local web crawling -->
+    <PackageReference Include="Microsoft.Playwright" Version="1.61.0" />
+    <PackageReference Include="ReverseMarkdown" Version="6.1.0" />
   </ItemGroup>
 
 </Project>

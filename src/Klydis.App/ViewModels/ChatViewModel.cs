@@ -59,6 +59,9 @@ public partial class ChatViewModel : ObservableObject
     private string _selectedModelId = string.Empty;
 
     [ObservableProperty]
+    private RiskLevel _selectedRiskLevel;
+
+    [ObservableProperty]
     private string _sessionTitle = "New Chat";
 
     [ObservableProperty]
@@ -67,6 +70,7 @@ public partial class ChatViewModel : ObservableObject
     public ObservableCollection<ChatMessageViewModel> Messages { get; } = new();
     public ObservableCollection<string> AvailableModels { get; } = new();
     public ObservableCollection<SessionInfo> Sessions { get; } = new();
+    public ObservableCollection<RiskLevel> AvailableRiskLevels { get; } = new();
 
     private readonly Klydis.Core.Models.ModelRegistry _registry;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
@@ -75,6 +79,7 @@ public partial class ChatViewModel : ObservableObject
     private readonly Klydis.Core.Hardware.SystemProfiler _systemProfiler;
     private readonly Klydis.Core.Hardware.OffloadStrategy _offloadStrategy;
     private readonly Klydis.Core.Memory.MessageStore _messageStore;
+    private readonly ToolExecutor _toolExecutor;
 
     public ChatViewModel(
         ChatEngine chatEngine,
@@ -83,7 +88,8 @@ public partial class ChatViewModel : ObservableObject
         Klydis.Core.Hardware.GpuProfiler gpuProfiler,
         Klydis.Core.Hardware.SystemProfiler systemProfiler,
         Klydis.Core.Hardware.OffloadStrategy offloadStrategy,
-        Klydis.Core.Memory.MessageStore messageStore)
+        Klydis.Core.Memory.MessageStore messageStore,
+        ToolExecutor toolExecutor)
     {
         _chatEngine = chatEngine;
         _registry = registry;
@@ -92,9 +98,35 @@ public partial class ChatViewModel : ObservableObject
         _systemProfiler = systemProfiler;
         _offloadStrategy = offloadStrategy;
         _messageStore = messageStore;
+        _toolExecutor = toolExecutor;
+
+        _toolExecutor.ToolApprovalRequested += ToolExecutor_ToolApprovalRequested;
+
+        AvailableRiskLevels.Add(RiskLevel.Safe);
+        AvailableRiskLevels.Add(RiskLevel.Standard);
+        AvailableRiskLevels.Add(RiskLevel.AutoPilot);
+        SelectedRiskLevel = _toolExecutor.CurrentRiskLevel;
         
         RefreshModels();
         _ = InitializeSessionsAsync();
+    }
+
+    private void ToolExecutor_ToolApprovalRequested(object? sender, ToolApprovalEventArgs e)
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        {
+            var msg = $"The model is attempting to execute '{e.Request.Name}'.\n\nAllow this operation?";
+            var result = System.Windows.MessageBox.Show(msg, "Tool Approval Requested", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning);
+            e.IsApproved = result == System.Windows.MessageBoxResult.Yes;
+        });
+    }
+
+    partial void OnSelectedRiskLevelChanged(RiskLevel value)
+    {
+        if (_toolExecutor != null)
+        {
+            _toolExecutor.CurrentRiskLevel = value;
+        }
     }
 
     private async Task InitializeSessionsAsync()
@@ -633,6 +665,50 @@ public partial class ChatViewModel : ObservableObject
         if (session != null)
         {
             session.IsEditingTitle = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ExportChatAsync()
+    {
+        if (SelectedSession == null) return;
+
+        var dbMessages = await _messageStore.GetMessagesAsync(SelectedSession.Id, null);
+        if (dbMessages == null || dbMessages.Count == 0) return;
+
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            FileName = $"{CleanTitle(SelectedSession.Title)}_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
+            DefaultExt = ".txt",
+            Filter = "Text documents (.txt)|*.txt|All files (*.*)|*.*",
+            Title = "Export Chat Log"
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"Chat: {SelectedSession.Title}");
+            sb.AppendLine($"Exported: {DateTime.Now}");
+            sb.AppendLine(new string('=', 40));
+            sb.AppendLine();
+
+            foreach (var msg in dbMessages)
+            {
+                sb.AppendLine($"[{msg.Timestamp:yyyy-MM-dd HH:mm:ss}] {msg.Role.ToString().ToUpperInvariant()}:");
+                sb.AppendLine(msg.Content);
+                sb.AppendLine(new string('-', 40));
+                sb.AppendLine();
+            }
+
+            try
+            {
+                await System.IO.File.WriteAllTextAsync(dialog.FileName, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to export chat: {ex}");
+                System.Windows.MessageBox.Show($"Failed to export chat:\n{ex.Message}", "Export Failed", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+            }
         }
     }
 

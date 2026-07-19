@@ -37,6 +37,18 @@ public record MessageRecord(
 );
 
 /// <summary>
+/// Record representing a custom tool defined by the model.
+/// </summary>
+public record CustomToolRecord(
+    string Name,
+    string Description,
+    string ParametersJson,
+    string ScriptContent,
+    string Language,
+    DateTime CreatedAt
+);
+
+/// <summary>
 /// SQLite-based persistence for chat sessions and messages.
 /// </summary>
 public class MessageStore
@@ -98,6 +110,15 @@ public class MessageStore
                 token_count INTEGER DEFAULT 0,
                 tool_calls_json TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS custom_tools (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                parameters_json TEXT NOT NULL,
+                script_content TEXT NOT NULL,
+                language TEXT NOT NULL,
+                created_at TEXT NOT NULL
             );
 
             -- FTS5 Virtual Table for full-text search
@@ -369,6 +390,78 @@ public class MessageStore
         }
         
         return results;
+    }
+
+    /// <summary>
+    /// Retrieves all custom tools defined by the model.
+    /// </summary>
+    public async Task<List<CustomToolRecord>> GetCustomToolsAsync()
+    {
+        var tools = new List<CustomToolRecord>();
+        
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM custom_tools ORDER BY name ASC";
+        
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            tools.Add(new CustomToolRecord(
+                Name: reader.GetString(reader.GetOrdinal("name")),
+                Description: reader.GetString(reader.GetOrdinal("description")),
+                ParametersJson: reader.GetString(reader.GetOrdinal("parameters_json")),
+                ScriptContent: reader.GetString(reader.GetOrdinal("script_content")),
+                Language: reader.GetString(reader.GetOrdinal("language")),
+                CreatedAt: DateTime.Parse(reader.GetString(reader.GetOrdinal("created_at")))
+            ));
+        }
+        
+        return tools;
+    }
+
+    /// <summary>
+    /// Creates or updates a custom tool.
+    /// </summary>
+    public async Task CreateCustomToolAsync(CustomToolRecord tool)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT INTO custom_tools (name, description, parameters_json, script_content, language, created_at) 
+            VALUES (@name, @description, @parametersJson, @scriptContent, @language, @createdAt)
+            ON CONFLICT(name) DO UPDATE SET
+                description = excluded.description,
+                parameters_json = excluded.parameters_json,
+                script_content = excluded.script_content,
+                language = excluded.language;";
+            
+        command.Parameters.AddWithValue("@name", tool.Name);
+        command.Parameters.AddWithValue("@description", tool.Description);
+        command.Parameters.AddWithValue("@parametersJson", tool.ParametersJson);
+        command.Parameters.AddWithValue("@scriptContent", tool.ScriptContent);
+        command.Parameters.AddWithValue("@language", tool.Language);
+        command.Parameters.AddWithValue("@createdAt", tool.CreatedAt.ToString("o"));
+        
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Deletes a custom tool by name.
+    /// </summary>
+    public async Task DeleteCustomToolAsync(string name)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM custom_tools WHERE name = @name";
+        command.Parameters.AddWithValue("@name", name);
+        
+        await command.ExecuteNonQueryAsync();
     }
 
     private static SessionRecord MapSessionRecord(SqliteDataReader reader)
