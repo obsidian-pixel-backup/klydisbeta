@@ -19,6 +19,21 @@
             <converters:BoolToVisConverter x:Key="BooleanToVisibilityConverter" />
             <converters:InverseBoolToVisConverter x:Key="InverseBooleanToVisibilityConverter" />
             
+            <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
+                <Setter Property="Width" Value="7"/>
+                <Setter Property="Height" Value="7"/>
+                <Setter Property="Fill" Value="{DynamicResource AccentPrimaryBrush}"/>
+                <Style.Triggers>
+                    <EventTrigger RoutedEvent="Loaded">
+                        <BeginStoryboard>
+                            <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0.25" To="1" Duration="0:0:0.5"/>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </Style.Triggers>
+            </Style>
+            
             <!-- View to ViewModel Bindings -->
             <DataTemplate DataType="{x:Type viewmodels:ChatViewModel}">
                 <views:ChatView />

@@ -355,7 +355,7 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
                     
                     var result = await toolExecutor.ExecuteToolAsync(req, CurrentSessionId.ToString(), ct);
-                    var toolOutput = result.Output ?? result.Error ?? "Empty result";
+                    var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
                     _history.Add(new ChatMessage(ChatRole.Tool, toolOutput, req.Name));
                     await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, toolOutput, 0, null);
                     

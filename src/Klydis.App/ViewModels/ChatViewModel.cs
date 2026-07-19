@@ -338,7 +338,7 @@ public partial class ChatViewModel : ObservableObject
                                     HasToolCalls = true,
                                     Timestamp = DateTime.Now
                                 };
-                                pendingToolCall = new ToolCallViewModel { Name = evt.Content, Status = "running" };
+                                pendingToolCall = new ToolCallViewModel { Name = evt.Content, Status = "running", IsExpanded = true };
                                 toolMessage.ToolCalls.Add(pendingToolCall);
                                 AppendMessage(toolMessage);
                             });

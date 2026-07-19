@@ -123,27 +123,11 @@
             </Setter>
         </Style>
 
-        <!-- Pulsing dot for running tools / typing indicator -->
-        <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
-            <Setter Property="Width" Value="7"/>
-            <Setter Property="Height" Value="7"/>
-            <Setter Property="Fill" Value="{DynamicResource AccentPrimaryBrush}"/>
-            <Style.Triggers>
-                <EventTrigger RoutedEvent="Loaded">
-                    <BeginStoryboard>
-                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
-                            <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0.25" To="1" Duration="0:0:0.5"/>
-                        </Storyboard>
-                    </BeginStoryboard>
-                </EventTrigger>
-            </Style.Triggers>
-        </Style>
-
         <!-- One tool invocation: status icon + name + expandable output -->
         <DataTemplate x:Key="ToolCallTemplate" DataType="{x:Type viewmodels:ToolCallViewModel}">
             <Border Background="{DynamicResource ToolBubbleBackgroundBrush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                    CornerRadius="10" Padding="12,8" Margin="0,2">
+                    CornerRadius="10" Padding="12,6" Margin="0,1">
                 <Expander Style="{StaticResource PremiumThinkingExpanderStyle}"
                           IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
                           Foreground="{DynamicResource TextSecondaryBrush}">
@@ -439,63 +423,6 @@
                         </TextBox>
                     </Grid>
 
-                    <Border Grid.Column="1" Background="{DynamicResource AccentSoftBrush}" CornerRadius="20" Padding="12,5" VerticalAlignment="Center"
-                            Visibility="{Binding SelectedModelId, Converter={StaticResource StringToVisibilityConverter}}">
-                        <Border.ToolTip>
-                            <TextBlock>
-                                <TextBlock.Style>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Text" Value="No model loaded — pick one below to start chatting"/>
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsModelReady}" Value="True">
-                                                <Setter Property="Text" Value="Model loaded and ready"/>
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding IsModelLoading}" Value="True">
-                                                <Setter Property="Text" Value="Loading model into memory…"/>
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </TextBlock.Style>
-                            </TextBlock>
-                        </Border.ToolTip>
-                        <StackPanel Orientation="Horizontal">
-                            <!-- Status dot: green = ready, grey = not loaded, pulsing cyan = loading -->
-                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Margin="0,1,7,0"
-                                     Visibility="{Binding IsModelLoading, Converter={StaticResource InverseBoolToVisConverter}}">
-                                <Ellipse.Style>
-                                    <Style TargetType="Ellipse">
-                                        <Setter Property="Fill" Value="{DynamicResource TextMutedBrush}"/>
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsModelReady}" Value="True">
-                                                <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Ellipse.Style>
-                            </Ellipse>
-                            <Ellipse Style="{StaticResource PulsingDotStyle}" Width="6" Height="6" VerticalAlignment="Center" Margin="0,1,7,0"
-                                     Visibility="{Binding IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
-                            <TextBlock Text="{Binding SelectedModelId}" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" VerticalAlignment="Center" MaxWidth="280" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock Text="loading…" FontSize="12" FontStyle="Italic" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="7,0,0,0"
-                                       Visibility="{Binding IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
-                            <TextBlock Text="ready" FontSize="12" Foreground="{DynamicResource SuccessBrush}" VerticalAlignment="Center" Margin="7,0,0,0">
-                                <TextBlock.Style>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Visibility" Value="Collapsed"/>
-                                        <Style.Triggers>
-                                            <MultiDataTrigger>
-                                                <MultiDataTrigger.Conditions>
-                                                    <Condition Binding="{Binding IsModelReady}" Value="True"/>
-                                                    <Condition Binding="{Binding IsModelLoading}" Value="False"/>
-                                                </MultiDataTrigger.Conditions>
-                                                <Setter Property="Visibility" Value="Visible"/>
-                                            </MultiDataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </TextBlock.Style>
-                            </TextBlock>
-                        </StackPanel>
-                    </Border>
                 </Grid>
             </Border>
 
@@ -543,11 +470,11 @@
                     <ListBox.ItemTemplate>
                         <DataTemplate>
                             <!-- Grid stretches to fill available width -->
-                            <Grid Margin="20,5">
+                            <Grid Margin="20,1">
                                 <!-- User Message -->
                                 <Grid Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=user}">
                                     <!-- Normal View -->
-                                    <Border CornerRadius="14,14,4,14" Padding="14,10" HorizontalAlignment="Right" Margin="100,4,0,4"
+                                    <Border CornerRadius="14,14,4,14" Padding="14,8" HorizontalAlignment="Right" Margin="100,8,0,8"
                                             Background="{DynamicResource UserBubbleBackgroundBrush}" BorderThickness="0"
                                             Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
                                         <DockPanel LastChildFill="True">
@@ -616,7 +543,7 @@
                                 </Grid>
 
                                 <!-- Thought (Thinking) Message -->
-                                <Border CornerRadius="10" Padding="0" HorizontalAlignment="Left" Margin="0,2,100,2"
+                                <Border CornerRadius="10" Padding="0" HorizontalAlignment="Left" Margin="0,1,100,1"
                                         Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=thought}">
                                     <Expander Style="{StaticResource PremiumThinkingExpanderStyle}" IsExpanded="{Binding IsThinkingExpanded}"
                                               Foreground="{DynamicResource TextMutedBrush}" FontSize="12">
@@ -638,11 +565,11 @@
 
                                 <!-- Live Tool Call Card(s) -->
                                 <ItemsControl ItemsSource="{Binding ToolCalls}" ItemTemplate="{StaticResource ToolCallTemplate}"
-                                              HorizontalAlignment="Left" Margin="0,2,100,2"
+                                              HorizontalAlignment="Left" Margin="0,0,100,0"
                                               Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=toolcall}"/>
 
                                 <!-- Historic Tool Output -->
-                                <Border CornerRadius="10" Padding="12,8" HorizontalAlignment="Left" Margin="0,2,100,2"
+                                <Border CornerRadius="10" Padding="12,6" HorizontalAlignment="Left" Margin="0,1,100,1"
                                         Background="{DynamicResource ToolBubbleBackgroundBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
                                         Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=tool}">
                                     <Expander Style="{StaticResource PremiumThinkingExpanderStyle}" Foreground="{DynamicResource TextSecondaryBrush}" IsExpanded="False">
@@ -656,14 +583,14 @@
                                 </Border>
 
                                 <!-- System Message -->
-                                <Border CornerRadius="20" Padding="14,5" MaxWidth="800" HorizontalAlignment="Center" Margin="0,4"
+                                <Border CornerRadius="20" Padding="14,5" MaxWidth="800" HorizontalAlignment="Center" Margin="0,2"
                                         Background="{DynamicResource SurfaceBrush}" BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"
                                         Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=system}">
                                     <TextBlock Text="{Binding Content}" TextWrapping="Wrap" Foreground="{DynamicResource TextMutedBrush}" TextAlignment="Center" FontSize="12"/>
                                 </Border>
 
                                 <!-- Error Message -->
-                                <Border CornerRadius="10" Padding="14,10" HorizontalAlignment="Left" Margin="0,4,100,4"
+                                <Border CornerRadius="10" Padding="14,8" HorizontalAlignment="Left" Margin="0,2,100,2"
                                         Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="3,0,0,0" BorderBrush="{DynamicResource ErrorBrush}"
                                         Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=error}">
                                     <Grid>
@@ -678,7 +605,7 @@
                                 </Border>
 
                                 <!-- Generating indicator: breathing K badge + cycling status words, Claude-style -->
-                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" Margin="4,8"
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" Margin="4,4"
                                             Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=typing}">
                                     <Border Width="22" Height="22" CornerRadius="7" Background="{DynamicResource AccentSoftBrush}"
                                             VerticalAlignment="Center" Margin="0,0,9,0" RenderTransformOrigin="0.5,0.5">
@@ -757,9 +684,8 @@
                                 </StackPanel>
 
                                 <!-- Assistant Message -->
-                                <Border CornerRadius="4,14,14,14" Padding="14,10" HorizontalAlignment="Left" Margin="0,4,100,4"
-                                        Background="{DynamicResource AssistantBubbleBackgroundBrush}"
-                                        BorderThickness="1" BorderBrush="{DynamicResource AssistantBubbleBorderBrush}"
+                                <Border Padding="14,6" HorizontalAlignment="Left" Margin="0,1,100,1"
+                                        Background="{DynamicResource PanelBackgroundBrush}" BorderThickness="0"
                                         Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=assistant}">
                                     <DockPanel LastChildFill="True">
                                         <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}"
@@ -830,20 +756,11 @@
             <Border Grid.Row="2" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,12">
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <StackPanel Grid.Column="0" VerticalAlignment="Bottom" Margin="0,0,10,0">
-                        <TextBlock Text="M O D E L" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="4,0,0,3"/>
-                        <ComboBox Width="210" Height="40"
-                                  ItemsSource="{Binding AvailableModels}" SelectedItem="{Binding SelectedModelId}"
-                                  ToolTip="Choose which model answers your messages"
-                                  Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                    </StackPanel>
-
-                    <Grid Grid.Column="1">
+                    <Grid Grid.Column="0">
                         <TextBox x:Name="InputTextBox" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                                  MinLines="1" MaxLines="6" TextWrapping="Wrap" AcceptsReturn="True"
                                  PreviewKeyDown="InputTextBox_PreviewKeyDown"
@@ -897,7 +814,7 @@
                         </TextBlock>
                     </Grid>
 
-                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
+                    <Button Grid.Column="1" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
                         <Path Data="M 2,8 L 13,8 M 8,3 L 13,8 L 8,13" Stroke="{DynamicResource TextInverse}" StrokeThickness="2" Width="15" Height="14" Stretch="Uniform" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
                     </Button>
 

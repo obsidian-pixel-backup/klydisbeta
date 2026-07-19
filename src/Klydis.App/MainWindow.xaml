@@ -68,7 +68,7 @@
             <Grid.RowDefinitions>
             <RowDefinition Height="32"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="28"/>
+            <RowDefinition Height="38"/>
         </Grid.RowDefinitions>
         
         <Grid.ColumnDefinitions>
@@ -153,10 +153,50 @@
                 </Grid.ColumnDefinitions>
                 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Path Data="M 2,8 A 6,6 0 1,1 14,8 A 6,6 0 1,1 2,8" 
-                          Fill="{Binding IsModelLoaded, Converter={StaticResource BoolToColorConverter}}" 
-                          Width="8" Height="8" Margin="0,0,8,0"/>
-                    <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12"/>
+                    <Ellipse Width="8" Height="8" Margin="0,0,6,0"
+                             Visibility="{Binding ChatViewModel.IsModelLoading, Converter={StaticResource InverseBoolToVisConverter}}">
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Fill" Value="{DynamicResource TextMutedBrush}"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding ChatViewModel.IsModelReady}" Value="True">
+                                        <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+                    <Ellipse Style="{StaticResource PulsingDotStyle}" Width="8" Height="8" Margin="0,0,6,0"
+                             Visibility="{Binding ChatViewModel.IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
+
+                    <TextBlock Text="Model:" Foreground="{DynamicResource TextMutedBrush}" FontSize="12" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                    
+                    <ComboBox Width="250" Height="30"
+                              ItemsSource="{Binding ChatViewModel.AvailableModels}" 
+                              SelectedItem="{Binding ChatViewModel.SelectedModelId, Mode=TwoWay}"
+                              ToolTip="Choose which model answers your messages"
+                              Background="{DynamicResource InputBackgroundBrush}" BorderThickness="0" Foreground="{DynamicResource TextPrimaryBrush}"
+                              VerticalContentAlignment="Center"
+                              VerticalAlignment="Center"/>
+                              
+                    <TextBlock Text="loading…" FontSize="12" FontStyle="Italic" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"
+                               Visibility="{Binding ChatViewModel.IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
+                    <TextBlock Text="ready" FontSize="12" Foreground="{DynamicResource SuccessBrush}" VerticalAlignment="Center" Margin="8,0,0,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding ChatViewModel.IsModelReady}" Value="True"/>
+                                            <Condition Binding="{Binding ChatViewModel.IsModelLoading}" Value="False"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
