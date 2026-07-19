@@ -386,29 +386,78 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 #pragma warning disable CA1416 // Validate platform compatibility
     private Task<ToolResult> GetSystemInfoAsync(CancellationToken ct)
     {
-        var info = $"OS: {Environment.OSVersion}\n" +
-                   $"Processors: {Environment.ProcessorCount}\n" +
-                   $"Working Set: {Environment.WorkingSet / (1024 * 1024)} MB\n";
+        var infoList = new List<string>
+        {
+            $"OS: {Environment.OSVersion}"
+        };
 
         try
         {
+            // CPU name and core details
+            string cpuName = "Unknown CPU";
+            int coreCount = 0;
+            int logicalProcessors = 0;
+            using (var processorSearcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor"))
+            {
+                foreach (var obj in processorSearcher.Get())
+                {
+                    cpuName = obj["Name"]?.ToString()?.Trim() ?? cpuName;
+                    coreCount = Convert.ToInt32(obj["NumberOfCores"] ?? 0);
+                    logicalProcessors = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? 0);
+                    break;
+                }
+            }
+            infoList.Add($"CPU: {cpuName} ({coreCount} Cores, {logicalProcessors} Logical Processors)");
+
+            // RAM details
+            double totalRamGb = 0;
+            double availableRamGb = 0;
+            using (var computerSystemSearcher = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem"))
+            {
+                foreach (var obj in computerSystemSearcher.Get())
+                {
+                    ulong totalRamBytes = Convert.ToUInt64(obj["TotalPhysicalMemory"] ?? 0);
+                    totalRamGb = totalRamBytes / (1024.0 * 1024.0 * 1024.0);
+                    break;
+                }
+            }
+            using (var osSearcher = new ManagementObjectSearcher("SELECT FreePhysicalMemory FROM Win32_OperatingSystem"))
+            {
+                foreach (var obj in osSearcher.Get())
+                {
+                    ulong freeRamKb = Convert.ToUInt64(obj["FreePhysicalMemory"] ?? 0);
+                    availableRamGb = freeRamKb / (1024.0 * 1024.0);
+                    break;
+                }
+            }
+            infoList.Add($"RAM: {Math.Round(totalRamGb, 2)} GB total ({Math.Round(availableRamGb, 2)} GB available)");
+            infoList.Add($"Process Working Set: {Environment.WorkingSet / (1024 * 1024)} MB");
+
+            // Disk details
             var drives = DriveInfo.GetDrives().Where(d => d.IsReady);
             var diskInfo = string.Join(", ", drives.Select(d => $"{d.Name} ({d.TotalFreeSpace / (1024 * 1024 * 1024)}GB free of {d.TotalSize / (1024 * 1024 * 1024)}GB)"));
-            info += $"Disks: {diskInfo}\n";
-            
+            infoList.Add($"Disks: {diskInfo}");
+
+            // GPU details
             var gpus = new List<string>();
-            using var searcher = new ManagementObjectSearcher("select Name from Win32_VideoController");
-            foreach (var obj in searcher.Get())
+            using (var searcher = new ManagementObjectSearcher("select Name from Win32_VideoController"))
             {
-                gpus.Add(obj["Name"]?.ToString() ?? "Unknown GPU");
+                foreach (var obj in searcher.Get())
+                {
+                    gpus.Add(obj["Name"]?.ToString() ?? "Unknown GPU");
+                }
             }
-            if (gpus.Any()) info += $"GPU(s): {string.Join(", ", gpus)}";
+            if (gpus.Any())
+            {
+                infoList.Add($"GPU(s): {string.Join(", ", gpus)}");
+            }
         }
         catch (Exception ex)
         {
-            info += $"[Hardware query failed: {ex.Message}]";
+            infoList.Add($"[Hardware query failed: {ex.Message}]");
         }
 
+        var info = string.Join("\n", infoList);
         return Task.FromResult(new ToolResult("get_system_info", true, info, null));
     }
 #pragma warning restore CA1416
