@@ -150,6 +150,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
             if (!IsModelLoaded || _executor == null || _context == null)
                 throw new InvalidOperationException("Model is not loaded.");
 
+            // Safety fallback: Ensure SamplingPipeline is initialized to prevent NullReferenceExceptions during inference
+            if (inferenceParams.SamplingPipeline == null)
+            {
+                inferenceParams.SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline();
+            }
+
             _logger.LogDebug("Starting token generation.");
 
             var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
@@ -272,7 +278,17 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
     public async Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default)
     {
-        var inferenceParams = new InferenceParams { MaxTokens = -1 };
+        var inferenceParams = new InferenceParams 
+        { 
+            MaxTokens = -1,
+            SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
+            {
+                Temperature = 0.7f,
+                TopP = 0.9f,
+                MinP = 0.05f,
+                RepeatPenalty = 1.1f
+            }
+        };
         var sb = new System.Text.StringBuilder();
         await foreach (var token in GenerateAsync(prompt, inferenceParams, false, ct))
         {

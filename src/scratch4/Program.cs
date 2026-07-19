@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -39,58 +38,39 @@ class Program
         await engine.LoadModelAsync(modelPath, plan);
         Console.WriteLine("Model loaded successfully.");
 
-        var templateEngine = new Klydis.Core.Chat.PromptTemplateEngine();
-        var templateType = Klydis.Core.Chat.ChatTemplate.Llama3;
-        
-        // Turn 1
-        var sysPrompt = "You are a helpful AI assistant.";
-        var userMsg1 = "My name is Cornelius. Remember it.";
-        
-        var messages = new List<Klydis.Core.Chat.ChatMessage>
-        {
-            new Klydis.Core.Chat.ChatMessage(Klydis.Core.Chat.ChatRole.System, sysPrompt),
-            new Klydis.Core.Chat.ChatMessage(Klydis.Core.Chat.ChatRole.User, userMsg1)
-        };
-        
-        var prompt1 = templateEngine.ApplyTemplate(messages, templateType);
-        Console.WriteLine($"\n--- Turn 1 Prompt ---\n{prompt1}\n---------------------");
-        
-        Console.WriteLine("Generating turn 1 response...");
-        var stopTokens = templateEngine.GetStopTokens(templateType);
-        var sb1 = new StringBuilder();
-        
-        await foreach (var token in engine.StreamTokensAsync(prompt1, stopTokens, 100, CancellationToken.None))
-        {
-            Console.Write(token);
-            sb1.Append(token);
-        }
-        Console.WriteLine();
-        Console.WriteLine($"Turn 1 generation complete. Response length: {sb1.Length}");
-
-        // Turn 2
-        var userMsg2 = "What is my name?";
-        messages.Add(new Klydis.Core.Chat.ChatMessage(Klydis.Core.Chat.ChatRole.Assistant, sb1.ToString()));
-        messages.Add(new Klydis.Core.Chat.ChatMessage(Klydis.Core.Chat.ChatRole.User, userMsg2));
-        
-        var prompt2 = templateEngine.ApplyTemplate(messages, templateType);
-        Console.WriteLine($"\n--- Turn 2 Prompt ---\n{prompt2}\n---------------------");
-        
-        Console.WriteLine("Generating turn 2 response...");
-        var sb2 = new StringBuilder();
-        
+        // 1. Simulating context consolidation: GenerateTextAsync
+        Console.WriteLine("\n=== Simulating Context Consolidation (GenerateTextAsync) ===");
         try
         {
-            await foreach (var token in engine.StreamTokensAsync(prompt2, stopTokens, 100, CancellationToken.None))
-            {
-                Console.Write(token);
-                sb2.Append(token);
-            }
-            Console.WriteLine();
-            Console.WriteLine("Turn 2 generation complete!");
+            var summaryPrompt = "Task: Condense the following interaction to a single line: User: Hello, what can you do? Assistant: I am Klydis, a local AI assistant.";
+            Console.WriteLine($"Prompt: {summaryPrompt}");
+            
+            var summary = await engine.GenerateTextAsync(summaryPrompt, CancellationToken.None);
+            Console.WriteLine($"Generated Summary: {summary.Trim()}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"\nException caught in main: {ex}");
+            Console.WriteLine($"GenerateTextAsync failed: {ex}");
+        }
+
+        // 2. Simulating subsequent generation: StreamTokensAsync
+        Console.WriteLine("\n=== Simulating Subsequent Generation (StreamTokensAsync) ===");
+        try
+        {
+            var nextPrompt = "<|im_start|>system\nYou are Klydis, a helpful AI assistant.<|im_end|>\n<|im_start|>user\nWho are you?<|im_end|>\n<|im_start|>assistant\n";
+            var stopTokens = new[] { "<|im_end|>", "<|im_start|>" };
+            
+            Console.WriteLine("Streaming response tokens:");
+            await foreach (var token in engine.StreamTokensAsync(nextPrompt, stopTokens, 100, CancellationToken.None))
+            {
+                Console.Write(token);
+            }
+            Console.WriteLine();
+            Console.WriteLine("Generation completed successfully!");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"StreamTokensAsync failed: {ex}");
         }
     }
 }

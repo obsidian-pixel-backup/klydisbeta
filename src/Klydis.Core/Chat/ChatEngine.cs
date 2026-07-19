@@ -184,7 +184,7 @@ public class ChatEngine(
             ? $"\n\nLong-term Memory / World State (summarized older context):\n{session.WorldState}"
             : "";
 
-        var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nIMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING:\n1. If you need to think or plan, use <think>...</think> tags FIRST.\n2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.\n3. To use a tool, output a JSON block exactly like this: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>\n4. You can provide normal text context before or after tool calls, but keep it outside of think tags.\n5. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.\n6. DO NOT repeat the exact same tool call if it just failed or returned an error. Adjust your approach or ask the user for help.{worldStateHeader}";
+        var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nIMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING:\n1. If you need to think or plan, use <think>...</think> tags FIRST.\n2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.\n3. To use a tool, output a JSON block exactly like this: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>\n4. You can provide normal text context before or after tool calls, but keep it outside of think tags.\n5. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.\n6. DO NOT repeat the exact same tool call if it just failed or returned an error. If a tool call fails, try alternative tools or different arguments to achieve the results instead of repeating the same call. Adjust your approach or ask the user for help.{worldStateHeader}";
         
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
         
@@ -405,6 +405,7 @@ public class ChatEngine(
             
             if (toolCallRequests.Count > 0)
             {
+                bool anySuccess = false;
                 foreach (var req in toolCallRequests)
                 {
                     var argsHash = JsonSerializer.Serialize(req.Arguments);
@@ -423,11 +424,26 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
                     
                     var result = await toolExecutor.ExecuteToolAsync(req, CurrentSessionId.ToString(), ct);
+                    if (result.Success)
+                    {
+                        anySuccess = true;
+                    }
+                    
                     var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
                     _history.Add(new ChatMessage(ChatRole.Tool, toolOutput, req.Name));
                     await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, toolOutput, 0, null);
                     
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolResult, toolOutput, new Dictionary<string, object> { ["Success"] = result.Success });
+                }
+
+                // If this was the first attempt and ALL tool calls failed, abort and report to the user
+                if (iterationCount == 1 && !anySuccess)
+                {
+                    var failMsg = "All tool calls failed on the first attempt.";
+                    _history.Add(new ChatMessage(ChatRole.Assistant, failMsg));
+                    await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Assistant, failMsg, 0, null);
+                    yield return new ChatStreamEvent(ChatStreamEventType.Token, failMsg);
+                    break;
                 }
             }
             else

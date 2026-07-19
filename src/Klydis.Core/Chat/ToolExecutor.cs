@@ -420,29 +420,82 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
         try
         {
-            var url = "https://lite.duckduckgo.com/lite/";
-            var requestMsg = new HttpRequestMessage(HttpMethod.Post, url);
-            requestMsg.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36)");
-            requestMsg.Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("q", query) });
-            
-            var response = await _httpClient.SendAsync(requestMsg, ct);
-            response.EnsureSuccessStatusCode();
-            var html = await response.Content.ReadAsStringAsync(ct);
-
-            var doc = new HtmlDocument();
-            doc.LoadHtml(html);
             var results = new List<string>();
-            
-            var snippetNodes = doc.DocumentNode.SelectNodes("//td[@class='result-snippet']");
-            if (snippetNodes != null)
+
+            // Attempt Bing Search (using a clean request configuration without user agent headers to bypass bot blocks)
+            try
             {
-                foreach (var snippet in snippetNodes.Take(5))
+                var url = $"https://www.bing.com/search?q={Uri.EscapeDataString(query)}";
+                var requestMsg = new HttpRequestMessage(HttpMethod.Get, url);
+                
+                var response = await _httpClient.SendAsync(requestMsg, ct);
+                if (response.IsSuccessStatusCode)
                 {
-                    results.Add(HtmlEntity.DeEntitize(snippet.InnerText).Trim());
+                    var html = await response.Content.ReadAsStringAsync(ct);
+                    var doc = new HtmlDocument();
+                    doc.LoadHtml(html);
+                    
+                    var algoNodes = doc.DocumentNode.SelectNodes("//li[contains(@class, 'b_algo')]");
+                    if (algoNodes != null)
+                    {
+                        foreach (var node in algoNodes.Take(5))
+                        {
+                            var titleNode = node.SelectSingleNode(".//h2/a") ?? node.SelectSingleNode(".//a");
+                            var title = titleNode != null ? HtmlEntity.DeEntitize(titleNode.InnerText).Trim() : "No Title";
+                            var link = titleNode != null ? titleNode.GetAttributeValue("href", "") : "";
+                            
+                            var snippetNode = node.SelectSingleNode(".//p") ?? node.SelectSingleNode(".//div[contains(@class, 'b_caption')]/p") ?? node.SelectSingleNode(".//span");
+                            var snippet = snippetNode != null ? HtmlEntity.DeEntitize(snippetNode.InnerText).Trim() : "No Snippet";
+                            
+                            snippet = Regex.Replace(snippet, @"\s+", " ");
+                            results.Add($"Title: {title}\nLink: {link}\nSnippet: {snippet}");
+                        }
+                    }
                 }
             }
-            
-            if (results.Count == 0) return new ToolResult(request.Name, true, "No results found. (The search engine might be blocking the request)", null);
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Bing search failed; will attempt Wikipedia fallback.");
+            }
+
+            // Fallback to Wikipedia OpenSearch if no results were fetched
+            if (results.Count == 0)
+            {
+                try
+                {
+                    var wikiUrl = $"https://en.wikipedia.org/w/api.php?action=opensearch&search={Uri.EscapeDataString(query)}&limit=5&namespace=0&format=json";
+                    var requestMsg = new HttpRequestMessage(HttpMethod.Get, wikiUrl);
+                    requestMsg.Headers.Add("User-Agent", "KlydisAssistant/1.0 (contact: info@klydis.local)");
+                    
+                    var response = await _httpClient.SendAsync(requestMsg, ct);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var wikiResponse = await response.Content.ReadAsStringAsync(ct);
+                        using var docJson = JsonDocument.Parse(wikiResponse);
+                        var root = docJson.RootElement;
+                        if (root.ValueKind == JsonValueKind.Array && root.GetArrayLength() >= 4)
+                        {
+                            var titles = root[1];
+                            var descriptions = root[2];
+                            var urls = root[3];
+                            int count = Math.Min(titles.GetArrayLength(), 5);
+                            for (int i = 0; i < count; i++)
+                            {
+                                results.Add($"Title: {titles[i].GetString()}\nLink: {urls[i].GetString()}\nSnippet: {descriptions[i].GetString()}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Wikipedia search fallback failed.");
+                }
+            }
+
+            if (results.Count == 0)
+            {
+                return new ToolResult(request.Name, true, "No results found. (The search engine might be blocking the request)", null);
+            }
             return new ToolResult(request.Name, true, string.Join("\n\n", results), null);
         }
         catch (Exception ex)
