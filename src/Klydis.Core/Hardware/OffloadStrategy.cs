@@ -98,54 +98,46 @@ public class OffloadStrategy
             );
         }
 
-        // FullGpu should ALWAYS use GPU loading and MUST NEVER change, universal across all devices.
+        // Compute graph and CUDA context overhead buffer (MB)
+        const int ComputeGraphOverheadMb = 2500;
+        int availableVramMb = gpuInfo != null ? Math.Max(0, gpuInfo.FreeVramMb - CudaContextOverheadMb - ComputeGraphOverheadMb) : 0;
+
+        // For FullGpu: check if full model fits in available VRAM, otherwise fallback to max fitting layers
         if (strategyType == OffloadStrategyType.FullGpu)
         {
-            int recommendedBatchSize = 512;
-            if (gpuInfo != null)
+            int estimatedFullVram = EstimateVramUsage(totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength) + ComputeGraphOverheadMb;
+            if (gpuInfo == null || estimatedFullVram <= gpuInfo.FreeVramMb - CudaContextOverheadMb)
             {
-                if (gpuInfo.TotalVramMb >= 12000) recommendedBatchSize = 2048;
-                else if (gpuInfo.TotalVramMb >= 8000) recommendedBatchSize = 1024;
+                int recommendedBatchSize = 512;
+                if (gpuInfo != null)
+                {
+                    if (gpuInfo.TotalVramMb >= 12000) recommendedBatchSize = 2048;
+                    else if (gpuInfo.TotalVramMb >= 8000) recommendedBatchSize = 1024;
+                }
+
+                return new OffloadPlan(
+                    GpuLayers: -1,
+                    CpuLayers: 0,
+                    EstimatedVramUsageMb: estimatedFullVram,
+                    RecommendedContextSize: contextLength,
+                    RecommendedBatchSize: recommendedBatchSize,
+                    StrategyUsed: OffloadStrategyType.FullGpu
+                );
             }
-
-            return new OffloadPlan(
-                GpuLayers: -1,
-                CpuLayers: 0,
-                EstimatedVramUsageMb: EstimateVramUsage(totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength),
-                RecommendedContextSize: contextLength,
-                RecommendedBatchSize: recommendedBatchSize,
-                StrategyUsed: OffloadStrategyType.FullGpu
-            );
+            // If full model exceeds VRAM, fall through to calculate max layers that safely fit
         }
 
-        // For BalancedSplit:
-        if (gpuInfo == null)
+        if (gpuInfo == null || availableVramMb <= 0)
         {
-            // We have no VRAM information (e.g. AMD GPU or no nvidia-smi).
-            // Since the app must universally prefer GPU loading, we default to FullGpu fallback instead of CpuOnly.
+            // Fallback: if no VRAM info or zero headroom, offload 50% layers to GPU as safe fallback
+            int safeLayers = Math.Max(1, totalLayers / 2);
             return new OffloadPlan(
-                GpuLayers: -1,
-                CpuLayers: 0,
-                EstimatedVramUsageMb: EstimateVramUsage(totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength),
+                GpuLayers: safeLayers,
+                CpuLayers: totalLayers - safeLayers,
+                EstimatedVramUsageMb: EstimateVramUsage(safeLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength),
                 RecommendedContextSize: contextLength,
                 RecommendedBatchSize: 512,
-                StrategyUsed: OffloadStrategyType.FullGpu
-            );
-        }
-
-        // Available VRAM calculation based on strategy (BalancedSplit)
-        int availableVramMb = gpuInfo.FreeVramMb - CudaContextOverheadMb - BalancedBufferMb;
-
-        if (availableVramMb <= 0)
-        {
-            // Fallback to FullGpu (-1) instead of CPU because of the "always prefer gpu loading" rule
-            return new OffloadPlan(
-                GpuLayers: -1,
-                CpuLayers: 0,
-                EstimatedVramUsageMb: EstimateVramUsage(totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength),
-                RecommendedContextSize: contextLength,
-                RecommendedBatchSize: 512,
-                StrategyUsed: OffloadStrategyType.FullGpu
+                StrategyUsed: strategyType
             );
         }
 
@@ -157,12 +149,14 @@ public class OffloadStrategy
         if (vramCostPerLayerMb <= 0) vramCostPerLayerMb = 1;
 
         int maxLayersThatFit = (int)(availableVramMb / vramCostPerLayerMb);
-        int targetGpuLayers = Math.Min(maxLayersThatFit, totalLayers);
+        int targetGpuLayers = Math.Clamp(maxLayersThatFit, 1, totalLayers);
 
+        // If all layers fit with room to spare, pass -1 to offload output head too
+        int gpuLayersParam = (targetGpuLayers == totalLayers) ? -1 : targetGpuLayers;
         int finalEstimatedVram = EstimateVramUsage(targetGpuLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength);
 
         return new OffloadPlan(
-            GpuLayers: targetGpuLayers,
+            GpuLayers: gpuLayersParam,
             CpuLayers: totalLayers - targetGpuLayers,
             EstimatedVramUsageMb: finalEstimatedVram,
             RecommendedContextSize: contextLength,

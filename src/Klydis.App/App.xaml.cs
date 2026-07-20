@@ -102,7 +102,14 @@ public partial class App : Application
         });
 
         // Core Services
-        services.AddSingleton<InferenceEngine>();
+        services.AddSingleton<SpeculativeDecodingService>();
+        services.AddSingleton<InferenceEngine>(sp =>
+        {
+            var logger = sp.GetRequiredService<ILogger<InferenceEngine>>();
+            var engine = new InferenceEngine(logger);
+            engine.SpeculativeDecodingService = sp.GetRequiredService<SpeculativeDecodingService>();
+            return engine;
+        });
         services.AddSingleton<Klydis.Core.Chat.IInferenceEngine>(sp => sp.GetRequiredService<InferenceEngine>());
         services.AddSingleton<ModelRegistry>();
         services.AddSingleton<ModelDiscoveryService>();

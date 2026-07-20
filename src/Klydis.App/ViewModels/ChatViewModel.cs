@@ -222,10 +222,22 @@ public partial class ChatViewModel : ObservableObject
                 }
 
                 var plan = _offloadStrategy.CalculatePlan(
-                    totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
+                    totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
                 
                 await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
-                IsModelReady = true;
+                _ = _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
+
+                if (System.Windows.Application.Current != null)
+                {
+                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        IsModelReady = true;
+                    });
+                }
+                else
+                {
+                    IsModelReady = true;
+                }
 
                 // Remember the previously loaded model
                 var updatedModel = modelInfo with { LastUsedAt = DateTime.UtcNow };
@@ -242,11 +254,34 @@ public partial class ChatViewModel : ObservableObject
                 catch { }
 
                 System.Diagnostics.Debug.WriteLine($"Failed to load model: {ex}");
-                Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                
+                if (System.Windows.Application.Current != null)
+                {
+                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        IsModelReady = false;
+                        Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                    });
+                }
+                else
+                {
+                    IsModelReady = false;
+                    Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                }
             }
             finally
             {
-                IsModelLoading = false;
+                if (System.Windows.Application.Current != null)
+                {
+                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        IsModelLoading = false;
+                    });
+                }
+                else
+                {
+                    IsModelLoading = false;
+                }
             }
         }
     }

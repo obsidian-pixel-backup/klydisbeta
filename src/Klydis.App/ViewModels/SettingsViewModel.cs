@@ -10,6 +10,7 @@ namespace Klydis.App.ViewModels;
 public enum SettingsCategory
 {
     Appearance,
+    Inference,
     About
 }
 
@@ -42,6 +43,7 @@ public partial class BackgroundSwatch : ObservableObject
 public partial class SettingsViewModel : ObservableObject
 {
     private readonly ThemeService _themeService;
+    private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
 
     [ObservableProperty]
     private SettingsCategory _selectedCategory = SettingsCategory.Appearance;
@@ -55,18 +57,44 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private BackgroundTheme _selectedBackground;
 
+    [ObservableProperty]
+    private bool _isSpeculativeDecodingEnabled = true;
+
+    [ObservableProperty]
+    private int _speculativeDraftCount = 24;
+
+    [ObservableProperty]
+    private string _speculativeStatusMessage = "Speculative decoding active.";
+
     public ObservableCollection<AccentSwatch> AccentSwatches { get; } = new();
     public ObservableCollection<BackgroundSwatch> BackgroundSwatches { get; } = new();
 
     public string AppVersion { get; }
     public string AppDescription { get; }
 
-    public SettingsViewModel(ThemeService themeService)
+    public SettingsViewModel(ThemeService themeService, Klydis.Core.Inference.InferenceEngine inferenceEngine)
     {
         _themeService = themeService;
+        _inferenceEngine = inferenceEngine;
+
         _selectedMode = themeService.CurrentMode;
         _selectedAccent = themeService.CurrentAccent;
         _selectedBackground = themeService.CurrentBackground;
+
+        IsSpeculativeDecodingEnabled = themeService.IsSpeculativeDecodingEnabled;
+        SpeculativeDraftCount = themeService.SpeculativeDraftCount;
+        SpeculativeStatusMessage = inferenceEngine.SpeculativeStatus;
+
+        _inferenceEngine.SpeculativeStatusChanged += (status) =>
+        {
+            if (System.Windows.Application.Current != null)
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    SpeculativeStatusMessage = status;
+                });
+            }
+        };
 
         foreach (var (name, hex) in new[]
                  {
@@ -160,5 +188,24 @@ public partial class SettingsViewModel : ObservableObject
         {
             swatch.IsSelected = swatch.Name == backgroundName;
         }
+    }
+
+    partial void OnIsSpeculativeDecodingEnabledChanged(bool value)
+    {
+        _themeService.SaveSpeculativeSettings(value, SpeculativeDraftCount);
+        _inferenceEngine.IsSpeculativeDecodingEnabled = value;
+
+        if (!string.IsNullOrEmpty(_inferenceEngine.CurrentModelPath))
+        {
+            _ = _inferenceEngine.AttachSpeculativeDraftAsync(_inferenceEngine.CurrentModelPath);
+        }
+    }
+
+    partial void OnSpeculativeDraftCountChanged(int value)
+    {
+        int clamped = Math.Clamp(value, 4, 32);
+        _themeService.SaveSpeculativeSettings(IsSpeculativeDecodingEnabled, clamped);
+        _inferenceEngine.SpeculativeDraftCount = clamped;
+        _inferenceEngine.SpeculativeEngine.DraftCandidateCount = clamped;
     }
 }

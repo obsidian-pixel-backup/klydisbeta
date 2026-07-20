@@ -129,12 +129,18 @@ public class ThemeService
             ? (IsSystemInLightMode() ? ThemeMode.Light : ThemeMode.Dark)
             : mode;
 
-        var backgroundUri = new Uri($"Themes/Backgrounds/{background}{effectiveMode}.xaml", UriKind.Relative);
-        var accentUri = new Uri($"Themes/Accents/{accent}{effectiveMode}.xaml", UriKind.Relative);
+        var backgroundUri = new Uri($"pack://application:,,,/Themes/Backgrounds/{background}{effectiveMode}.xaml", UriKind.Absolute);
+        var accentUri = new Uri($"pack://application:,,,/Themes/Accents/{accent}{effectiveMode}.xaml", UriKind.Absolute);
 
-        var merged = Application.Current.Resources.MergedDictionaries;
-        merged[ModeDictionaryIndex] = new ResourceDictionary { Source = backgroundUri };
-        merged[AccentDictionaryIndex] = new ResourceDictionary { Source = accentUri };
+        if (Application.Current != null)
+        {
+            var merged = Application.Current.Resources.MergedDictionaries;
+            if (merged.Count > AccentDictionaryIndex)
+            {
+                merged[ModeDictionaryIndex] = new ResourceDictionary { Source = backgroundUri };
+                merged[AccentDictionaryIndex] = new ResourceDictionary { Source = accentUri };
+            }
+        }
 
         CurrentMode = mode;
         EffectiveMode = effectiveMode;
@@ -156,6 +162,33 @@ public class ThemeService
         }
     }
 
+    public bool IsSpeculativeDecodingEnabled { get; private set; } = true;
+    public int SpeculativeDraftCount { get; private set; } = 24;
+
+    public void SaveSpeculativeSettings(bool enabled, int draftCount)
+    {
+        IsSpeculativeDecodingEnabled = enabled;
+        SpeculativeDraftCount = Math.Clamp(draftCount, 4, 32);
+        PersistAllSettings();
+    }
+
+    private void PersistAllSettings()
+    {
+        try
+        {
+            var json = JsonSerializer.Serialize(new UiSettings 
+            { 
+                Mode = CurrentMode.ToString(), 
+                Background = CurrentBackground.ToString(), 
+                Accent = CurrentAccent.ToString(),
+                IsSpeculativeDecodingEnabled = IsSpeculativeDecodingEnabled,
+                SpeculativeDraftCount = SpeculativeDraftCount
+            });
+            File.WriteAllText(_settingsPath, json);
+        }
+        catch { }
+    }
+
     private static bool IsSystemInLightMode()
     {
         try
@@ -175,5 +208,7 @@ public class ThemeService
         public string Mode { get; set; } = "Dark";
         public string Background { get; set; } = "Ocean";
         public string Accent { get; set; } = "Fluorescent";
+        public bool IsSpeculativeDecodingEnabled { get; set; } = true;
+        public int SpeculativeDraftCount { get; set; } = 24;
     }
 }

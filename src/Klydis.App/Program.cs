@@ -144,8 +144,6 @@ public class Program
             Console.WriteLine("Program.Main started");
             var app = new App();
             Console.WriteLine("App instantiated");
-            app.InitializeComponent();
-            Console.WriteLine("InitializeComponent done");
             app.Run();
             Console.WriteLine("Run finished");
         }

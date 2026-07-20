@@ -364,15 +364,26 @@ public partial class ModelLibraryViewModel : ObservableObject
                 contextLength, 
                 gpuInfo, 
                 systemInfo, 
-                Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
+                Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
 
             await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
         }
         catch (Exception)
         {
-            // Ensure UI handles the failure cleanly instead of crashing
-            CurrentlyLoadedModelId = string.Empty;
-            foreach (var m in Models) m.IsLoaded = false;
+            // Ensure UI handles the failure cleanly on the Dispatcher thread
+            if (System.Windows.Application.Current != null)
+            {
+                await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    CurrentlyLoadedModelId = string.Empty;
+                    foreach (var m in Models) m.IsLoaded = false;
+                });
+            }
+            else
+            {
+                CurrentlyLoadedModelId = string.Empty;
+                foreach (var m in Models) m.IsLoaded = false;
+            }
         }
     }
 

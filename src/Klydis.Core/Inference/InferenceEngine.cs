@@ -41,6 +41,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     private string _lastEvaluatedPrompt = string.Empty;
     private readonly SemaphoreSlim _modelLock = new SemaphoreSlim(1, 1);
 
+    public SpeculativeEngine SpeculativeEngine { get; } = new();
+    public SpeculativeDecodingService? SpeculativeDecodingService { get; set; }
+    public bool IsSpeculativeDecodingEnabled { get; set; } = true;
+    public int SpeculativeDraftCount { get; set; } = 24;
+    public string SpeculativeStatus { get; private set; } = "Speculative decoding initialized.";
+
     /// <summary>
     /// Event fired when a token is generated, providing the token text and current tokens/second rate.
     /// </summary>
@@ -50,6 +56,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     /// Event fired when a model is loaded or unloaded (isLoaded, modelPath).
     /// </summary>
     public event Action<bool, string?>? ModelStateChanged;
+
+    /// <summary>
+    /// Event fired when speculative decoding status changes.
+    /// </summary>
+    public event Action<string>? SpeculativeStatusChanged;
 
     /// <summary>
     /// Architecture of the loaded model.
@@ -78,6 +89,39 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     public InferenceEngine(ILogger<InferenceEngine> logger)
     {
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Resolves and attaches a speculative draft model for the current target model.
+    /// </summary>
+    public async Task AttachSpeculativeDraftAsync(string targetModelPath)
+    {
+        if (SpeculativeDecodingService == null) return;
+
+        try
+        {
+            var res = await SpeculativeDecodingService.ResolveDraftModelAsync(targetModelPath, IsSpeculativeDecodingEnabled);
+            SpeculativeStatus = res.StatusMessage;
+            SpeculativeStatusChanged?.Invoke(SpeculativeStatus);
+
+            if (res.IsEnabled && !string.IsNullOrEmpty(res.DraftModelPath) && res.DraftOffloadPlan != null)
+            {
+                _logger.LogInformation("Attaching speculative draft model: {DraftPath}", res.DraftModelPath);
+                await SpeculativeEngine.LoadDraftModelAsync(res.DraftModelPath, res.DraftOffloadPlan);
+                SpeculativeEngine.DraftCandidateCount = SpeculativeDraftCount;
+            }
+            else
+            {
+                SpeculativeEngine.Unload();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to attach speculative draft model.");
+            SpeculativeStatus = $"Speculative decoding unavailable: {ex.Message}";
+            SpeculativeStatusChanged?.Invoke(SpeculativeStatus);
+            SpeculativeEngine.Unload();
+        }
     }
 
     /// <summary>
@@ -116,15 +160,24 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
 
                 _modelParams = parameters;
-                _weights = LLamaWeights.LoadFromFile(parameters);
-                _context = _weights.CreateContext(parameters);
-                
-                // Using InteractiveExecutor for hybrid fast-path prefix caching
-                _executor = new InteractiveExecutor(_context);
-                _lastEvaluatedPrompt = string.Empty;
+                try
+                {
+                    _weights = LLamaWeights.LoadFromFile(parameters);
+                    _context = _weights.CreateContext(parameters);
+                    
+                    // Using InteractiveExecutor for hybrid fast-path prefix caching
+                    _executor = new InteractiveExecutor(_context);
+                    _lastEvaluatedPrompt = string.Empty;
 
-                CurrentModelPath = modelPath;
-                _logger.LogInformation("Model loaded successfully.");
+                    CurrentModelPath = modelPath;
+                    _logger.LogInformation("Model loaded successfully.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to load LLama model or create context from {ModelPath}.", modelPath);
+                    UnloadModelInternal();
+                    throw;
+                }
             }
             finally
             {
