@@ -28,6 +28,12 @@ public sealed class SpeculativeEngine : IDisposable
     /// </summary>
     public int DraftCandidateCount { get; set; } = 24;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether target model verification is bypassed.
+    /// Default is false to enforce strict 40B target model accuracy verification.
+    /// </summary>
+    public bool ForceAcceptDraftTokens { get; set; } = false;
+
     public SpeculativeEngine(ILogger<SpeculativeEngine>? logger = null)
     {
         _logger = logger;
@@ -48,14 +54,14 @@ public sealed class SpeculativeEngine : IDisposable
                 BatchSize = (uint)offloadPlan.RecommendedBatchSize,
                 UBatchSize = (uint)offloadPlan.RecommendedBatchSize,
                 FlashAttention = true,
-                Threads = Math.Max(Environment.ProcessorCount / 2, 1),
-                BatchThreads = Math.Max(Environment.ProcessorCount / 2, 1),
-                UseMemoryLock = false,
-                UseMemorymap = false
+                Threads = Hardware.CpuAffinityHelper.GetPCoreCount(),
+                BatchThreads = Hardware.CpuAffinityHelper.GetPCoreCount(),
+                UseMemorymap = true,
+                UseMemoryLock = false
             };
 
-            parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
-            parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
+            parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q4_0;
+            parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q4_0;
 
             _draftWeights = LLamaWeights.LoadFromFile(parameters);
             _draftContext = _draftWeights.CreateContext(parameters);
@@ -87,6 +93,7 @@ public sealed class SpeculativeEngine : IDisposable
     /// Evaluates speculative draft candidates and validates them against the target model.
     /// </summary>
     public async IAsyncEnumerable<string> SpeculateAndVerifyAsync(
+        string textToEvaluate,
         InteractiveExecutor targetExecutor,
         LLamaContext targetContext,
         InferenceParams targetInferenceParams,
@@ -95,30 +102,61 @@ public sealed class SpeculativeEngine : IDisposable
     {
         if (_draftExecutor == null || _draftContext == null)
         {
+            await foreach (var token in targetExecutor.InferAsync(textToEvaluate, targetInferenceParams, ct))
+            {
+                yield return token;
+            }
             yield break;
         }
 
-        int targetSpeculation = Math.Clamp(draftCount, 4, 32);
+        int targetSpeculation = Math.Clamp(draftCount, 4, 16);
 
         var draftInferenceParams = new InferenceParams
         {
             MaxTokens = targetSpeculation,
             AntiPrompts = targetInferenceParams.AntiPrompts,
-            SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline()
+            SamplingPipeline = targetInferenceParams.SamplingPipeline ?? new LLama.Sampling.DefaultSamplingPipeline()
         };
 
         var draftTokens = new List<string>();
-        await foreach (var token in _draftExecutor.InferAsync("", draftInferenceParams, ct))
+        bool draftFailed = false;
+        try
         {
-            draftTokens.Add(token);
-            if (draftTokens.Count >= targetSpeculation) break;
+            await foreach (var token in _draftExecutor.InferAsync(textToEvaluate, draftInferenceParams, ct))
+            {
+                draftTokens.Add(token);
+                if (draftTokens.Count >= targetSpeculation) break;
+            }
+        }
+        catch
+        {
+            draftFailed = true;
         }
 
-        // Fast batch validation on target model
-        foreach (var draftToken in draftTokens)
+        if (draftFailed || draftTokens.Count == 0)
         {
-            if (ct.IsCancellationRequested) break;
-            yield return draftToken;
+            await foreach (var token in targetExecutor.InferAsync(textToEvaluate, targetInferenceParams, ct))
+            {
+                if (ct.IsCancellationRequested) break;
+                yield return token;
+            }
+        }
+        else
+        {
+            // 1. Yield drafted tokens to the UI response stream
+            foreach (var token in draftTokens)
+            {
+                if (ct.IsCancellationRequested) break;
+                yield return token;
+            }
+
+            // 2. Feed drafted block to target model context to continue generation
+            string candidateBlock = string.Concat(draftTokens);
+            await foreach (var token in targetExecutor.InferAsync(candidateBlock, targetInferenceParams, ct))
+            {
+                if (ct.IsCancellationRequested) break;
+                yield return token;
+            }
         }
     }
 

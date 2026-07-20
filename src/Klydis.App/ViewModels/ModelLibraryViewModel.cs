@@ -364,7 +364,7 @@ public partial class ModelLibraryViewModel : ObservableObject
                 contextLength, 
                 gpuInfo, 
                 systemInfo, 
-                Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
+                Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
 
             await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
         }

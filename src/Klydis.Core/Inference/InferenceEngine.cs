@@ -138,6 +138,9 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
                 UnloadModelInternal();
 
+                // Lock process execution strictly to Physical P-Cores to prevent E-Core throttling
+                Hardware.CpuAffinityHelper.ApplyPCoreAffinityToProcess();
+
                 // Configure model parameters for maximum GPU throughput
                 var parameters = new ModelParams(modelPath)
                 {
@@ -146,16 +149,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                     BatchSize = (uint)offloadPlan.RecommendedBatchSize,
                     UBatchSize = (uint)offloadPlan.RecommendedBatchSize, // Align physical batch size with BatchSize
                     FlashAttention = true,
-                    Threads = Math.Max(Environment.ProcessorCount / 2, 1),
-                    BatchThreads = Math.Max(Environment.ProcessorCount / 2, 1),
-                    // Pin model weights in RAM to prevent OS paging — critical for GPU DMA transfers
-                    UseMemoryLock = false,
-                    // Disable Memory map to prevent file bounds corruption errors on Windows,
-                    // forcing weights directly into RAM.
-                    UseMemorymap = false
+                    Threads = Hardware.CpuAffinityHelper.GetPCoreCount(),
+                    BatchThreads = Hardware.CpuAffinityHelper.GetPCoreCount(),
+                    // Enable Memory map to eliminate double-buffering in System RAM
+                    UseMemorymap = true,
+                    UseMemoryLock = false
                 };
                 
-                // Use native Q8_0 KV cache to halve VRAM usage with negligible quality loss
+                // Use native Q8_0 KV cache to maintain maximum precision reasoning accuracy
                 parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
                 parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
 
@@ -226,24 +227,30 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                     bool isFirstToken = true;
                     string textToEvaluate = prompt;
 
-                    // HYBRID EXECUTOR LOGIC: Fast-path for appends, Slow-path for edits/deletes
-                    if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt))
+                    // HYBRID EXECUTOR LOGIC: Fast-path for appended conversation turns, full reset for new chats
+                    string trimmedLastPrompt = _lastEvaluatedPrompt.TrimEnd();
+                    if (!string.IsNullOrEmpty(trimmedLastPrompt) && prompt.StartsWith(trimmedLastPrompt, StringComparison.Ordinal))
                     {
-                        textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
+                        textToEvaluate = prompt.Substring(trimmedLastPrompt.Length);
                         _logger.LogDebug("Fast-path inference triggered. Evaluating delta of {DeltaLength} chars.", textToEvaluate.Length);
                     }
                     else
                     {
-                        _logger.LogDebug("Slow-path inference triggered. Re-evaluating entire prompt.");
+                        _logger.LogDebug("Re-evaluating full conversation context.");
                         _context?.Dispose();
                         _context = _weights!.CreateContext(_modelParams!);
-                        _executor = new InteractiveExecutor(_context); // Reset the executor state
+                        _executor = new InteractiveExecutor(_context);
                         _lastEvaluatedPrompt = string.Empty;
+                        textToEvaluate = prompt;
                     }
 
                     var generatedContent = new System.Text.StringBuilder();
 
-                    await foreach (var token in _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: ct))
+                    var tokenStream = (IsSpeculativeDecodingEnabled && SpeculativeEngine.IsLoaded)
+                        ? SpeculativeEngine.SpeculateAndVerifyAsync(textToEvaluate, _executor, _context!, inferenceParams, SpeculativeDraftCount, ct)
+                        : _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: ct);
+
+                    await foreach (var token in tokenStream)
                     {
                         if (isFirstToken)
                         {

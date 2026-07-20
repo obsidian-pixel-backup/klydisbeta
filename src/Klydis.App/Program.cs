@@ -10,6 +10,11 @@ public class Program
     [STAThread]
     public static void Main()
     {
+        // Enable high-speed GGML CUDA Tensor Core decoding kernels and universal FlashAttention
+        Environment.SetEnvironmentVariable("GGML_CUDA_FORCE_CUBLAS", "1");
+        Environment.SetEnvironmentVariable("GGML_CUDA_FA_ALL_QUANTS", "1");
+        Environment.SetEnvironmentVariable("GGML_CUDA_DMMV_F16", "1");
+
         // Force LLamaSharp to load the CUDA backend globally before ANY native calls are made.
         // This ensures NVIDIA GPUs will properly utilize CUDA offloading instead of silently falling back to CPU.
         LLama.Native.NativeLibraryConfig.All.WithCuda();
@@ -43,6 +48,29 @@ public class Program
                 }
                 
                 Environment.SetEnvironmentVariable("PATH", string.Join(Path.PathSeparator, pathParts));
+            }
+            
+            // Also check NVIDIA G-Assist / NVIDIA App path for CUDA 12 runtime DLLs
+            var nvidiaGAssistPath = @"C:\ProgramData\NVIDIA Corporation\NVIDIA App\G-Assist";
+            if (Directory.Exists(nvidiaGAssistPath))
+            {
+                var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+                if (!pathEnv.Split(Path.PathSeparator).Contains(nvidiaGAssistPath, StringComparer.OrdinalIgnoreCase))
+                {
+                    Environment.SetEnvironmentVariable("PATH", nvidiaGAssistPath + Path.PathSeparator + pathEnv);
+                }
+
+                // Copy required CUDA 12 runtime DLLs to app root if missing
+                var appRoot = AppDomain.CurrentDomain.BaseDirectory;
+                foreach (var cudaDll in new[] { "cudart64_12.dll", "cublasLt64_12.dll", "cublas64_12.dll", "nvJitLink_120_0.dll" })
+                {
+                    var srcDll = Path.Combine(nvidiaGAssistPath, cudaDll);
+                    var destDll = Path.Combine(appRoot, cudaDll);
+                    if (File.Exists(srcDll) && !File.Exists(destDll))
+                    {
+                        try { File.Copy(srcDll, destDll, overwrite: true); } catch { }
+                    }
+                }
             }
             
             // Also check the legacy NVIDIA CEF path (older NVIDIA App installs)

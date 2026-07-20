@@ -100,15 +100,56 @@ public class SpeculativeDecodingService
         var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
         var systemInfo = await _systemProfiler.GetSystemInfoAsync();
 
-        var otherModels = allModels
+        // A valid draft model MUST be strictly smaller than the target model
+        // AND must be lightweight (<= 2.0 GB) so it doesn't steal VRAM from the main model.
+        const long MaxDraftModelSizeBytes = 2L * 1024 * 1024 * 1024; // 2.0 GB
+
+        var validDraftCandidates = allModels
             .Where(m => !m.FilePath.Equals(targetModelPath, StringComparison.OrdinalIgnoreCase))
+            .Where(m => m.FileSizeBytes < targetModel.FileSizeBytes)
+            .Where(m => m.FileSizeBytes <= MaxDraftModelSizeBytes)
             .OrderBy(m => m.FileSizeBytes)
             .ToList();
 
-        // Case A: Multiple local models available -> Pick smallest candidate
-        if (otherModels.Count > 0)
+        // Case A: Valid lightweight draft model available
+        if (validDraftCandidates.Count > 0)
         {
-            var smallestDraftModel = otherModels.First();
+            var smallestDraftModel = validDraftCandidates.First();
+
+            // Calculate target model VRAM cost at native context
+            var targetMetadata = GgufMetadataReader.Parse(targetModel.FilePath);
+            int targetTotalLayers = targetMetadata?.BlockCount.HasValue == true && targetMetadata.BlockCount.Value > 0 
+                ? (int)targetMetadata.BlockCount.Value : 32;
+            long targetLayerSizeBytes = targetModel.FileSizeBytes / targetTotalLayers;
+
+            var targetStandalonePlan = _offloadStrategy.CalculatePlan(
+                targetTotalLayers,
+                targetLayerSizeBytes,
+                kvCachePerLayerBytes: 2048,
+                contextLength: 4096,
+                gpuInfo,
+                systemInfo,
+                OffloadStrategyType.FullGpu);
+
+            // If target model fits 100% on GPU standalone (GpuLayers == -1), but attaching draft model pushes target layers to CPU,
+            // disable speculative decoding to preserve 100% GPU execution for the primary model at full native context.
+            long combinedVramMb = targetModel.EstimatedVramMb.GetValueOrDefault(targetModel.FileSizeBytes / (1024 * 1024)) +
+                                 smallestDraftModel.EstimatedVramMb.GetValueOrDefault(smallestDraftModel.FileSizeBytes / (1024 * 1024)) + 1500;
+
+            int availableVramMb = gpuInfo?.TotalVramMb ?? 0;
+
+            if (targetStandalonePlan.GpuLayers == -1 && combinedVramMb > availableVramMb)
+            {
+                _logger?.LogInformation("Disabling speculative decoding to preserve 100% GPU offload for {TargetModel} at full native context.", targetModel.DisplayName);
+                return new SpeculativeResolutionResult(
+                    IsEnabled: false,
+                    DraftModelPath: null,
+                    DraftModelDisplayName: null,
+                    IsDualStream: false,
+                    StatusMessage: $"Disabled: Preserving 100% GPU offload for {targetModel.DisplayName} at full native context.",
+                    DraftOffloadPlan: null);
+            }
+
             var draftMetadata = GgufMetadataReader.Parse(smallestDraftModel.FilePath);
             int totalLayers = draftMetadata?.BlockCount.HasValue == true && draftMetadata.BlockCount.Value > 0 
                 ? (int)draftMetadata.BlockCount.Value : 32;
@@ -172,11 +213,12 @@ public class SpeculativeDecodingService
                 DraftOffloadPlan: dualPlan);
         }
 
-        // Dual-stream exceeds VRAM limit
-        string warningStatus = $"Unavailable. Only 1 model installed ({targetModel.DisplayName}) and dual-streaming exceeds available VRAM ({availableGpuVramMb} MB). Download a smaller draft model (e.g. Qwen2.5-0.5B).";
+        // Dual-stream or candidate models exceed VRAM/size limits
+        string warningStatus = allModels.Count > 1
+            ? $"Unavailable. Secondary installed models are too large (e.g. 9B) to serve as a draft model without stealing GPU VRAM from {targetModel.DisplayName}. Download a lightweight draft model (≤ 2 GB, e.g. Qwen2.5-0.5B)."
+            : $"Unavailable. Only 1 model installed ({targetModel.DisplayName}) and dual-streaming exceeds available VRAM ({availableGpuVramMb} MB). Download a lightweight draft model (≤ 2 GB, e.g. Qwen2.5-0.5B).";
 
-        _logger?.LogWarning("Speculative decoding unavailable for single model {ModelName}: dual-stream requires {DualVram} MB VRAM, available {TotalVram} MB",
-            targetModel.DisplayName, dualStreamVramMb, availableGpuVramMb);
+        _logger?.LogWarning("Speculative decoding unavailable for target model {ModelName}: no lightweight draft model (<= 2 GB) available.", targetModel.DisplayName);
 
         return new SpeculativeResolutionResult(
             IsEnabled: false,

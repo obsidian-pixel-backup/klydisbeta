@@ -142,7 +142,26 @@ public partial class ChatViewModel : ObservableObject
     private async Task InitializeSessionsAsync()
     {
         var dbSessions = await _messageStore.GetSessionsAsync();
-        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+
+        if (System.Windows.Application.Current != null)
+        {
+            await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                Sessions.Clear();
+                foreach (var session in dbSessions)
+                {
+                    Sessions.Add(new SessionInfo
+                    {
+                        Id = session.Id,
+                        Title = CleanTitle(session.Title),
+                        LastMessagePreview = "",
+                        Timestamp = session.UpdatedAt,
+                        IsPinned = session.IsPinned
+                    });
+                }
+            });
+        }
+        else
         {
             Sessions.Clear();
             foreach (var session in dbSessions)
@@ -156,9 +175,7 @@ public partial class ChatViewModel : ObservableObject
                     IsPinned = session.IsPinned
                 });
             }
-            // Sort to ensure pinned items are at top if any are manually modified, 
-            // though the db already sorts them.
-        });
+        }
 
         if (Sessions.Count > 0)
         {
@@ -222,7 +239,7 @@ public partial class ChatViewModel : ObservableObject
                 }
 
                 var plan = _offloadStrategy.CalculatePlan(
-                    totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
+                    totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
                 
                 await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
                 _ = _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
@@ -725,8 +742,19 @@ public partial class ChatViewModel : ObservableObject
         string sessionId = await _messageStore.CreateSessionAsync(title, SelectedModelId);
         
         var newSession = new SessionInfo { Id = sessionId, Title = title, Timestamp = DateTime.Now };
-        Sessions.Insert(0, newSession);
-        SelectedSession = newSession;
+        if (System.Windows.Application.Current != null)
+        {
+            await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                Sessions.Insert(0, newSession);
+                SelectedSession = newSession;
+            });
+        }
+        else
+        {
+            Sessions.Insert(0, newSession);
+            SelectedSession = newSession;
+        }
     }
 
     [RelayCommand]
