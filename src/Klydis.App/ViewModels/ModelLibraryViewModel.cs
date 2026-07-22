@@ -335,6 +335,8 @@ public partial class ModelLibraryViewModel : ObservableObject
         
         try
         {
+            await _inferenceEngine.UnloadModelAsync();
+            
             // Read GGUF metadata for dynamic sizing
             var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
             int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
@@ -392,8 +394,7 @@ public partial class ModelLibraryViewModel : ObservableObject
     {
         CurrentlyLoadedModelId = string.Empty;
         foreach (var m in Models) m.IsLoaded = false;
-        _inferenceEngine.UnloadModel();
-        await Task.CompletedTask;
+        await _inferenceEngine.UnloadModelAsync();
     }
 
     [RelayCommand]

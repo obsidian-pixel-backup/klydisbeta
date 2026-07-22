@@ -1,9 +1,13 @@
+using System;
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Klydis.App.Services;
+using Klydis.Core.Models;
 
 namespace Klydis.App.ViewModels;
 
@@ -13,6 +17,8 @@ public enum SettingsCategory
     Inference,
     About
 }
+
+public record DraftModelOption(string DisplayName, string FilePath);
 
 /// <summary>
 /// One tile in the Themes gallery. <see cref="Swatch"/> is a fixed preview color
@@ -44,6 +50,7 @@ public partial class SettingsViewModel : ObservableObject
 {
     private readonly ThemeService _themeService;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
+    private readonly ModelRegistry? _modelRegistry;
 
     [ObservableProperty]
     private SettingsCategory _selectedCategory = SettingsCategory.Appearance;
@@ -64,18 +71,26 @@ public partial class SettingsViewModel : ObservableObject
     private int _speculativeDraftCount = 24;
 
     [ObservableProperty]
+    private string _selectedDraftModelPath = "auto";
+
+    [ObservableProperty]
     private string _speculativeStatusMessage = "Speculative decoding active.";
 
     public ObservableCollection<AccentSwatch> AccentSwatches { get; } = new();
     public ObservableCollection<BackgroundSwatch> BackgroundSwatches { get; } = new();
+    public ObservableCollection<DraftModelOption> AvailableDraftModels { get; } = new();
 
     public string AppVersion { get; }
     public string AppDescription { get; }
 
-    public SettingsViewModel(ThemeService themeService, Klydis.Core.Inference.InferenceEngine inferenceEngine)
+    public SettingsViewModel(
+        ThemeService themeService, 
+        Klydis.Core.Inference.InferenceEngine inferenceEngine,
+        ModelRegistry? modelRegistry = null)
     {
         _themeService = themeService;
         _inferenceEngine = inferenceEngine;
+        _modelRegistry = modelRegistry;
 
         _selectedMode = themeService.CurrentMode;
         _selectedAccent = themeService.CurrentAccent;
@@ -83,7 +98,26 @@ public partial class SettingsViewModel : ObservableObject
 
         IsSpeculativeDecodingEnabled = themeService.IsSpeculativeDecodingEnabled;
         SpeculativeDraftCount = themeService.SpeculativeDraftCount;
+        SelectedDraftModelPath = themeService.SelectedDraftModelPath;
+        _inferenceEngine.SelectedDraftModelPath = SelectedDraftModelPath;
         SpeculativeStatusMessage = inferenceEngine.SpeculativeStatus;
+
+        RefreshAvailableDraftModels();
+
+        if (_modelRegistry != null)
+        {
+            _modelRegistry.RegistryChanged += () =>
+            {
+                if (System.Windows.Application.Current != null)
+                {
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(RefreshAvailableDraftModels);
+                }
+                else
+                {
+                    RefreshAvailableDraftModels();
+                }
+            };
+        }
 
         _inferenceEngine.SpeculativeStatusChanged += (status) =>
         {
@@ -135,6 +169,25 @@ public partial class SettingsViewModel : ObservableObject
         AppVersion = version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "dev";
         AppDescription = assembly.GetCustomAttribute<AssemblyDescriptionAttribute>()?.Description
             ?? "Self-contained local LLM orchestrator.";
+    }
+
+    private void RefreshAvailableDraftModels()
+    {
+        AvailableDraftModels.Clear();
+        AvailableDraftModels.Add(new DraftModelOption("Auto (Smallest Model)", "auto"));
+
+        if (_modelRegistry != null)
+        {
+            var models = _modelRegistry.GetAllModels()
+                .Where(m => File.Exists(m.FilePath))
+                .OrderBy(m => m.FileSizeBytes);
+
+            foreach (var m in models)
+            {
+                double sizeGb = m.FileSizeBytes / (1024.0 * 1024.0 * 1024.0);
+                AvailableDraftModels.Add(new DraftModelOption($"{m.DisplayName} ({sizeGb:F2} GB)", m.FilePath));
+            }
+        }
     }
 
     [RelayCommand]
@@ -190,21 +243,41 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
+    partial void OnSelectedDraftModelPathChanged(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            SelectedDraftModelPath = "auto";
+            return;
+        }
+
+        string draftPath = value;
+        _themeService.SaveSpeculativeSettings(IsSpeculativeDecodingEnabled, SpeculativeDraftCount, draftPath);
+        _inferenceEngine.SelectedDraftModelPath = draftPath;
+
+        if (!string.IsNullOrEmpty(_inferenceEngine.CurrentModelPath))
+        {
+            var modelPath = _inferenceEngine.CurrentModelPath;
+            _ = Task.Run(async () => await _inferenceEngine.AttachSpeculativeDraftAsync(modelPath));
+        }
+    }
+
     partial void OnIsSpeculativeDecodingEnabledChanged(bool value)
     {
-        _themeService.SaveSpeculativeSettings(value, SpeculativeDraftCount);
+        _themeService.SaveSpeculativeSettings(value, SpeculativeDraftCount, SelectedDraftModelPath);
         _inferenceEngine.IsSpeculativeDecodingEnabled = value;
 
         if (!string.IsNullOrEmpty(_inferenceEngine.CurrentModelPath))
         {
-            _ = _inferenceEngine.AttachSpeculativeDraftAsync(_inferenceEngine.CurrentModelPath);
+            var modelPath = _inferenceEngine.CurrentModelPath;
+            _ = Task.Run(async () => await _inferenceEngine.AttachSpeculativeDraftAsync(modelPath));
         }
     }
 
     partial void OnSpeculativeDraftCountChanged(int value)
     {
         int clamped = Math.Clamp(value, 4, 32);
-        _themeService.SaveSpeculativeSettings(IsSpeculativeDecodingEnabled, clamped);
+        _themeService.SaveSpeculativeSettings(IsSpeculativeDecodingEnabled, clamped, SelectedDraftModelPath);
         _inferenceEngine.SpeculativeDraftCount = clamped;
         _inferenceEngine.SpeculativeEngine.DraftCandidateCount = clamped;
     }

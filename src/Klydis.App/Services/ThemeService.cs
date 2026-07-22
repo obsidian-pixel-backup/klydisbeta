@@ -94,6 +94,9 @@ public class ThemeService
                     if (Enum.TryParse<ThemeMode>(settings.Mode, out var parsedMode)) mode = parsedMode;
                     if (Enum.TryParse<BackgroundTheme>(settings.Background, out var parsedBackground)) background = parsedBackground;
                     if (Enum.TryParse<AccentTheme>(settings.Accent, out var parsedAccent)) accent = parsedAccent;
+                    IsSpeculativeDecodingEnabled = settings.IsSpeculativeDecodingEnabled;
+                    SpeculativeDraftCount = settings.SpeculativeDraftCount > 0 ? Math.Clamp(settings.SpeculativeDraftCount, 4, 32) : 24;
+                    SelectedDraftModelPath = string.IsNullOrWhiteSpace(settings.SelectedDraftModelPath) ? "auto" : settings.SelectedDraftModelPath;
                 }
             }
         }
@@ -150,25 +153,19 @@ public class ThemeService
 
         if (persist)
         {
-            try
-            {
-                var json = JsonSerializer.Serialize(new UiSettings { Mode = mode.ToString(), Background = background.ToString(), Accent = accent.ToString() });
-                File.WriteAllText(_settingsPath, json);
-            }
-            catch
-            {
-                // Non-fatal: the appearance is still applied for this session.
-            }
+            PersistAllSettings();
         }
     }
 
     public bool IsSpeculativeDecodingEnabled { get; private set; } = true;
     public int SpeculativeDraftCount { get; private set; } = 24;
+    public string SelectedDraftModelPath { get; private set; } = "auto";
 
-    public void SaveSpeculativeSettings(bool enabled, int draftCount)
+    public void SaveSpeculativeSettings(bool enabled, int draftCount, string selectedDraftModelPath = "auto")
     {
         IsSpeculativeDecodingEnabled = enabled;
         SpeculativeDraftCount = Math.Clamp(draftCount, 4, 32);
+        SelectedDraftModelPath = string.IsNullOrWhiteSpace(selectedDraftModelPath) ? "auto" : selectedDraftModelPath;
         PersistAllSettings();
     }
 
@@ -182,7 +179,8 @@ public class ThemeService
                 Background = CurrentBackground.ToString(), 
                 Accent = CurrentAccent.ToString(),
                 IsSpeculativeDecodingEnabled = IsSpeculativeDecodingEnabled,
-                SpeculativeDraftCount = SpeculativeDraftCount
+                SpeculativeDraftCount = SpeculativeDraftCount,
+                SelectedDraftModelPath = SelectedDraftModelPath
             });
             File.WriteAllText(_settingsPath, json);
         }
@@ -210,5 +208,6 @@ public class ThemeService
         public string Accent { get; set; } = "Fluorescent";
         public bool IsSpeculativeDecodingEnabled { get; set; } = true;
         public int SpeculativeDraftCount { get; set; } = 24;
+        public string SelectedDraftModelPath { get; set; } = "auto";
     }
 }

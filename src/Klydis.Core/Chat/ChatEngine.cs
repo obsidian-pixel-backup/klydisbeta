@@ -8,6 +8,8 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Klydis.Core.Inference;
+using Klydis.Core.Inference.Telemetry;
 
 namespace Klydis.Core.Chat;
 
@@ -47,16 +49,71 @@ public interface IInferenceEngine
     bool IsModelLoaded { get; }
 
     /// <summary>
+    /// Path of the currently loaded model.
+    /// </summary>
+    string? CurrentModelPath { get; }
+
+    /// <summary>
     /// The loaded context size budget of the model.
     /// </summary>
     uint ContextSize { get; }
+
+    /// <summary>
+    /// Gets or sets whether speculative decoding is enabled.
+    /// </summary>
+    bool IsSpeculativeDecodingEnabled { get; set; }
+
+    /// <summary>
+    /// Gets or sets speculative draft candidate count.
+    /// </summary>
+    int SpeculativeDraftCount { get; set; }
+
+    /// <summary>
+    /// Gets or sets selected draft model path ("auto" or path).
+    /// </summary>
+    string SelectedDraftModelPath { get; set; }
+
+    /// <summary>
+    /// Gets the speculative engine instance.
+    /// </summary>
+    SpeculativeEngine SpeculativeEngine { get; }
+
+    /// <summary>
+    /// Gets the telemetry recorded during the most recent generation.
+    /// </summary>
+    InferenceTelemetry? LastTelemetry { get; }
+
+    /// <summary>
+    /// Event fired when an inference request completes with telemetry.
+    /// </summary>
+    event Action<InferenceTelemetry>? InferenceCompleted;
+
+    /// <summary>
+    /// Resolves and attaches a speculative draft model for the target model.
+    /// </summary>
+    Task AttachSpeculativeDraftAsync(string targetModelPath);
+
+    /// <summary>
+    /// Loads a model asynchronously with specified hardware offloading plan.
+    /// </summary>
+    Task LoadModelAsync(string modelPath, Hardware.OffloadPlan offloadPlan);
+
+    /// <summary>
+    /// Generates tokens asynchronously using specified parameters.
+    /// </summary>
+    IAsyncEnumerable<string> GenerateAsync(string prompt, LLama.Common.InferenceParams inferenceParams, bool triggerEvents = true, bool isIsolated = false, CancellationToken ct = default);
     
     /// <summary>
     /// Streams tokens for a given prompt.
     /// </summary>
     IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, CancellationToken ct);
     Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default);
+    Task<string> GenerateTextAsync(string prompt, bool isIsolated, CancellationToken ct = default);
+    void ResetContext();
     int GetTokenCount(string text);
+    Task CancelActiveGenerationAsync();
+    Task UnloadModelAsync(CancellationToken ct = default);
+    void UnloadModel();
 }
 
 /// <summary>
@@ -544,7 +601,7 @@ public class ChatEngine(
 
             var prompt = promptEngine.ApplyTemplate(messages, templateType);
             
-            var generatedText = await inferenceEngine.GenerateTextAsync(prompt, ct);
+            var generatedText = await inferenceEngine.GenerateTextAsync(prompt, isIsolated: true, ct);
             
             // Clean up any think blocks or quotes just in case
             generatedText = Regex.Replace(generatedText, @"<think>.*?</think>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();

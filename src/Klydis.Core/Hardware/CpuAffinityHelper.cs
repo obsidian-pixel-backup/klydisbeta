@@ -97,8 +97,11 @@ public static class CpuAffinityHelper
     {
         try
         {
-            IntPtr pCoreMask = GetPCoreAffinityMask();
-            Process.GetCurrentProcess().ProcessorAffinity = pCoreMask;
+            if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+            {
+                IntPtr pCoreMask = GetPCoreAffinityMask();
+                Process.GetCurrentProcess().ProcessorAffinity = pCoreMask;
+            }
         }
         catch
         {

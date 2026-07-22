@@ -50,7 +50,8 @@ public class SpeculativeDecodingService
     /// </summary>
     public async Task<SpeculativeResolutionResult> ResolveDraftModelAsync(
         string targetModelPath,
-        bool userEnabledSettings)
+        bool userEnabledSettings,
+        string? selectedDraftModelPath = "auto")
     {
         if (!userEnabledSettings)
         {
@@ -84,13 +85,13 @@ public class SpeculativeDecodingService
                 DisplayName: Path.GetFileName(targetModelPath),
                 FilePath: targetModelPath,
                 FileName: Path.GetFileName(targetModelPath),
-                FileSizeBytes: new FileInfo(targetModelPath).Length,
+                FileSizeBytes: File.Exists(targetModelPath) ? new FileInfo(targetModelPath).Length : 0,
                 Architecture: null,
                 ParameterCount: null,
                 QuantizationType: null,
                 BlockCount: null,
                 ContextLength: null,
-                EstimatedVramMb: new FileInfo(targetModelPath).Length / (1024 * 1024),
+                EstimatedVramMb: File.Exists(targetModelPath) ? new FileInfo(targetModelPath).Length / (1024 * 1024) : 0,
                 Source: ModelSource.Local,
                 InstalledAt: DateTime.UtcNow,
                 LastUsedAt: DateTime.UtcNow,
@@ -104,18 +105,45 @@ public class SpeculativeDecodingService
         // AND must be lightweight (<= 2.0 GB) so it doesn't steal VRAM from the main model.
         const long MaxDraftModelSizeBytes = 2L * 1024 * 1024 * 1024; // 2.0 GB
 
-        var validDraftCandidates = allModels
-            .Where(m => !m.FilePath.Equals(targetModelPath, StringComparison.OrdinalIgnoreCase))
-            .Where(m => m.FileSizeBytes < targetModel.FileSizeBytes)
-            .Where(m => m.FileSizeBytes <= MaxDraftModelSizeBytes)
-            .OrderBy(m => m.FileSizeBytes)
-            .ToList();
+        bool isAuto = string.IsNullOrWhiteSpace(selectedDraftModelPath) ||
+                      selectedDraftModelPath.Equals("auto", StringComparison.OrdinalIgnoreCase);
+
+        ModelInfo? selectedDraftModel = null;
+
+        if (!isAuto && selectedDraftModelPath != null)
+        {
+            var manualCandidate = allModels.FirstOrDefault(m => m.FilePath.Equals(selectedDraftModelPath, StringComparison.OrdinalIgnoreCase));
+            if (manualCandidate != null &&
+                File.Exists(manualCandidate.FilePath) &&
+                !manualCandidate.FilePath.Equals(targetModelPath, StringComparison.OrdinalIgnoreCase) &&
+                manualCandidate.FileSizeBytes < targetModel.FileSizeBytes)
+            {
+                selectedDraftModel = manualCandidate;
+            }
+            else
+            {
+                _logger?.LogWarning("Manually selected draft model path '{SelectedPath}' is invalid or larger than target model. Falling back to auto selection.", selectedDraftModelPath);
+            }
+        }
+
+        if (selectedDraftModel == null)
+        {
+            var validDraftCandidates = allModels
+                .Where(m => !m.FilePath.Equals(targetModelPath, StringComparison.OrdinalIgnoreCase))
+                .Where(m => m.FileSizeBytes < targetModel.FileSizeBytes)
+                .Where(m => m.FileSizeBytes <= MaxDraftModelSizeBytes)
+                .OrderBy(m => m.FileSizeBytes)
+                .ToList();
+
+            if (validDraftCandidates.Count > 0)
+            {
+                selectedDraftModel = validDraftCandidates.First();
+            }
+        }
 
         // Case A: Valid lightweight draft model available
-        if (validDraftCandidates.Count > 0)
+        if (selectedDraftModel != null)
         {
-            var smallestDraftModel = validDraftCandidates.First();
-
             // Calculate target model VRAM cost at native context
             var targetMetadata = GgufMetadataReader.Parse(targetModel.FilePath);
             int targetTotalLayers = targetMetadata?.BlockCount.HasValue == true && targetMetadata.BlockCount.Value > 0 
@@ -134,7 +162,7 @@ public class SpeculativeDecodingService
             // If target model fits 100% on GPU standalone (GpuLayers == -1), but attaching draft model pushes target layers to CPU,
             // disable speculative decoding to preserve 100% GPU execution for the primary model at full native context.
             long combinedVramMb = targetModel.EstimatedVramMb.GetValueOrDefault(targetModel.FileSizeBytes / (1024 * 1024)) +
-                                 smallestDraftModel.EstimatedVramMb.GetValueOrDefault(smallestDraftModel.FileSizeBytes / (1024 * 1024)) + 1500;
+                                 selectedDraftModel.EstimatedVramMb.GetValueOrDefault(selectedDraftModel.FileSizeBytes / (1024 * 1024)) + 1500;
 
             int availableVramMb = gpuInfo?.TotalVramMb ?? 0;
 
@@ -150,10 +178,10 @@ public class SpeculativeDecodingService
                     DraftOffloadPlan: null);
             }
 
-            var draftMetadata = GgufMetadataReader.Parse(smallestDraftModel.FilePath);
+            var draftMetadata = GgufMetadataReader.Parse(selectedDraftModel.FilePath);
             int totalLayers = draftMetadata?.BlockCount.HasValue == true && draftMetadata.BlockCount.Value > 0 
                 ? (int)draftMetadata.BlockCount.Value : 32;
-            long layerSizeBytes = smallestDraftModel.FileSizeBytes / totalLayers;
+            long layerSizeBytes = selectedDraftModel.FileSizeBytes / totalLayers;
 
             var draftPlan = _offloadStrategy.CalculatePlan(
                 totalLayers,
@@ -164,15 +192,16 @@ public class SpeculativeDecodingService
                 systemInfo,
                 OffloadStrategyType.FullGpu);
 
-            double sizeGb = smallestDraftModel.FileSizeBytes / (1024.0 * 1024.0 * 1024.0);
-            string status = $"Enabled. Active Draft Model: {smallestDraftModel.DisplayName} ({sizeGb:F2} GB).";
+            double sizeGb = selectedDraftModel.FileSizeBytes / (1024.0 * 1024.0 * 1024.0);
+            string modeDesc = isAuto ? "Auto" : "Manual";
+            string status = $"Enabled ({modeDesc}). Active Draft Model: {selectedDraftModel.DisplayName} ({sizeGb:F2} GB).";
 
-            _logger?.LogInformation("Resolved speculative draft model {DraftModel} for target {TargetModel}", smallestDraftModel.DisplayName, targetModel.DisplayName);
+            _logger?.LogInformation("Resolved speculative draft model {DraftModel} ({Mode}) for target {TargetModel}", selectedDraftModel.DisplayName, modeDesc, targetModel.DisplayName);
 
             return new SpeculativeResolutionResult(
                 IsEnabled: true,
-                DraftModelPath: smallestDraftModel.FilePath,
-                DraftModelDisplayName: smallestDraftModel.DisplayName,
+                DraftModelPath: selectedDraftModel.FilePath,
+                DraftModelDisplayName: selectedDraftModel.DisplayName,
                 IsDualStream: false,
                 StatusMessage: status,
                 DraftOffloadPlan: draftPlan);

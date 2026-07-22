@@ -11,10 +11,11 @@ using Microsoft.Extensions.Logging;
 using System.Linq;
 using System.Threading.Channels;
 using Klydis.Core.Chat;
+using Klydis.Core.Inference.Telemetry;
+
+[assembly: InternalsVisibleTo("Klydis.Core.Tests")]
 
 namespace Klydis.Core.Inference;
-
-
 
 /// <summary>
 /// Defines a chat template for formatting messages into a prompt string.
@@ -40,12 +41,30 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     private InteractiveExecutor? _executor;
     private string _lastEvaluatedPrompt = string.Empty;
     private readonly SemaphoreSlim _modelLock = new SemaphoreSlim(1, 1);
+    private CancellationTokenSource? _activeGenerationCts;
+    private readonly object _generationCtsLock = new();
 
     public SpeculativeEngine SpeculativeEngine { get; } = new();
     public SpeculativeDecodingService? SpeculativeDecodingService { get; set; }
     public bool IsSpeculativeDecodingEnabled { get; set; } = true;
     public int SpeculativeDraftCount { get; set; } = 24;
+    private string _selectedDraftModelPath = "auto";
+    public string SelectedDraftModelPath
+    {
+        get => _selectedDraftModelPath;
+        set => _selectedDraftModelPath = string.IsNullOrWhiteSpace(value) ? "auto" : value;
+    }
     public string SpeculativeStatus { get; private set; } = "Speculative decoding initialized.";
+
+    /// <summary>
+    /// Gets the telemetry recorded during the most recent generation.
+    /// </summary>
+    public InferenceTelemetry? LastTelemetry { get; private set; }
+
+    /// <summary>
+    /// Event fired when an inference request completes with telemetry.
+    /// </summary>
+    public event Action<InferenceTelemetry>? InferenceCompleted;
 
     /// <summary>
     /// Event fired when a token is generated, providing the token text and current tokens/second rate.
@@ -100,7 +119,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
         try
         {
-            var res = await SpeculativeDecodingService.ResolveDraftModelAsync(targetModelPath, IsSpeculativeDecodingEnabled);
+            var res = await SpeculativeDecodingService.ResolveDraftModelAsync(targetModelPath, IsSpeculativeDecodingEnabled, SelectedDraftModelPath);
             SpeculativeStatus = res.StatusMessage;
             SpeculativeStatusChanged?.Invoke(SpeculativeStatus);
 
@@ -131,11 +150,13 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     {
         return Task.Run(async () =>
         {
+            await CancelActiveGenerationAsync();
             await _modelLock.WaitAsync();
             try
             {
                 _logger.LogInformation("Loading model from {ModelPath} with {GpuLayers} GPU layers.", modelPath, offloadPlan.GpuLayers);
 
+                SpeculativeEngine.Unload();
                 UnloadModelInternal();
 
                 // Lock process execution strictly to Physical P-Cores to prevent E-Core throttling
@@ -156,9 +177,9 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                     UseMemoryLock = false
                 };
                 
-                // Use native Q8_0 KV cache to maintain maximum precision reasoning accuracy
-                parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
-                parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q8_0;
+                // Target KV cache precision set to Q4_0 for maximum memory efficiency and throughput
+                parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q4_0;
+                parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q4_0;
 
                 _modelParams = parameters;
                 try
@@ -196,8 +217,24 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         string prompt, 
         InferenceParams inferenceParams, 
         bool triggerEvents = true,
+        bool isIsolated = false,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        CancellationTokenSource linkedCts;
+        lock (_generationCtsLock)
+        {
+            try
+            {
+                _activeGenerationCts?.Cancel();
+                _activeGenerationCts?.Dispose();
+            }
+            catch (ObjectDisposedException) { }
+
+            _activeGenerationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linkedCts = _activeGenerationCts;
+        }
+        CancellationToken generationToken = linkedCts.Token;
+
         await _modelLock.WaitAsync(ct);
         try
         {
@@ -220,42 +257,57 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
             var generationTask = Task.Run(async () =>
             {
+                bool completedNormally = false;
                 try
                 {
-                    var stopwatch = Stopwatch.StartNew();
+                    var requestStopwatch = Stopwatch.StartNew();
+                    var genStopwatch = new Stopwatch();
+                    double ttftMs = 0;
                     int tokenCount = 0;
                     bool isFirstToken = true;
                     string textToEvaluate = prompt;
 
-                    // HYBRID EXECUTOR LOGIC: Fast-path for appended conversation turns, full reset for new chats
-                    string trimmedLastPrompt = _lastEvaluatedPrompt.TrimEnd();
-                    if (!string.IsNullOrEmpty(trimmedLastPrompt) && prompt.StartsWith(trimmedLastPrompt, StringComparison.Ordinal))
+                    if (isIsolated)
                     {
-                        textToEvaluate = prompt.Substring(trimmedLastPrompt.Length);
-                        _logger.LogDebug("Fast-path inference triggered. Evaluating delta of {DeltaLength} chars.", textToEvaluate.Length);
+                        _logger.LogDebug("Executing isolated inference task. Context tracking will reset after execution.");
+                        ResetContextInternal();
+                        textToEvaluate = prompt;
                     }
                     else
                     {
-                        _logger.LogDebug("Re-evaluating full conversation context.");
-                        _context?.Dispose();
-                        _context = _weights!.CreateContext(_modelParams!);
-                        _executor = new InteractiveExecutor(_context);
-                        _lastEvaluatedPrompt = string.Empty;
-                        textToEvaluate = prompt;
+                        // HYBRID EXECUTOR LOGIC: Fast-path for appended conversation turns, full reset for new chats
+                        if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt, StringComparison.Ordinal))
+                        {
+                            textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
+                            _logger.LogDebug("Fast-path inference triggered. Initial delta length: {DeltaLength} chars.", textToEvaluate.Length);
+
+                            // Strip leading turn-ending stop tokens (and trailing newlines/spaces) to prevent AntiPrompts
+                            // from matching at token 0 of prompt pre-fill.
+                            textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
+                        }
+                        else
+                        {
+                            _logger.LogDebug("Re-evaluating full conversation context.");
+                            ResetContextInternal();
+                            textToEvaluate = prompt;
+                        }
                     }
 
                     var generatedContent = new System.Text.StringBuilder();
 
                     var tokenStream = (IsSpeculativeDecodingEnabled && SpeculativeEngine.IsLoaded)
-                        ? SpeculativeEngine.SpeculateAndVerifyAsync(textToEvaluate, _executor, _context!, inferenceParams, SpeculativeDraftCount, ct)
-                        : _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: ct);
+                        ? SpeculativeEngine.SpeculateAndVerifyAsync(textToEvaluate, _executor, _context!, inferenceParams, SpeculativeDraftCount, generationToken)
+                        : _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: generationToken);
 
                     await foreach (var token in tokenStream)
                     {
+                        if (generationToken.IsCancellationRequested) break;
+
                         if (isFirstToken)
                         {
                             isFirstToken = false;
-                            stopwatch.Restart(); // Reset stopwatch after prompt processing to measure pure generation t/s
+                            ttftMs = requestStopwatch.Elapsed.TotalMilliseconds;
+                            genStopwatch.Start();
                         }
                         else
                         {
@@ -264,17 +316,50 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                         
                         generatedContent.Append(token);
                         
-                        float tokensPerSecond = tokenCount > 0 ? (float)(tokenCount / stopwatch.Elapsed.TotalSeconds) : 0;
+                        float tokensPerSecond = tokenCount > 0 ? (float)(tokenCount / genStopwatch.Elapsed.TotalSeconds) : 0;
                         if (triggerEvents)
                         {
                             TokenGenerated?.Invoke(token, tokensPerSecond);
                         }
                         
-                        await channel.Writer.WriteAsync(token, ct);
+                        await channel.Writer.WriteAsync(token, generationToken);
                     }
                     
-                    // Update the state hash to include both the input prompt and the generated response
-                    _lastEvaluatedPrompt = prompt + generatedContent.ToString();
+                    if (!isIsolated)
+                    {
+                        // Update the state hash to include both the input prompt and the generated response
+                        _lastEvaluatedPrompt = prompt + generatedContent.ToString();
+                    }
+                    completedNormally = true;
+
+                    requestStopwatch.Stop();
+                    genStopwatch.Stop();
+                    double totalElapsedMs = requestStopwatch.Elapsed.TotalMilliseconds;
+                    double genDurationMs = genStopwatch.Elapsed.TotalMilliseconds;
+                    int totalGeneratedTokens = isFirstToken ? 0 : tokenCount + 1;
+                    double genTokSec = (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
+                    double e2eTokSec = totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0;
+
+                    int promptTokenCount = 0;
+                    try { promptTokenCount = GetTokenCount(prompt); } catch { promptTokenCount = Math.Max(1, prompt.Length / 4); }
+
+                    var telemetry = new InferenceTelemetry(
+                        RequestId: Guid.NewGuid().ToString("N"),
+                        TargetModelPath: CurrentModelPath ?? "Unknown",
+                        DraftModelPath: SpeculativeEngine.LoadedDraftPath,
+                        IsSpeculativeEnabled: IsSpeculativeDecodingEnabled && SpeculativeEngine.IsLoaded,
+                        PromptLengthChars: prompt.Length,
+                        PromptTokenCount: promptTokenCount,
+                        GeneratedTokenCount: totalGeneratedTokens,
+                        TimeToFirstTokenMs: Math.Round(ttftMs, 2),
+                        GenerationDurationMs: Math.Round(genDurationMs, 2),
+                        TotalElapsedMs: Math.Round(totalElapsedMs, 2),
+                        GenerationTokensPerSecond: Math.Round(genTokSec, 2),
+                        EndToEndTokensPerSecond: Math.Round(e2eTokSec, 2),
+                        SpeculativeMetrics: (IsSpeculativeDecodingEnabled && SpeculativeEngine.IsLoaded) ? SpeculativeEngine.LastTelemetry : null
+                    );
+                    LastTelemetry = telemetry;
+                    InferenceCompleted?.Invoke(telemetry);
                 }
                 catch (OperationCanceledException)
                 {
@@ -286,6 +371,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 }
                 finally
                 {
+                    if (isIsolated || !completedNormally)
+                    {
+                        ResetContextInternal();
+                    }
                     channel.Writer.Complete();
                 }
             }, CancellationToken.None);
@@ -314,11 +403,19 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         }
         finally
         {
+            lock (_generationCtsLock)
+            {
+                if (_activeGenerationCts == linkedCts)
+                {
+                    _activeGenerationCts = null;
+                }
+            }
+            try { linkedCts.Dispose(); } catch (ObjectDisposedException) { }
             _modelLock.Release();
         }
     }
 
-    public IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, CancellationToken ct)
+    public async IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var inferenceParams = new InferenceParams 
         { 
@@ -333,10 +430,19 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 RepeatPenalty = 1.1f
             }
         };
-        return GenerateAsync(prompt, inferenceParams, true, ct);
+
+        await foreach (var token in GenerateAsync(prompt, inferenceParams, triggerEvents: true, isIsolated: false, ct: ct))
+        {
+            yield return token;
+        }
     }
 
-    public async Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default)
+    public Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default)
+    {
+        return GenerateTextAsync(prompt, isIsolated: false, ct);
+    }
+
+    public async Task<string> GenerateTextAsync(string prompt, bool isIsolated, CancellationToken ct = default)
     {
         var inferenceParams = new InferenceParams 
         { 
@@ -350,11 +456,98 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
             }
         };
         var sb = new System.Text.StringBuilder();
-        await foreach (var token in GenerateAsync(prompt, inferenceParams, false, ct))
+        await foreach (var token in GenerateAsync(prompt, inferenceParams, triggerEvents: false, isIsolated: isIsolated, ct: ct))
         {
             sb.Append(token);
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Resets the engine context and executor state, clearing cached prefix state.
+    /// </summary>
+    public void ResetContext()
+    {
+        _modelLock.Wait();
+        try
+        {
+            ResetContextInternal();
+        }
+        finally
+        {
+            _modelLock.Release();
+        }
+    }
+
+    private void ResetContextInternal()
+    {
+        _lastEvaluatedPrompt = string.Empty;
+        if (_weights != null && _modelParams != null)
+        {
+            _context?.Dispose();
+            _context = _weights.CreateContext(_modelParams);
+            _executor = new InteractiveExecutor(_context);
+        }
+    }
+
+    private static readonly string[] TurnEndingStopTokens = new[]
+    {
+        "<|eot_id|>",
+        "<|im_end|>",
+        "<|end_of_text|>",
+        "<end_of_turn>",
+        "</s>",
+        "<|end|>"
+    };
+
+    internal string StripLeadingStopTokens(string delta, IEnumerable<string>? antiPrompts)
+    {
+        if (string.IsNullOrEmpty(delta)) return delta;
+
+        var candidateStopTokens = new HashSet<string>(TurnEndingStopTokens, StringComparer.Ordinal);
+        if (antiPrompts != null)
+        {
+            foreach (var ap in antiPrompts)
+            {
+                if (!string.IsNullOrWhiteSpace(ap) && !ap.Contains("start", StringComparison.OrdinalIgnoreCase))
+                {
+                    candidateStopTokens.Add(ap);
+                }
+            }
+        }
+
+        var orderedStopTokens = candidateStopTokens.OrderByDescending(s => s.Length).ToList();
+
+        bool strippedAny = true;
+        while (strippedAny && !string.IsNullOrEmpty(delta))
+        {
+            strippedAny = false;
+            foreach (var stopToken in orderedStopTokens)
+            {
+                if (delta.StartsWith(stopToken, StringComparison.Ordinal))
+                {
+                    _logger?.LogDebug("Stripped leading turn stop token '{StopToken}' from prefix delta.", stopToken);
+                    _lastEvaluatedPrompt += stopToken;
+                    delta = delta.Substring(stopToken.Length);
+
+                    if (delta.StartsWith("\n", StringComparison.Ordinal))
+                    {
+                        _lastEvaluatedPrompt += "\n";
+                        delta = delta.Substring(1);
+                    }
+                    else if (delta.StartsWith("\r\n", StringComparison.Ordinal))
+                    {
+                        _lastEvaluatedPrompt += "\r\n";
+                        delta = delta.Substring(2);
+                    }
+
+                    strippedAny = true;
+                    break;
+                }
+            }
+        }
+
+        return delta;
     }
 
     /// <summary>
@@ -367,7 +560,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         CancellationToken ct = default)
     {
         var prompt = template.Format(messages);
-        return GenerateAsync(prompt, inferenceParams, true, ct);
+        return GenerateAsync(prompt, inferenceParams, triggerEvents: true, isIsolated: false, ct: ct);
     }
 
     /// <summary>
@@ -383,13 +576,63 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     }
 
     /// <summary>
+    /// Cancels any active token generation task and awaits background teardown.
+    /// </summary>
+    public async Task CancelActiveGenerationAsync()
+    {
+        CancellationTokenSource? ctsToCancel;
+        lock (_generationCtsLock)
+        {
+            ctsToCancel = _activeGenerationCts;
+            _activeGenerationCts = null;
+        }
+
+        if (ctsToCancel != null)
+        {
+            _logger?.LogInformation("Canceling active token generation task.");
+            try
+            {
+                ctsToCancel.Cancel();
+            }
+            catch (ObjectDisposedException) { }
+
+            ctsToCancel.Dispose();
+        }
+        await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Unloads the model asynchronously, canceling active generation tasks and freeing native resources.
+    /// </summary>
+    public async Task UnloadModelAsync(CancellationToken ct = default)
+    {
+        await CancelActiveGenerationAsync();
+
+        await _modelLock.WaitAsync(ct);
+        try
+        {
+            SpeculativeEngine.Unload();
+            UnloadModelInternal();
+        }
+        finally
+        {
+            _modelLock.Release();
+        }
+
+        ModelStateChanged?.Invoke(false, null);
+    }
+
+    /// <summary>
     /// Unloads the model and frees native resources and VRAM.
     /// </summary>
     public void UnloadModel()
     {
+        CancelActiveGenerationAsync().GetAwaiter().GetResult();
+
         _modelLock.Wait();
         try
         {
+            SpeculativeEngine.Unload();
             UnloadModelInternal();
         }
         finally

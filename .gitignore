@@ -86,3 +86,6 @@ llama_native.log
 
 # Publish output
 publish/
+
+.agents
+/tests

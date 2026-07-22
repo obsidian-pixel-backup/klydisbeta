@@ -420,6 +420,23 @@
                                 <CheckBox Grid.Column="1" IsChecked="{Binding IsSpeculativeDecodingEnabled}" VerticalAlignment="Center"/>
                             </Grid>
 
+                            <Grid Margin="0,0,0,16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="220"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Speculative Draft Model" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    <TextBlock Text="Select 'Auto' to dynamically use the smallest installed model, or select a specific local model." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,2,16,0"/>
+                                </StackPanel>
+                                <ComboBox Grid.Column="1"
+                                          ItemsSource="{Binding AvailableDraftModels}"
+                                          SelectedValue="{Binding SelectedDraftModelPath, Mode=TwoWay}"
+                                          SelectedValuePath="FilePath"
+                                          DisplayMemberPath="DisplayName"
+                                          VerticalAlignment="Center"/>
+                            </Grid>
+
                             <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="8" Padding="12,10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="0,0,0,16">
                                 <StackPanel>
                                     <TextBlock Text="Resolution &amp; Status:" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}"/>

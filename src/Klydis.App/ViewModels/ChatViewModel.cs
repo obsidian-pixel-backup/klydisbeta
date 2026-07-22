@@ -211,8 +211,8 @@ public partial class ChatViewModel : ObservableObject
                 IsModelLoading = true;
                 IsModelReady = false;
 
-                // Unload any existing model to free VRAM
-                _inferenceEngine.UnloadModel();
+                // Unload any existing model asynchronously to free VRAM and cancel ongoing generation
+                await _inferenceEngine.UnloadModelAsync();
                 
                 // Set architecture for prompt templating
                 _inferenceEngine.Architecture = modelInfo.Architecture ?? "llama";
@@ -242,7 +242,7 @@ public partial class ChatViewModel : ObservableObject
                     totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
                 
                 await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
-                _ = _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
+                await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
 
                 if (System.Windows.Application.Current != null)
                 {
@@ -346,9 +346,9 @@ public partial class ChatViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void UnloadModel()
+    private async Task UnloadModelAsync()
     {
-        _inferenceEngine.UnloadModel();
+        await _inferenceEngine.UnloadModelAsync();
         IsModelReady = false;
         _userExplicitlyUnloaded = true;
         SelectedModelId = string.Empty;

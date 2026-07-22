@@ -135,7 +135,7 @@ namespace Klydis.Core.Memory
             
             string summarizationPrompt = $"Current World State:\n{session.WorldState ?? "None"}\n\nNew Interactions to incorporate:\n{textToSummarize}\n\nTask: Update the World State to concisely reflect these new interactions without losing crucial long-term information. Respond with ONLY the new updated world state text.";
 
-            string newWorldState = await _inferenceEngine.GenerateTextAsync(summarizationPrompt);
+            string newWorldState = await _inferenceEngine.GenerateTextAsync(summarizationPrompt, isIsolated: true);
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
             await _store.MarkMessagesAsConsolidatedAsync(overflow.Select(m => m.Id));
@@ -236,7 +236,7 @@ namespace Klydis.Core.Memory
             public async Task<List<(int DocId, double Score)>> SearchEnhancedAsync(string rawQuery, IInferenceEngine fastEngine, int topK = 3)
             {
                 string restructurePrompt = $"User query: \"{rawQuery}\"\n\nTask: Extract the core nouns, verbs, and technical keywords. Strip all conversational filler. Respond ONLY with the space-separated keywords.";
-                string filteredQuery = await fastEngine.GenerateTextAsync(restructurePrompt);
+                string filteredQuery = await fastEngine.GenerateTextAsync(restructurePrompt, isIsolated: true);
                 
                 // Fallback if the fast model fails to generate anything or crashes
                 if (string.IsNullOrWhiteSpace(filteredQuery))
