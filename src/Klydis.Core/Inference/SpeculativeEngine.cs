@@ -239,8 +239,14 @@ public sealed class SpeculativeEngine : IDisposable
             var ngramCandidates = _ngramEngine.FindCandidatesFromText(textToEvaluate, matchN: 3, maxCandidates: effectiveDraftCount);
             if (ngramCandidates.Count > 0)
             {
+                bool ngramUsed = false;
                 Func<string, InferenceParams, CancellationToken, IAsyncEnumerable<string>> ngramDraftGen =
-                    (promptText, paramsObj, tokenCt) => ToAsyncEnumerable(ngramCandidates);
+                    (promptText, paramsObj, tokenCt) => 
+                    {
+                        if (ngramUsed) return ToAsyncEnumerable(Enumerable.Empty<string>());
+                        ngramUsed = true;
+                        return ToAsyncEnumerable(ngramCandidates);
+                    };
 
                 await foreach (var token in SpeculateAndVerifyCoreAsync(
                     textToEvaluate,

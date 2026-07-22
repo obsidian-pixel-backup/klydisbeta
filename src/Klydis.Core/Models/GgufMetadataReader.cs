@@ -76,14 +76,7 @@ public static class GgufMetadataReader
 
     private static GgufMetadata ParseKvs(BinaryReader reader, ulong kvCount)
     {
-        string? architecture = null;
-        long? blockCount = null;
-        long? contextLength = null;
-        long? embeddingLength = null;
-        long? headCount = null;
-        long? headCountKv = null;
-        long? vocabSize = null;
-        string? quantizationType = null;
+        var rawKvs = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
         for (ulong i = 0; i < kvCount; i++)
         {
@@ -94,31 +87,26 @@ public static class GgufMetadataReader
             var valueType = (GgufValueType)reader.ReadUInt32();
             object? value = ReadGgufValue(reader, valueType);
 
-            if (value == null) continue;
-
-            if (key == "general.architecture" && value is string archStr)
-                architecture = archStr;
-            else if (key == "general.quantization_version" && value is IConvertible)
-                quantizationType = $"v{Convert.ToUInt32(value)}"; 
-            else if (key == "general.file_type" && value is IConvertible ftVal)
-                quantizationType = GetFileTypeString(Convert.ToUInt32(ftVal));
-            
-            if (architecture != null)
+            if (value != null)
             {
-                if (key == $"{architecture}.block_count" && value is IConvertible bc)
-                    blockCount = Convert.ToInt64(bc);
-                else if (key == $"{architecture}.context_length" && value is IConvertible cl)
-                    contextLength = Convert.ToInt64(cl);
-                else if (key == $"{architecture}.embedding_length" && value is IConvertible el)
-                    embeddingLength = Convert.ToInt64(el);
-                else if (key == $"{architecture}.attention.head_count" && value is IConvertible hc)
-                    headCount = Convert.ToInt64(hc);
-                else if (key == $"{architecture}.attention.head_count_kv" && value is IConvertible hckv)
-                    headCountKv = Convert.ToInt64(hckv);
-                else if (key == $"{architecture}.vocab_size" && value is IConvertible vs)
-                    vocabSize = Convert.ToInt64(vs);
+                rawKvs[key] = value;
             }
         }
+
+        string? architecture = rawKvs.TryGetValue("general.architecture", out var archVal) && archVal is string archStr ? archStr : null;
+
+        string? quantizationType = null;
+        if (rawKvs.TryGetValue("general.quantization_version", out var qvVal) && qvVal is IConvertible qv)
+            quantizationType = $"v{Convert.ToUInt32(qv)}";
+        else if (rawKvs.TryGetValue("general.file_type", out var ftVal) && ftVal is IConvertible ft)
+            quantizationType = GetFileTypeString(Convert.ToUInt32(ft));
+
+        long? blockCount = GetLongValue(rawKvs, architecture, "block_count");
+        long? contextLength = GetLongValue(rawKvs, architecture, "context_length");
+        long? embeddingLength = GetLongValue(rawKvs, architecture, "embedding_length");
+        long? headCount = GetLongValue(rawKvs, architecture, "attention.head_count");
+        long? headCountKv = GetLongValue(rawKvs, architecture, "attention.head_count_kv");
+        long? vocabSize = GetLongValue(rawKvs, architecture, "vocab_size");
 
         return new GgufMetadata(
             Architecture: architecture,
@@ -130,6 +118,24 @@ public static class GgufMetadataReader
             VocabSize: vocabSize,
             QuantizationType: quantizationType
         );
+    }
+
+    private static long? GetLongValue(Dictionary<string, object> rawKvs, string? architecture, string suffix)
+    {
+        if (!string.IsNullOrEmpty(architecture) && rawKvs.TryGetValue($"{architecture}.{suffix}", out var val) && val is IConvertible c)
+        {
+            return Convert.ToInt64(c);
+        }
+
+        foreach (var kvp in rawKvs)
+        {
+            if (kvp.Key.EndsWith($".{suffix}", StringComparison.OrdinalIgnoreCase) && kvp.Value is IConvertible cFallback)
+            {
+                return Convert.ToInt64(cFallback);
+            }
+        }
+
+        return null;
     }
 
     private static string ReadGgufString(BinaryReader reader)

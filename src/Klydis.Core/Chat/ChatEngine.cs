@@ -219,18 +219,13 @@ public class ChatEngine(
     {
         var templateType = promptEngine.DetectTemplate(inferenceEngine.Architecture);
         var nativeStopTokens = promptEngine.GetStopTokens(templateType);
-        var stopTokensList = new List<string>(nativeStopTokens)
-        {
-            "</tool_call>",
-            "</|tool_call|>",
-            "<|/tool_call|>"
-        };
+        var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
         var tools = await toolExecutor.GetToolDefinitionsAsync();
         var toolsSchema = toolExecutor.FormatToolsForPrompt(tools);
 
         int iterationCount = 0;
-        const int MAX_ITERATIONS = 50;
+        const int MAX_ITERATIONS = 100;
 
         while (iterationCount < MAX_ITERATIONS)
         {
@@ -249,9 +244,9 @@ public class ChatEngine(
         var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType);
         int sysPromptTokens = inferenceEngine.GetTokenCount(sysOnlyPrompt);
 
-        // Sliding context window calculation
+        // Dynamic sliding context window calculation reserving response headroom
         int maxBudget = (int)inferenceEngine.ContextSize;
-        int reservedForResponse = 2048; // Budget reserved for LLM response generation
+        int reservedForResponse = maxBudget <= 4096 ? 2048 : Math.Min(Math.Max(maxBudget / 2, 4096), 8192);
         int targetBudget = Math.Max(maxBudget - reservedForResponse, 1024);
 
         var activeMessages = new List<ChatMessage>();
@@ -462,7 +457,6 @@ public class ChatEngine(
             
             if (toolCallRequests.Count > 0)
             {
-                bool anySuccess = false;
                 foreach (var req in toolCallRequests)
                 {
                     var argsHash = JsonSerializer.Serialize(req.Arguments);
@@ -481,26 +475,12 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
                     
                     var result = await toolExecutor.ExecuteToolAsync(req, CurrentSessionId.ToString(), ct);
-                    if (result.Success)
-                    {
-                        anySuccess = true;
-                    }
                     
                     var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
                     _history.Add(new ChatMessage(ChatRole.Tool, toolOutput, req.Name));
                     await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, toolOutput, 0, null);
                     
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolResult, toolOutput, new Dictionary<string, object> { ["Success"] = result.Success });
-                }
-
-                // If this was the first attempt and ALL tool calls failed, abort and report to the user
-                if (iterationCount == 1 && !anySuccess)
-                {
-                    var failMsg = "All tool calls failed on the first attempt.";
-                    _history.Add(new ChatMessage(ChatRole.Assistant, failMsg));
-                    await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Assistant, failMsg, 0, null);
-                    yield return new ChatStreamEvent(ChatStreamEventType.Token, failMsg);
-                    break;
                 }
             }
             else
