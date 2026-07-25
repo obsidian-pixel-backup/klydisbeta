@@ -8,6 +8,7 @@ public enum ActivePanel
 {
     Chat,
     Models,
+    Skills,
     Monitor,
     Settings
 }
@@ -35,6 +36,7 @@ public partial class MainViewModel : ObservableObject
 
     public ChatViewModel ChatViewModel { get; }
     public ModelLibraryViewModel ModelLibraryViewModel { get; }
+    public SkillLibraryViewModel SkillLibraryViewModel { get; }
     public SystemMonitorViewModel SystemMonitorViewModel { get; }
     public SettingsViewModel SettingsViewModel { get; }
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
@@ -42,12 +44,14 @@ public partial class MainViewModel : ObservableObject
     public MainViewModel(
         ChatViewModel chatViewModel,
         ModelLibraryViewModel modelLibraryViewModel,
+        SkillLibraryViewModel skillLibraryViewModel,
         SystemMonitorViewModel systemMonitorViewModel,
         SettingsViewModel settingsViewModel,
         Klydis.Core.Inference.InferenceEngine inferenceEngine)
     {
         ChatViewModel = chatViewModel;
         ModelLibraryViewModel = modelLibraryViewModel;
+        SkillLibraryViewModel = skillLibraryViewModel;
         SystemMonitorViewModel = systemMonitorViewModel;
         SettingsViewModel = settingsViewModel;
         _inferenceEngine = inferenceEngine;
@@ -78,6 +82,7 @@ public partial class MainViewModel : ObservableObject
             {
                 ActivePanel.Chat => ChatViewModel,
                 ActivePanel.Models => ModelLibraryViewModel,
+                ActivePanel.Skills => SkillLibraryViewModel,
                 ActivePanel.Monitor => SystemMonitorViewModel,
                 ActivePanel.Settings => SettingsViewModel,
                 _ => ChatViewModel

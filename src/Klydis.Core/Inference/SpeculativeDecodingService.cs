@@ -132,7 +132,8 @@ public class SpeculativeDecodingService
                 .Where(m => !m.FilePath.Equals(targetModelPath, StringComparison.OrdinalIgnoreCase))
                 .Where(m => m.FileSizeBytes < targetModel.FileSizeBytes)
                 .Where(m => m.FileSizeBytes <= MaxDraftModelSizeBytes)
-                .OrderBy(m => m.FileSizeBytes)
+                .OrderByDescending(m => Is4BitQuant(m.QuantizationType, m.FilePath))
+                .ThenBy(m => m.FileSizeBytes)
                 .ToList();
 
             if (validDraftCandidates.Count > 0)
@@ -168,13 +169,13 @@ public class SpeculativeDecodingService
 
             if (targetStandalonePlan.GpuLayers == -1 && combinedVramMb > availableVramMb)
             {
-                _logger?.LogInformation("Disabling speculative decoding to preserve 100% GPU offload for {TargetModel} at full native context.", targetModel.DisplayName);
+                _logger?.LogInformation("Switching to zero-VRAM N-gram fallback speculative decoding to preserve 100% GPU offload for {TargetModel}.", targetModel.DisplayName);
                 return new SpeculativeResolutionResult(
-                    IsEnabled: false,
+                    IsEnabled: true,
                     DraftModelPath: null,
-                    DraftModelDisplayName: null,
+                    DraftModelDisplayName: "Zero-VRAM N-Gram Lookup",
                     IsDualStream: false,
-                    StatusMessage: $"Disabled: Preserving 100% GPU offload for {targetModel.DisplayName} at full native context.",
+                    StatusMessage: $"Enabled (Zero-VRAM N-Gram Fallback). Preserving 100% GPU offload for {targetModel.DisplayName}.",
                     DraftOffloadPlan: null);
             }
 
@@ -207,54 +208,33 @@ public class SpeculativeDecodingService
                 DraftOffloadPlan: draftPlan);
         }
 
-        // Case B: Single model available -> Check if dual-streaming fits VRAM
-        long singleModelVramMb = targetModel.EstimatedVramMb ?? (targetModel.FileSizeBytes / (1024 * 1024));
-        long dualStreamVramMb = singleModelVramMb * 2;
+        // Case B: No valid lightweight GGUF draft model available. Enable Zero-VRAM N-Gram Prompt Lookup fallback.
+        string fallbackStatus = $"Enabled (Zero-VRAM N-Gram Fallback). Accelerating {targetModel.DisplayName} via prompt sequence lookup.";
 
-        int availableGpuVramMb = gpuInfo?.TotalVramMb ?? 0;
-
-        if (gpuInfo != null && dualStreamVramMb <= availableGpuVramMb)
-        {
-            var targetMetadata = GgufMetadataReader.Parse(targetModel.FilePath);
-            int totalLayers = targetMetadata?.BlockCount.HasValue == true && targetMetadata.BlockCount.Value > 0 
-                ? (int)targetMetadata.BlockCount.Value : 32;
-            long layerSizeBytes = targetModel.FileSizeBytes / totalLayers;
-
-            var dualPlan = _offloadStrategy.CalculatePlan(
-                totalLayers,
-                layerSizeBytes,
-                kvCachePerLayerBytes: 2048,
-                contextLength: 4096,
-                gpuInfo,
-                systemInfo,
-                OffloadStrategyType.BalancedSplit);
-
-            string status = $"Enabled (Dual-Stream). Running 2 instances of {targetModel.DisplayName} for decoding acceleration.";
-
-            _logger?.LogInformation("Single model present; enabling dual-streaming for {ModelName}", targetModel.DisplayName);
-
-            return new SpeculativeResolutionResult(
-                IsEnabled: true,
-                DraftModelPath: targetModel.FilePath,
-                DraftModelDisplayName: targetModel.DisplayName,
-                IsDualStream: true,
-                StatusMessage: status,
-                DraftOffloadPlan: dualPlan);
-        }
-
-        // Dual-stream or candidate models exceed VRAM/size limits
-        string warningStatus = allModels.Count > 1
-            ? $"Unavailable. Secondary installed models are too large (e.g. 9B) to serve as a draft model without stealing GPU VRAM from {targetModel.DisplayName}. Download a lightweight draft model (≤ 2 GB, e.g. Qwen2.5-0.5B)."
-            : $"Unavailable. Only 1 model installed ({targetModel.DisplayName}) and dual-streaming exceeds available VRAM ({availableGpuVramMb} MB). Download a lightweight draft model (≤ 2 GB, e.g. Qwen2.5-0.5B).";
-
-        _logger?.LogWarning("Speculative decoding unavailable for target model {ModelName}: no lightweight draft model (<= 2 GB) available.", targetModel.DisplayName);
+        _logger?.LogInformation("Speculative decoding using Zero-VRAM N-Gram lookup fallback for target model {ModelName}.", targetModel.DisplayName);
 
         return new SpeculativeResolutionResult(
-            IsEnabled: false,
+            IsEnabled: true,
             DraftModelPath: null,
-            DraftModelDisplayName: null,
+            DraftModelDisplayName: "Zero-VRAM N-Gram Lookup",
             IsDualStream: false,
-            StatusMessage: warningStatus,
+            StatusMessage: fallbackStatus,
             DraftOffloadPlan: null);
+    }
+
+    private static bool Is4BitQuant(string? quant, string? filePath = null)
+    {
+        string text = quant ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(text) || text.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+        {
+            text = !string.IsNullOrEmpty(filePath) ? Path.GetFileName(filePath) : string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(text)) return false;
+
+        return text.Contains("Q4", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("4_K", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("4_0", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("IQ4", StringComparison.OrdinalIgnoreCase);
     }
 }

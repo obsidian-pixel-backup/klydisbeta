@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -62,14 +63,37 @@ public class ToolApprovalEventArgs : EventArgs
 /// <summary>
 /// Executes tools called by the model.
 /// </summary>
-public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.MessageStore messageStore, Klydis.Core.Memory.ContextOrchestrator contextOrchestrator)
+public class ToolExecutor(
+    ILogger<ToolExecutor> logger, 
+    Klydis.Core.Memory.MessageStore messageStore, 
+    Klydis.Core.Memory.ContextOrchestrator contextOrchestrator,
+    ModelMessageQueue? messageQueue = null,
+    Klydis.Core.Skills.SkillLibraryManager? skillLibraryManager = null)
 {
     private static readonly HttpClient _httpClient = new HttpClient();
     
+    public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
+    public Klydis.Core.Skills.SkillLibraryManager? SkillLibraryManager { get; set; } = skillLibraryManager;
+
     /// <summary>
     /// Gets or sets the current risk level mode.
     /// </summary>
     public RiskLevel CurrentRiskLevel { get; set; } = RiskLevel.Standard;
+
+    /// <summary>
+    /// Gets or sets whether automatic tool output offloading to disk is enabled for large results.
+    /// </summary>
+    public bool EnableOutputOffloading { get; set; } = true;
+
+    /// <summary>
+    /// Maximum character threshold (~3000 tokens) before tool output is offloaded to disk.
+    /// </summary>
+    public int MaxToolOutputChars { get; set; } = 12000;
+
+    /// <summary>
+    /// Number of preview characters retained in prompt when tool output is offloaded.
+    /// </summary>
+    public int OffloadPreviewChars { get; set; } = 1500;
 
     private readonly IList<ToolDefinition> _tools = new List<ToolDefinition>
     {
@@ -114,6 +138,11 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
             new("query", "string", "Search query", true)
         }, false),
         new ToolDefinition("summarize_context", "Compresses older messages into the world state to free up context window", new List<ToolParameter>(), false),
+        new ToolDefinition("check_message_queue", "Checks pending user messages waiting in the processing queue for the active session.", new List<ToolParameter>(), false),
+        new ToolDefinition("incorporate_queued_message", "Retrieves and incorporates a pending queued message by queue_id to steer the current reasoning or execution task.", new List<ToolParameter>
+        {
+            new("queue_id", "string", "The ID (Guid string) of the queued message to incorporate", true)
+        }, false),
         new ToolDefinition("create_custom_tool", "Creates a new custom tool. The schema defines parameters, and the script uses them.", new List<ToolParameter>
         {
             new("name", "string", "Tool name (no spaces)", true),
@@ -125,8 +154,41 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
         new ToolDefinition("delete_custom_tool", "Deletes a custom tool.", new List<ToolParameter>
         {
             new("name", "string", "Tool name to delete", true)
+        }, false),
+        new ToolDefinition("list_skills", "Lists skills in the Brain Skill Library, optionally filtered by category.", new List<ToolParameter>
+        {
+            new("category", "string", "Optional category filter", false)
+        }, false),
+        new ToolDefinition("search_skills", "Searches the Brain Skill Library for skills matching a keyword query.", new List<ToolParameter>
+        {
+            new("query", "string", "Search query or keyword", true)
+        }, false),
+        new ToolDefinition("get_skill_details", "Retrieves full details and prompt directives of a specific skill by skill_id.", new List<ToolParameter>
+        {
+            new("skill_id", "string", "The ID of the skill (e.g. 'mcp-builder')", true)
+        }, false),
+        new ToolDefinition("activate_skill", "Activates and retrieves the full prompt directives of a skill for immediate task execution.", new List<ToolParameter>
+        {
+            new("skill_id", "string", "The ID of the skill to activate", true)
+        }, false),
+        new ToolDefinition("learn_skill", "Creates and persists a new custom skill into the Brain Skill Library for future use.", new List<ToolParameter>
+        {
+            new("name", "string", "Skill name (e.g. 'WPF MVVM Expert')", true),
+            new("description", "string", "Brief description of what the skill provides", true),
+            new("category", "string", "Skill category (e.g. 'Development', 'AI & ML Infrastructure', 'Creative')", true),
+            new("prompt_instruction", "string", "Detailed prompt directives and instructions for the skill", true),
+            new("tags", "string", "Comma-separated tags (e.g. 'wpf, csharp, mvvm')", false)
+        }, false),
+        new ToolDefinition("delete_skill", "Deletes a custom skill from the Brain Skill Library by ID.", new List<ToolParameter>
+        {
+            new("skill_id", "string", "The ID of the custom skill to delete", true)
         }, false)
     };
+
+    /// <summary>
+    /// Optional asynchronous handler for tool approval. If set, this delegate will be awaited instead of synchronously invoking ToolApprovalRequested.
+    /// </summary>
+    public Func<ToolCallRequest, Task<bool>>? ToolApprovalHandlerAsync { get; set; }
 
     /// <summary>
     /// Event triggered when a tool requires user approval.
@@ -144,25 +206,28 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
     public async Task<IList<ToolDefinition>> GetToolDefinitionsAsync()
     {
         var allTools = new List<ToolDefinition>(_tools);
-        var customTools = await messageStore.GetCustomToolsAsync();
-        
-        foreach (var ct in customTools)
+        if (messageStore != null)
         {
-            var parameters = new List<ToolParameter>();
-            try
+            var customTools = await messageStore.GetCustomToolsAsync();
+            
+            foreach (var ct in customTools)
             {
-                if (!string.IsNullOrWhiteSpace(ct.ParametersJson))
+                var parameters = new List<ToolParameter>();
+                try
                 {
-                    parameters = JsonSerializer.Deserialize<List<ToolParameter>>(ct.ParametersJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<ToolParameter>();
+                    if (!string.IsNullOrWhiteSpace(ct.ParametersJson))
+                    {
+                        parameters = JsonSerializer.Deserialize<List<ToolParameter>>(ct.ParametersJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<ToolParameter>();
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to parse parameters for custom tool {ToolName}", ct.Name);
-            }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse parameters for custom tool {ToolName}", ct.Name);
+                }
 
-            // Custom tools are now allowed by default, subject to risky request detection
-            allTools.Add(new ToolDefinition(ct.Name, ct.Description, parameters, RequiresApproval: false));
+                // Custom tools are now allowed by default, subject to risky request detection
+                allTools.Add(new ToolDefinition(ct.Name, ct.Description, parameters, RequiresApproval: false));
+            }
         }
 
         return allTools;
@@ -227,9 +292,19 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
         if (requiresApproval)
         {
-            var args = new ToolApprovalEventArgs(request);
-            ToolApprovalRequested?.Invoke(this, args);
-            if (!args.IsApproved)
+            bool isApproved = false;
+            if (ToolApprovalHandlerAsync != null)
+            {
+                isApproved = await ToolApprovalHandlerAsync(request);
+            }
+            else
+            {
+                var args = new ToolApprovalEventArgs(request);
+                ToolApprovalRequested?.Invoke(this, args);
+                isApproved = args.IsApproved;
+            }
+
+            if (!isApproved)
             {
                 var denyReason = isRisky && CurrentRiskLevel == RiskLevel.Standard 
                     ? "Tool execution denied automatically due to potentially risky content." 
@@ -254,8 +329,16 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
                 "store_memory" => await StoreMemoryAsync(request, sessionId, ct),
                 "retrieve_memory" => await RetrieveMemoryAsync(request, sessionId, ct),
                 "summarize_context" => await SummarizeContextAsync(request, sessionId, ct),
+                "check_message_queue" => await CheckMessageQueueAsync(sessionId),
+                "incorporate_queued_message" => await IncorporateQueuedMessageAsync(request, sessionId),
                 "create_custom_tool" => await CreateCustomToolAsync(request, ct),
                 "delete_custom_tool" => await DeleteCustomToolAsync(request, ct),
+                "list_skills" => await ListSkillsAsync(request),
+                "search_skills" => await SearchSkillsAsync(request),
+                "get_skill_details" => await GetSkillDetailsAsync(request),
+                "activate_skill" => await ActivateSkillAsync(request),
+                "learn_skill" => await LearnSkillAsync(request),
+                "delete_skill" => await DeleteSkillAsync(request),
                 _ => await ExecuteCustomToolAsync(request, ct)
             };
         }
@@ -265,8 +348,76 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
             result = new ToolResult(request.Name, false, string.Empty, ex.Message);
         }
 
+        result = ProcessToolOutputOffload(result);
         ToolExecuted?.Invoke(this, result);
         return result;
+    }
+
+    private ToolResult ProcessToolOutputOffload(ToolResult result)
+    {
+        if (!EnableOutputOffloading || !result.Success || string.IsNullOrEmpty(result.Output))
+            return result;
+
+        if (result.Output.Length <= MaxToolOutputChars)
+            return result;
+
+        try
+        {
+            var offloadDir = Path.Combine(Directory.GetCurrentDirectory(), ".klydis", "artifacts", "tool_outputs");
+            Directory.CreateDirectory(offloadDir);
+
+            var fileName = $"offload_{result.ToolName}_{Guid.NewGuid():N}.txt";
+            var filePath = Path.Combine(offloadDir, fileName);
+
+            File.WriteAllText(filePath, result.Output);
+
+            var preview = result.Output.Length > OffloadPreviewChars 
+                ? result.Output[..OffloadPreviewChars] 
+                : result.Output;
+
+            var offloadedMessage = $"[Tool Output Exceeded Context Budget]\n" +
+                                   $"Full output ({result.Output.Length} characters) offloaded to: {filePath}\n\n" +
+                                   $"Preview (First {preview.Length} characters):\n" +
+                                   $"--------------------------------------------------\n" +
+                                   $"{preview}\n" +
+                                   $"--------------------------------------------------\n" +
+                                   $"[To view full or detailed content, use tool read_file with path: {filePath}]";
+
+            logger.LogInformation("Tool output for {ToolName} ({CharCount} chars) offloaded to {FilePath}", result.ToolName, result.Output.Length, filePath);
+
+            return new ToolResult(result.ToolName, result.Success, offloadedMessage, result.Error);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to offload tool output to disk for {ToolName}", result.ToolName);
+            return result;
+        }
+    }
+
+    public static object? UnwrapJsonElement(object? value)
+    {
+        if (value is JsonElement element)
+        {
+            return element.ValueKind switch
+            {
+                JsonValueKind.String => element.GetString(),
+                JsonValueKind.Number => element.TryGetInt64(out long l) ? l : element.GetDouble(),
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Null => null,
+                JsonValueKind.Undefined => null,
+                _ => element.GetRawText()
+            };
+        }
+        return value;
+    }
+
+    public static string? GetStringArg(IDictionary<string, object>? args, string key)
+    {
+        if (args == null || !args.TryGetValue(key, out var val) || val == null)
+            return null;
+        var unwrapped = UnwrapJsonElement(val);
+        return unwrapped?.ToString();
     }
 
     private bool IsRiskyRequest(ToolCallRequest request)
@@ -276,7 +427,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
         {
             foreach (var arg in request.Arguments)
             {
-                contentToCheck += arg.Value?.ToString() + " ";
+                contentToCheck += UnwrapJsonElement(arg.Value)?.ToString() + " ";
             }
         }
 
@@ -298,20 +449,18 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> ReadFileAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var path = request.Arguments.TryGetValue("path", out var p) ? p?.ToString() : null;
+        var path = GetStringArg(request.Arguments, "path");
         if (string.IsNullOrEmpty(path)) return new ToolResult(request.Name, false, "", "Path is required");
         if (!File.Exists(path)) return new ToolResult(request.Name, false, "", "File not found");
 
         var content = await File.ReadAllTextAsync(path, ct);
-        if (content.Length > 10000) content = content[..10000] + "... [TRUNCATED]";
-        
         return new ToolResult(request.Name, true, content, null);
     }
 
     private async Task<ToolResult> WriteFileAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var path = request.Arguments.TryGetValue("path", out var p) ? p?.ToString() : null;
-        var content = request.Arguments.TryGetValue("content", out var c) ? c?.ToString() : null;
+        var path = GetStringArg(request.Arguments, "path");
+        var content = GetStringArg(request.Arguments, "content");
         if (string.IsNullOrEmpty(path)) return new ToolResult(request.Name, false, "", "Path is required");
         if (content == null) return new ToolResult(request.Name, false, "", "Content is required");
 
@@ -324,7 +473,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private Task<ToolResult> ListDirectoryAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var path = request.Arguments.TryGetValue("path", out var p) ? p?.ToString() : null;
+        var path = GetStringArg(request.Arguments, "path");
         if (string.IsNullOrEmpty(path)) return Task.FromResult(new ToolResult(request.Name, false, "", "Path is required"));
         if (!Directory.Exists(path)) return Task.FromResult(new ToolResult(request.Name, false, "", "Directory not found"));
 
@@ -340,8 +489,12 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> RunCommandAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var command = request.Arguments.TryGetValue("command", out var c) ? c?.ToString() : null;
+        var command = GetStringArg(request.Arguments, "command");
         if (string.IsNullOrEmpty(command)) return new ToolResult(request.Name, false, "", "Command is required");
+
+        // Handle standard command chaining operators (&& -> ;) for PowerShell compatibility
+        var sanitizedCmd = Regex.Replace(command, @"(?<=\s|^)&&(?=\s|$)", ";");
+        var encodedCmd = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitizedCmd));
 
         // Use Task.Run to wrap synchronous process execution
         return await Task.Run(() =>
@@ -351,9 +504,12 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
                 var psi = new ProcessStartInfo
                 {
                     FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -NonInteractive -Command \"{command}\"",
+                    Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encodedCmd}",
+                    WorkingDirectory = Directory.GetCurrentDirectory(),
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
@@ -364,7 +520,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
                 // Timeout of 60 seconds
                 if (!process.WaitForExit(60000))
                 {
-                    process.Kill();
+                    try { process.Kill(); } catch { }
                     return new ToolResult(request.Name, false, "", "Command timed out after 60 seconds");
                 }
 
@@ -372,9 +528,18 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
                 var stderr = process.StandardError.ReadToEnd();
                 
                 var output = stdout;
-                if (!string.IsNullOrEmpty(stderr)) output += $"\nSTDERR:\n{stderr}";
+                if (!string.IsNullOrEmpty(stderr))
+                {
+                    if (string.IsNullOrEmpty(output)) output = stderr;
+                    else output += $"\nSTDERR:\n{stderr}";
+                }
 
-                return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? "Command returned non-zero exit code" : null);
+                if (string.IsNullOrWhiteSpace(output) && process.ExitCode == 0)
+                {
+                    output = "Command executed successfully with no output.";
+                }
+
+                return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null);
             }
             catch (Exception ex)
             {
@@ -464,7 +629,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> SearchWebAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var query = request.Arguments.TryGetValue("query", out var q) ? q?.ToString() : null;
+        var query = GetStringArg(request.Arguments, "query");
         if (string.IsNullOrEmpty(query)) return new ToolResult(request.Name, false, "", "Query is required");
 
         try
@@ -555,7 +720,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> CrawlUrlAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var url = request.Arguments.TryGetValue("url", out var u) ? u?.ToString() : null;
+        var url = GetStringArg(request.Arguments, "url");
         if (string.IsNullOrEmpty(url)) return new ToolResult(request.Name, false, "", "URL is required");
 
         try
@@ -588,7 +753,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
         }
         catch (Microsoft.Playwright.PlaywrightException ex) when (ex.Message.Contains("Executable doesn't exist"))
         {
-            return new ToolResult(request.Name, false, "", "Browser binaries not found. You must run the playwright installation script first: `playwright.ps1 install`");
+            return new ToolResult(request.Name, false, "", "Browser binaries not found. You must run the playwright installation script first: `playwright.ps1 install` ");
         }
         catch (Exception ex)
         {
@@ -598,9 +763,9 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> SearchFilesAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var path = request.Arguments.TryGetValue("path", out var p) ? p?.ToString() : null;
-        var pattern = request.Arguments.TryGetValue("pattern", out var pt) ? pt?.ToString() ?? "*.*" : "*.*";
-        var contains = request.Arguments.TryGetValue("contains", out var c) ? c?.ToString() : null;
+        var path = GetStringArg(request.Arguments, "path");
+        var pattern = GetStringArg(request.Arguments, "pattern") ?? "*.*";
+        var contains = GetStringArg(request.Arguments, "contains");
 
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return new ToolResult(request.Name, false, "", "Valid path is required");
 
@@ -641,7 +806,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> StoreMemoryAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
-        var fact = request.Arguments.TryGetValue("fact", out var f) ? f?.ToString() : null;
+        var fact = GetStringArg(request.Arguments, "fact");
         if (string.IsNullOrEmpty(fact)) return new ToolResult(request.Name, false, "", "Fact is required");
 
         var session = await messageStore.GetSessionAsync(sessionId);
@@ -655,7 +820,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> RetrieveMemoryAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
-        var query = request.Arguments.TryGetValue("query", out var q) ? q?.ToString() : null;
+        var query = GetStringArg(request.Arguments, "query");
         if (string.IsNullOrEmpty(query)) return new ToolResult(request.Name, false, "", "Query is required");
 
         var results = await messageStore.SearchMessagesAsync(sessionId, query, 5);
@@ -678,13 +843,73 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
         }
     }
 
+    private Task<ToolResult> CheckMessageQueueAsync(string sessionId)
+    {
+        if (MessageQueue == null)
+        {
+            return Task.FromResult(new ToolResult("check_message_queue", true, "Message queue service is not available.", null));
+        }
+
+        var pending = MessageQueue.GetPending(sessionId);
+        if (pending.Count == 0)
+        {
+            return Task.FromResult(new ToolResult("check_message_queue", true, "No pending messages in the queue.", null));
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Pending Queued Messages ({pending.Count}):");
+        foreach (var msg in pending)
+        {
+            sb.AppendLine($"- Queue ID: {msg.Id} | Mode: {msg.Mode} | Status: {msg.Status} | Created: {msg.CreatedAt:HH:mm:ss}");
+            sb.AppendLine($"  Content: \"{msg.Content}\"");
+        }
+
+        return Task.FromResult(new ToolResult("check_message_queue", true, sb.ToString().TrimEnd(), null));
+    }
+
+    private Task<ToolResult> IncorporateQueuedMessageAsync(ToolCallRequest request, string sessionId)
+    {
+        if (MessageQueue == null)
+        {
+            return Task.FromResult(new ToolResult("incorporate_queued_message", false, "", "Message queue service is not available."));
+        }
+
+        var queueIdStr = GetStringArg(request.Arguments, "queue_id");
+        QueuedMessage? msg = null;
+
+        if (!string.IsNullOrEmpty(queueIdStr) && Guid.TryParse(queueIdStr, out var queueId))
+        {
+            msg = MessageQueue.GetById(queueId);
+        }
+
+        if (msg == null)
+        {
+            var pendingSteer = MessageQueue.GetPendingSteer(sessionId);
+            msg = pendingSteer.FirstOrDefault() ?? MessageQueue.GetPending(sessionId).FirstOrDefault();
+        }
+
+        if (msg == null)
+        {
+            return Task.FromResult(new ToolResult("incorporate_queued_message", false, "", "No pending queued message found to incorporate."));
+        }
+
+        if (msg.Status != QueuedMessageStatus.Queued)
+        {
+            return Task.FromResult(new ToolResult("incorporate_queued_message", false, "", $"Queued message '{msg.Id}' cannot be incorporated because its status is {msg.Status}."));
+        }
+
+        MessageQueue.MarkStatus(msg.Id, QueuedMessageStatus.Incorporated);
+        string resultText = $"Successfully incorporated queued steering message [ID: {msg.Id} | Mode: {msg.Mode}]: \"{msg.Content}\"";
+        return Task.FromResult(new ToolResult("incorporate_queued_message", true, resultText, null));
+    }
+
     private async Task<ToolResult> CreateCustomToolAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var name = request.Arguments.TryGetValue("name", out var n) ? n?.ToString() : null;
-        var desc = request.Arguments.TryGetValue("description", out var d) ? d?.ToString() : null;
-        var lang = request.Arguments.TryGetValue("language", out var l) ? l?.ToString()?.ToLowerInvariant() : "powershell";
-        var schema = request.Arguments.TryGetValue("parameters_schema", out var s) ? s?.ToString() : null;
-        var script = request.Arguments.TryGetValue("script_content", out var sc) ? sc?.ToString() : null;
+        var name = GetStringArg(request.Arguments, "name");
+        var desc = GetStringArg(request.Arguments, "description");
+        var lang = GetStringArg(request.Arguments, "language")?.ToLowerInvariant() ?? "powershell";
+        var schema = GetStringArg(request.Arguments, "parameters_schema");
+        var script = GetStringArg(request.Arguments, "script_content");
 
         if (string.IsNullOrEmpty(name)) return new ToolResult(request.Name, false, "", "Name is required");
         if (string.IsNullOrEmpty(desc)) return new ToolResult(request.Name, false, "", "Description is required");
@@ -709,7 +934,7 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
 
     private async Task<ToolResult> DeleteCustomToolAsync(ToolCallRequest request, CancellationToken ct)
     {
-        var name = request.Arguments.TryGetValue("name", out var n) ? n?.ToString() : null;
+        var name = GetStringArg(request.Arguments, "name");
         if (string.IsNullOrEmpty(name)) return new ToolResult(request.Name, false, "", "Name is required");
 
         await messageStore.DeleteCustomToolAsync(name);
@@ -814,5 +1039,143 @@ public class ToolExecutor(ILogger<ToolExecutor> logger, Klydis.Core.Memory.Messa
                 return new ToolResult(request.Name, false, "", ex.Message);
             }
         }, ct);
+    }
+
+    private Task<ToolResult> ListSkillsAsync(ToolCallRequest request)
+    {
+        if (SkillLibraryManager == null)
+            return Task.FromResult(new ToolResult(request.Name, false, string.Empty, "SkillLibraryManager is not configured."));
+
+        string? category = GetStringArg(request.Arguments, "category");
+        var skills = SkillLibraryManager.GetAllSkills();
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            skills = skills.Where(s => s.Category.Equals(category, StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Skill Library Brain ({skills.Count} skills found):");
+        foreach (var s in skills)
+        {
+            sb.AppendLine($"- [{s.Category}] {s.Name} (ID: `{s.Id}`) - {s.Description} [Enabled: {s.IsEnabled}, Source: {s.Source}]");
+        }
+        return Task.FromResult(new ToolResult(request.Name, true, sb.ToString().Trim(), null));
+    }
+
+    private Task<ToolResult> SearchSkillsAsync(ToolCallRequest request)
+    {
+        if (SkillLibraryManager == null)
+            return Task.FromResult(new ToolResult(request.Name, false, string.Empty, "SkillLibraryManager is not configured."));
+
+        string query = GetStringArg(request.Arguments, "query") ?? string.Empty;
+        var matches = SkillLibraryManager.SearchSkills(query, topN: 8);
+
+        if (matches.Count == 0)
+        {
+            return Task.FromResult(new ToolResult(request.Name, true, $"No skills matched query '{query}'.", null));
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Found {matches.Count} skills matching '{query}':");
+        foreach (var s in matches)
+        {
+            sb.AppendLine($"• **{s.Name}** (`{s.Id}`) [{s.Category}] - {s.Description}");
+        }
+        return Task.FromResult(new ToolResult(request.Name, true, sb.ToString().Trim(), null));
+    }
+
+    private Task<ToolResult> GetSkillDetailsAsync(ToolCallRequest request)
+    {
+        if (SkillLibraryManager == null)
+            return Task.FromResult(new ToolResult(request.Name, false, string.Empty, "SkillLibraryManager is not configured."));
+
+        string id = GetStringArg(request.Arguments, "skill_id") ?? string.Empty;
+        var skill = SkillLibraryManager.GetSkillById(id);
+
+        if (skill == null)
+        {
+            return Task.FromResult(new ToolResult(request.Name, false, string.Empty, $"Skill with ID '{id}' not found."));
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"--- SKILL: {skill.Name} (ID: `{skill.Id}`) ---");
+        sb.AppendLine($"Category: {skill.Category}");
+        sb.AppendLine($"Source: {skill.Source}");
+        sb.AppendLine($"Description: {skill.Description}");
+        sb.AppendLine($"Tags: {string.Join(", ", skill.Tags)}");
+        sb.AppendLine("\nDirectives / Instruction:");
+        sb.AppendLine(skill.PromptInstruction);
+
+        return Task.FromResult(new ToolResult(request.Name, true, sb.ToString().Trim(), null));
+    }
+
+    private Task<ToolResult> ActivateSkillAsync(ToolCallRequest request)
+    {
+        if (SkillLibraryManager == null)
+            return Task.FromResult(new ToolResult(request.Name, false, string.Empty, "SkillLibraryManager is not configured."));
+
+        string id = GetStringArg(request.Arguments, "skill_id") ?? string.Empty;
+        var skill = SkillLibraryManager.GetSkillById(id);
+
+        if (skill == null)
+        {
+            return Task.FromResult(new ToolResult(request.Name, false, string.Empty, $"Skill with ID '{id}' not found."));
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"[SKILL ACTIVATED: {skill.Name}]");
+        sb.AppendLine("Specialized Domain Directives:");
+        sb.AppendLine(skill.PromptInstruction.Trim());
+
+        return Task.FromResult(new ToolResult(request.Name, true, sb.ToString(), null));
+    }
+
+    private async Task<ToolResult> LearnSkillAsync(ToolCallRequest request)
+    {
+        if (SkillLibraryManager == null)
+            return new ToolResult(request.Name, false, string.Empty, "SkillLibraryManager is not configured.");
+
+        string name = GetStringArg(request.Arguments, "name") ?? string.Empty;
+        string description = GetStringArg(request.Arguments, "description") ?? string.Empty;
+        string category = GetStringArg(request.Arguments, "category") ?? "Custom";
+        string promptInstruction = GetStringArg(request.Arguments, "prompt_instruction") ?? string.Empty;
+        string tagsStr = GetStringArg(request.Arguments, "tags") ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(promptInstruction))
+        {
+            return new ToolResult(request.Name, false, string.Empty, "Both 'name' and 'prompt_instruction' are required to learn a skill.");
+        }
+
+        string id = name.Trim().ToLowerInvariant().Replace(" ", "-");
+        var tags = tagsStr.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim()).ToList();
+
+        var skill = new Klydis.Core.Skills.Skill
+        {
+            Id = id,
+            Name = name,
+            Description = description,
+            Category = category,
+            PromptInstruction = promptInstruction,
+            Tags = tags,
+            Source = "Custom",
+            IsEnabled = true,
+            Author = "Klydis AI",
+            Version = "1.0.0"
+        };
+
+        await SkillLibraryManager.SaveSkillAsync(skill);
+
+        return new ToolResult(request.Name, true, $"Successfully learned and registered skill '{skill.Name}' (ID: `{skill.Id}`) in category '{skill.Category}'. File saved to custom skills library.", null);
+    }
+
+    private async Task<ToolResult> DeleteSkillAsync(ToolCallRequest request)
+    {
+        if (SkillLibraryManager == null)
+            return new ToolResult(request.Name, false, string.Empty, "SkillLibraryManager is not configured.");
+
+        string id = GetStringArg(request.Arguments, "skill_id") ?? string.Empty;
+        await SkillLibraryManager.DeleteCustomSkillAsync(id);
+
+        return new ToolResult(request.Name, true, $"Deleted custom skill '{id}' from Skill Library.", null);
     }
 }

@@ -39,6 +39,9 @@ public partial class ChatViewModel : ObservableObject
 {
     private readonly ChatEngine? _chatEngine;
     private CancellationTokenSource? _generationCts;
+    private CancellationTokenSource? _modelLoadCts;
+    private string? _generatingSessionId;
+    private long _modelLoadSequenceId = 0;
     private bool _userExplicitlyUnloaded;
 
     [ObservableProperty]
@@ -68,10 +71,43 @@ public partial class ChatViewModel : ObservableObject
     [ObservableProperty]
     private SessionInfo? _selectedSession;
 
+    private TaskCompletionSource<bool>? _approvalTcs;
+
+    [ObservableProperty]
+    private bool _isApprovalPending;
+
+    [ObservableProperty]
+    private string _pendingApprovalTitle = "Tool Approval Requested";
+
+    [ObservableProperty]
+    private string _pendingApprovalMessage = string.Empty;
+
+    [ObservableProperty]
+    private string _pendingToolName = string.Empty;
+
+    [ObservableProperty]
+    private string _pendingToolArguments = string.Empty;
+
+    [ObservableProperty]
+    private bool _isAlertPending;
+
+    [ObservableProperty]
+    private string _alertTitle = "Notice";
+
+    [ObservableProperty]
+    private string _alertMessage = string.Empty;
+
+    [ObservableProperty]
+    private QueuedMessageMode _selectedQueueMode = QueuedMessageMode.Steer;
+
+    [ObservableProperty]
+    private bool _hasQueuedMessages;
+
     public ObservableCollection<ChatMessageViewModel> Messages { get; } = new();
     public ObservableCollection<string> AvailableModels { get; } = new();
     public ObservableCollection<SessionInfo> Sessions { get; } = new();
     public ObservableCollection<RiskLevel> AvailableRiskLevels { get; } = new();
+    public ObservableCollection<QueuedMessageViewModel> QueuedMessages { get; } = new();
 
     private readonly Klydis.Core.Models.ModelRegistry _registry;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
@@ -81,6 +117,8 @@ public partial class ChatViewModel : ObservableObject
     private readonly Klydis.Core.Hardware.OffloadStrategy _offloadStrategy;
     private readonly Klydis.Core.Memory.MessageStore _messageStore;
     private readonly ToolExecutor _toolExecutor;
+    private readonly ModelMessageQueue? _messageQueue;
+    private readonly Klydis.Core.Skills.DynamicSkillSelector? _skillSelector;
 
     public ChatViewModel(
         ChatEngine chatEngine,
@@ -90,7 +128,9 @@ public partial class ChatViewModel : ObservableObject
         Klydis.Core.Hardware.SystemProfiler systemProfiler,
         Klydis.Core.Hardware.OffloadStrategy offloadStrategy,
         Klydis.Core.Memory.MessageStore messageStore,
-        ToolExecutor toolExecutor)
+        ToolExecutor toolExecutor,
+        ModelMessageQueue? messageQueue = null,
+        Klydis.Core.Skills.DynamicSkillSelector? skillSelector = null)
     {
         _chatEngine = chatEngine;
         _registry = registry;
@@ -100,7 +140,15 @@ public partial class ChatViewModel : ObservableObject
         _offloadStrategy = offloadStrategy;
         _messageStore = messageStore;
         _toolExecutor = toolExecutor;
+        _messageQueue = messageQueue;
+        _skillSelector = skillSelector;
 
+        if (_messageQueue != null)
+        {
+            _messageQueue.QueueChanged += (s, e) => RefreshQueueUI();
+        }
+
+        _toolExecutor.ToolApprovalHandlerAsync = ShowToolApprovalDialogAsync;
         _toolExecutor.ToolApprovalRequested += ToolExecutor_ToolApprovalRequested;
 
         AvailableRiskLevels.Add(RiskLevel.Safe);
@@ -110,7 +158,37 @@ public partial class ChatViewModel : ObservableObject
         
         RefreshModels();
         _registry.RegistryChanged += OnRegistryChanged;
+        _inferenceEngine.ModelStateChanged += OnModelStateChanged;
         _ = InitializeSessionsAsync();
+    }
+
+    private void OnModelStateChanged(bool isLoaded, string? modelPath)
+    {
+        Action updateUi = () =>
+        {
+            IsModelReady = isLoaded;
+            if (isLoaded && !string.IsNullOrEmpty(modelPath))
+            {
+                var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.FilePath == modelPath);
+                if (modelInfo != null && SelectedModelId != modelInfo.DisplayName)
+                {
+                    SelectedModelId = modelInfo.DisplayName;
+                }
+            }
+            else if (!isLoaded && !_userExplicitlyUnloaded)
+            {
+                IsModelReady = false;
+            }
+        };
+
+        if (System.Windows.Application.Current != null)
+        {
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(updateUi);
+        }
+        else
+        {
+            updateUi();
+        }
     }
 
     private void OnRegistryChanged()
@@ -121,14 +199,94 @@ public partial class ChatViewModel : ObservableObject
         }
     }
 
+    [RelayCommand]
+    private void ApproveTool()
+    {
+        DismissPendingApproval(true);
+    }
+
+    [RelayCommand]
+    private void DenyTool()
+    {
+        DismissPendingApproval(false);
+    }
+
+    [RelayCommand]
+    private void CloseAlertModal()
+    {
+        IsAlertPending = false;
+    }
+
+    private void DismissPendingApproval(bool result)
+    {
+        if (IsApprovalPending)
+        {
+            IsApprovalPending = false;
+            _approvalTcs?.TrySetResult(result);
+            _approvalTcs = null;
+        }
+    }
+
+    public void ShowAlert(string title, string message)
+    {
+        Action action = () =>
+        {
+            AlertTitle = title;
+            AlertMessage = message;
+            IsAlertPending = true;
+        };
+
+        if (System.Windows.Application.Current?.Dispatcher != null)
+        {
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(action);
+        }
+        else
+        {
+            action();
+        }
+    }
+
+    private async Task<bool> ShowToolApprovalDialogAsync(ToolCallRequest request)
+    {
+        var argsSb = new StringBuilder();
+        if (request.Arguments != null && request.Arguments.Count > 0)
+        {
+            foreach (var kvp in request.Arguments)
+            {
+                if (argsSb.Length > 0) argsSb.Append("\n");
+                argsSb.Append($"{kvp.Key}: {kvp.Value}");
+            }
+        }
+
+        var tcs = new TaskCompletionSource<bool>();
+
+        Action showModal = () =>
+        {
+            DismissPendingApproval(false);
+
+            _approvalTcs = tcs;
+            PendingToolName = request.Name;
+            PendingToolArguments = argsSb.ToString();
+            PendingApprovalTitle = "Tool Approval Requested";
+            PendingApprovalMessage = $"The model is attempting to execute '{request.Name}'. Allow this operation?";
+            IsApprovalPending = true;
+        };
+
+        if (System.Windows.Application.Current?.Dispatcher != null)
+        {
+            await System.Windows.Application.Current.Dispatcher.InvokeAsync(showModal);
+        }
+        else
+        {
+            showModal();
+        }
+
+        return await tcs.Task;
+    }
+
     private void ToolExecutor_ToolApprovalRequested(object? sender, ToolApprovalEventArgs e)
     {
-        System.Windows.Application.Current.Dispatcher.Invoke(() =>
-        {
-            var msg = $"The model is attempting to execute '{e.Request.Name}'.\n\nAllow this operation?";
-            var result = System.Windows.MessageBox.Show(msg, "Tool Approval Requested", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning);
-            e.IsApproved = result == System.Windows.MessageBoxResult.Yes;
-        });
+        e.IsApproved = ShowToolApprovalDialogAsync(e.Request).GetAwaiter().GetResult();
     }
 
     partial void OnSelectedRiskLevelChanged(RiskLevel value)
@@ -191,6 +349,15 @@ public partial class ChatViewModel : ObservableObject
     {
         if (string.IsNullOrEmpty(value)) return;
         
+        long seqId = Interlocked.Increment(ref _modelLoadSequenceId);
+
+        var oldCts = _modelLoadCts;
+        var newCts = new CancellationTokenSource();
+        var ct = newCts.Token;
+        _modelLoadCts = newCts;
+
+        try { oldCts?.Cancel(); } catch { }
+
         _userExplicitlyUnloaded = false;
 
         var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.DisplayName == value);
@@ -212,7 +379,8 @@ public partial class ChatViewModel : ObservableObject
                 IsModelReady = false;
 
                 // Unload any existing model asynchronously to free VRAM and cancel ongoing generation
-                await _inferenceEngine.UnloadModelAsync();
+                await _inferenceEngine.UnloadModelAsync(ct);
+                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
                 
                 // Set architecture for prompt templating
                 _inferenceEngine.Architecture = modelInfo.Architecture ?? "llama";
@@ -220,48 +388,76 @@ public partial class ChatViewModel : ObservableObject
                 // Load new model using hardware-aware plan
                 var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
                 var systemInfo = await _systemProfiler.GetSystemInfoAsync();
+                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
                 var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
                 int totalLayers = metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32;
                 long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers;
-                // Cap context length to practical default to prevent VRAM overallocation.
-                // The model's trained context (often 1M+) would require enormous KV cache.
-                int rawContextLength = (int)(metadata?.ContextLength ?? 8192);
-                int contextLength = Math.Min(rawContextLength, 32768);
+                int rawContextLength = (int)(metadata?.ContextLength ?? 32768);
+                int contextLength = Math.Clamp(rawContextLength < 32768 ? 32768 : rawContextLength, 32768, 131072);
                 
                 // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
-                // For Q8_0 KV cache, sizeof(element) = 1 byte.
-                long kvCachePerLayerBytes = 4096; // Safe default: 2 * 8 * 128 * 2 = 4096
+                // Klydis enforces Q4_0 4-bit quantized KV cache (configured in InferenceEngine), so sizeof = 0.5 bytes.
+                long kvCachePerLayerBytes = 1024; // Safe default: 2 * 8 * 128 * 0.5 = 1024
                 if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCountKv.HasValue)
                 {
                     long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
-                    // K + V (2) * HeadCountKv * headDim * 2 bytes (F16 KV cache)
-                    kvCachePerLayerBytes = 2 * metadata.HeadCountKv.Value * headDim * 2;
+                    // K + V (2) * HeadCountKv * headDim * 0.5 bytes (Q4_0 4-bit quantized KV cache)
+                    kvCachePerLayerBytes = (long)(2 * metadata.HeadCountKv.Value * headDim * 0.5);
                 }
 
                 var plan = _offloadStrategy.CalculatePlan(
                     totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
                 
+                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
                 await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
-                await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
+                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
+                // Decouple speculative draft model attachment from main model loading
+                try
+                {
+                    await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
+                }
+                catch (Exception draftEx)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Speculative draft attachment failed: {draftEx}");
+                }
+
+                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
                 if (System.Windows.Application.Current != null)
                 {
                     await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        IsModelReady = true;
+                        if (seqId == Volatile.Read(ref _modelLoadSequenceId))
+                        {
+                            IsModelReady = true;
+                            ProcessNextQueuedMessageIfAvailable();
+                        }
                     });
                 }
                 else
                 {
-                    IsModelReady = true;
+                    if (seqId == Volatile.Read(ref _modelLoadSequenceId))
+                    {
+                        IsModelReady = true;
+                        ProcessNextQueuedMessageIfAvailable();
+                    }
                 }
 
                 // Remember the previously loaded model
                 var updatedModel = modelInfo with { LastUsedAt = DateTime.UtcNow };
                 await _registry.UpsertModelAsync(updatedModel);
             }
+            catch (OperationCanceledException)
+            {
+                // Task canceled by a newer selection change
+            }
             catch (Exception ex)
             {
+                if (seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
                 string nativeLog = "";
                 try
                 {
@@ -276,28 +472,37 @@ public partial class ChatViewModel : ObservableObject
                 {
                     await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        IsModelReady = false;
-                        Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                        if (seqId == Volatile.Read(ref _modelLoadSequenceId))
+                        {
+                            IsModelReady = false;
+                            Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                        }
                     });
                 }
                 else
                 {
-                    IsModelReady = false;
-                    Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                    if (seqId == Volatile.Read(ref _modelLoadSequenceId))
+                    {
+                        IsModelReady = false;
+                        Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                    }
                 }
             }
             finally
             {
-                if (System.Windows.Application.Current != null)
+                if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                 {
-                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    if (System.Windows.Application.Current != null)
+                    {
+                        await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                        {
+                            IsModelLoading = false;
+                        });
+                    }
+                    else
                     {
                         IsModelLoading = false;
-                    });
-                }
-                else
-                {
-                    IsModelLoading = false;
+                    }
                 }
             }
         }
@@ -354,14 +559,27 @@ public partial class ChatViewModel : ObservableObject
         SelectedModelId = string.Empty;
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task SendMessageAsync()
     {
-        if (string.IsNullOrWhiteSpace(InputText) || IsGenerating || IsModelLoading)
+        if (string.IsNullOrWhiteSpace(InputText))
             return;
+
+        if (IsGenerating || IsModelLoading)
+        {
+            EnqueueMessage();
+            return;
+        }
 
         var userMessage = InputText;
         InputText = string.Empty;
+        await SendMessageForTextAsync(userMessage);
+    }
+
+    private async Task SendMessageForTextAsync(string userMessage)
+    {
+        if (string.IsNullOrWhiteSpace(userMessage))
+            return;
 
         Messages.Add(new ChatMessageViewModel
         {
@@ -371,6 +589,8 @@ public partial class ChatViewModel : ObservableObject
         });
 
         IsGenerating = true;
+        var localGeneratingSessionId = SelectedSession?.Id;
+        _generatingSessionId = localGeneratingSessionId;
         _generationCts = new CancellationTokenSource();
 
         // Bubbles are created lazily and appended in the exact order events
@@ -386,7 +606,17 @@ public partial class ChatViewModel : ObservableObject
         var typingIndicator = new ChatMessageViewModel { Role = "typing", Timestamp = DateTime.Now };
         Messages.Add(typingIndicator);
 
-        void OnUi(Action action) => System.Windows.Application.Current.Dispatcher.InvokeAsync(action, System.Windows.Threading.DispatcherPriority.Background);
+        void OnUi(Action action)
+        {
+            if (System.Windows.Application.Current?.Dispatcher != null)
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(action, System.Windows.Threading.DispatcherPriority.Normal);
+            }
+            else
+            {
+                action();
+            }
+        }
 
         void AppendMessage(ChatMessageViewModel message)
         {
@@ -406,6 +636,10 @@ public partial class ChatViewModel : ObservableObject
             if (assistantMessage != null)
             {
                 assistantMessage.IsStreaming = false;
+                if (string.IsNullOrWhiteSpace(assistantMessage.Content))
+                {
+                    Messages.Remove(assistantMessage);
+                }
                 assistantMessage = null;
             }
         }
@@ -423,8 +657,40 @@ public partial class ChatViewModel : ObservableObject
         {
             if (_chatEngine != null)
             {
+                string? skillContext = null;
+                if (_skillSelector != null)
+                {
+                    var brainIndex = _skillSelector.GenerateBrainIndex();
+                    var skillReasoning = _skillSelector.ReasonAndSelectSkills(userMessage);
+                    
+                    var sb = new StringBuilder();
+                    if (!string.IsNullOrWhiteSpace(brainIndex))
+                    {
+                        sb.AppendLine(brainIndex.Trim());
+                    }
+                    if (skillReasoning.SelectedSkills.Count > 0)
+                    {
+                        sb.AppendLine(skillReasoning.FormattedPromptInjection.Trim());
+                        OnUi(() =>
+                        {
+                            var skillReasoningMsg = new ChatMessageViewModel
+                            {
+                                Role = "thought",
+                                Content = skillReasoning.ReasoningExplanation,
+                                IsThinkingExpanded = true,
+                                Timestamp = DateTime.Now
+                            };
+                            AppendMessage(skillReasoningMsg);
+                        });
+                    }
+                    if (sb.Length > 0)
+                    {
+                        skillContext = sb.ToString();
+                    }
+                }
+
                 int _throttleCounter = 0;
-                await foreach (var evt in _chatEngine.StreamResponseAsync(userMessage, _generationCts.Token))
+                await foreach (var evt in _chatEngine.StreamResponseAsync(userMessage, _generationCts.Token, skillContext))
                 {
                     if (++_throttleCounter % 10 == 0)
                     {
@@ -434,6 +700,7 @@ public partial class ChatViewModel : ObservableObject
                     switch (evt.Type)
                     {
                         case ChatStreamEventType.Token:
+                            fullAssistantText.Append(evt.Content);
                             OnUi(() =>
                             {
                                 if (thoughtMessage != null)
@@ -460,7 +727,6 @@ public partial class ChatViewModel : ObservableObject
                                     AppendMessage(assistantMessage);
                                 }
                                 assistantMessage.Content += evt.Content;
-                                fullAssistantText.Append(evt.Content);
                             });
                             break;
                         case ChatStreamEventType.ThinkingStart:
@@ -532,7 +798,39 @@ public partial class ChatViewModel : ObservableObject
                                     HasToolCalls = true,
                                     Timestamp = DateTime.Now
                                 };
-                                pendingToolCall = new ToolCallViewModel { Name = evt.Content, Status = "running", IsExpanded = true };
+
+                                string formattedArgs = string.Empty;
+                                string commandTextPreview = string.Empty;
+
+                                if (evt.Metadata != null && evt.Metadata.TryGetValue("Arguments", out var rawArgsObj) && rawArgsObj is IDictionary<string, object> argsDict)
+                                {
+                                    var lines = new List<string>();
+                                    foreach (var kvp in argsDict)
+                                    {
+                                        var unwrappedVal = Klydis.Core.Chat.ToolExecutor.UnwrapJsonElement(kvp.Value)?.ToString() ?? string.Empty;
+                                        lines.Add($"{kvp.Key}: {unwrappedVal}");
+                                        if (kvp.Key.Equals("command", StringComparison.OrdinalIgnoreCase) || kvp.Key.Equals("path", StringComparison.OrdinalIgnoreCase) || kvp.Key.Equals("query", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            if (string.IsNullOrEmpty(commandTextPreview))
+                                                commandTextPreview = unwrappedVal;
+                                        }
+                                    }
+                                    formattedArgs = string.Join("\n", lines);
+                                    if (string.IsNullOrEmpty(commandTextPreview) && lines.Count > 0)
+                                    {
+                                        commandTextPreview = lines[0];
+                                    }
+                                }
+
+                                pendingToolCall = new ToolCallViewModel 
+                                { 
+                                    Name = evt.Content, 
+                                    CommandText = commandTextPreview,
+                                    Arguments = formattedArgs,
+                                    Status = "running", 
+                                    Output = "Executing...",
+                                    IsExpanded = true 
+                                };
                                 toolMessage.ToolCalls.Add(pendingToolCall);
                                 AppendMessage(toolMessage);
                             });
@@ -547,8 +845,8 @@ public partial class ChatViewModel : ObservableObject
                                         || flag is not bool ok
                                         || ok;
                                     pendingToolCall.Status = success ? "done" : "failed";
-                                    pendingToolCall.Output = evt.Content;
-                                    pendingToolCall.IsExpanded = !success;
+                                    pendingToolCall.Output = string.IsNullOrWhiteSpace(evt.Content) ? (success ? "Done (No output returned)" : "Failed") : evt.Content;
+                                    pendingToolCall.IsExpanded = true;
                                     pendingToolCall = null;
                                 }
                             });
@@ -623,52 +921,63 @@ public partial class ChatViewModel : ObservableObject
         }
         catch (OperationCanceledException)
         {
-            OnUi(() => AppendMessage(new ChatMessageViewModel
+            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
-                Role = "system",
-                Content = "Generation canceled.",
-                Timestamp = DateTime.Now
-            }));
+                OnUi(() => AppendMessage(new ChatMessageViewModel
+                {
+                    Role = "system",
+                    Content = "Generation canceled.",
+                    Timestamp = DateTime.Now
+                }));
+            }
         }
         catch (Exception ex)
         {
-            OnUi(() => AppendMessage(new ChatMessageViewModel
+            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
-                Role = "error",
-                Content = ex.Message,
-                Timestamp = DateTime.Now
-            }));
+                OnUi(() => AppendMessage(new ChatMessageViewModel
+                {
+                    Role = "error",
+                    Content = ex.Message,
+                    Timestamp = DateTime.Now
+                }));
+            }
         }
         finally
         {
-            OnUi(() =>
+            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
-                CloseAssistantBubble();
-                if (thoughtMessage != null)
+                OnUi(() =>
                 {
-                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                    CloseAssistantBubble();
+                    if (thoughtMessage != null)
                     {
-                        Messages.Remove(thoughtMessage);
+                        if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                        {
+                            Messages.Remove(thoughtMessage);
+                        }
+                        else
+                        {
+                            CloseThoughtBubble();
+                        }
                     }
-                    else
-                    {
-                        CloseThoughtBubble();
-                    }
-                }
-                Messages.Remove(typingIndicator);
-            });
+                    Messages.Remove(typingIndicator);
+                });
+            }
+            bool isCancelled = _generationCts != null && _generationCts.IsCancellationRequested;
             IsGenerating = false;
+            _generatingSessionId = null;
             _generationCts?.Dispose();
             _generationCts = null;
 
             // Auto-rename chat if it is the first interaction
             var responseText = fullAssistantText.ToString();
-            if (SessionTitle == "New Chat" && Messages.Count >= 2 && SelectedSession != null && !string.IsNullOrWhiteSpace(responseText))
+            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId && SessionTitle == "New Chat" && Messages.Count >= 2 && !string.IsNullOrWhiteSpace(responseText))
             {
                 _ = Task.Run(async () =>
                 {
                     var newTitle = CleanTitle(await _chatEngine!.GenerateTitleAsync(userMessage, responseText));
-                    if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat")
+                    if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat" && SelectedSession?.Id == localGeneratingSessionId)
                     {
                         _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                         {
@@ -679,7 +988,106 @@ public partial class ChatViewModel : ObservableObject
                     }
                 });
             }
+
+            // If generation was not explicitly cancelled, auto-process next queued message
+            if (!isCancelled)
+            {
+                ProcessNextQueuedMessageIfAvailable();
+            }
         }
+    }
+
+    private void ProcessNextQueuedMessageIfAvailable()
+    {
+        if (IsGenerating || !IsModelReady) return;
+        var sessionId = SelectedSession?.Id ?? string.Empty;
+        var nextItem = _messageQueue?.GetNextDirectSend(sessionId) ?? _messageQueue?.GetNextPending(sessionId);
+        if (nextItem != null)
+        {
+            _messageQueue?.MarkStatus(nextItem.Id, QueuedMessageStatus.Processing);
+            _messageQueue?.Remove(nextItem.Id);
+            Action action = async () =>
+            {
+                await Task.Delay(150);
+                await SendMessageForTextAsync(nextItem.Content);
+            };
+
+            if (System.Windows.Application.Current?.Dispatcher != null)
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(action);
+            }
+            else
+            {
+                action();
+            }
+        }
+    }
+
+    private void RefreshQueueUI()
+    {
+        Action update = () =>
+        {
+            var sessionId = SelectedSession?.Id ?? string.Empty;
+            var pending = _messageQueue?.GetPending(sessionId) ?? Array.Empty<QueuedMessage>();
+            QueuedMessages.Clear();
+            foreach (var item in pending)
+            {
+                QueuedMessages.Add(new QueuedMessageViewModel(item));
+            }
+            HasQueuedMessages = QueuedMessages.Count > 0;
+        };
+
+        if (System.Windows.Application.Current?.Dispatcher != null)
+        {
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(update);
+        }
+        else
+        {
+            update();
+        }
+    }
+
+    [RelayCommand]
+    private void EnqueueMessage()
+    {
+        if (string.IsNullOrWhiteSpace(InputText)) return;
+        var text = InputText;
+        InputText = string.Empty;
+        var sessionId = SelectedSession?.Id ?? string.Empty;
+        _messageQueue?.Enqueue(sessionId, text, SelectedQueueMode);
+        ProcessNextQueuedMessageIfAvailable();
+    }
+
+    [RelayCommand]
+    private void ClearQueue()
+    {
+        var sessionId = SelectedSession?.Id ?? string.Empty;
+        _messageQueue?.Clear(sessionId);
+        RefreshQueueUI();
+    }
+
+    [RelayCommand]
+    private void ToggleQueueItemMode(QueuedMessageViewModel? item)
+    {
+        if (item != null)
+        {
+            _messageQueue?.ToggleMode(item.Id);
+        }
+    }
+
+    [RelayCommand]
+    private void RemoveQueuedItem(QueuedMessageViewModel? item)
+    {
+        if (item != null)
+        {
+            _messageQueue?.Remove(item.Id);
+        }
+    }
+
+    [RelayCommand]
+    private void ToggleSelectedQueueMode()
+    {
+        SelectedQueueMode = SelectedQueueMode == QueuedMessageMode.Steer ? QueuedMessageMode.DirectSend : QueuedMessageMode.Steer;
     }
 
     [RelayCommand]
@@ -733,6 +1141,7 @@ public partial class ChatViewModel : ObservableObject
     private void Cancel()
     {
         _generationCts?.Cancel();
+        DismissPendingApproval(false);
     }
 
     [RelayCommand]
@@ -811,13 +1220,25 @@ public partial class ChatViewModel : ObservableObject
             }
         }
         
-        _chatEngine?.LoadHistory(chatEngineMessages, Guid.Parse(session.Id));
+        _chatEngine?.LoadHistory(chatEngineMessages, session.Id);
+        RefreshQueueUI();
     }
 
     [RelayCommand]
     private async Task DeleteSessionAsync(SessionInfo session)
     {
         if (session == null) return;
+
+        if (IsGenerating && (session.Id == _generatingSessionId || session.Id == SelectedSession?.Id || session.Id == _chatEngine?.CurrentSessionId))
+        {
+            Cancel();
+            if (_chatEngine != null)
+            {
+                await _chatEngine.CancelActiveGenerationAsync();
+            }
+        }
+
+        _messageQueue?.Clear(session.Id);
         await _messageStore.DeleteSessionAsync(session.Id);
         Sessions.Remove(session);
         if (Sessions.Count > 0)
@@ -926,7 +1347,7 @@ public partial class ChatViewModel : ObservableObject
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Failed to export chat: {ex}");
-                System.Windows.MessageBox.Show($"Failed to export chat:\n{ex.Message}", "Export Failed", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+                ShowAlert("Export Failed", $"Failed to export chat:\n{ex.Message}");
             }
         }
     }
@@ -934,7 +1355,11 @@ public partial class ChatViewModel : ObservableObject
     private static string CleanTitle(string title)
     {
         if (string.IsNullOrWhiteSpace(title)) return "New Chat";
-        return Regex.Replace(title, @"\s+", " ").Trim();
+        title = Regex.Replace(title, @"<think>.*?(?:</think>|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+        title = Regex.Replace(title, @"</?think>", "", RegexOptions.IgnoreCase).Trim();
+        title = Regex.Replace(title, @"[#*_`~]+", "").Trim();
+        title = Regex.Replace(title, @"\s+", " ").Trim();
+        return string.IsNullOrWhiteSpace(title) ? "New Chat" : title;
     }
 
     private static string StripToolCallBlocks(string text)
@@ -946,23 +1371,16 @@ public partial class ChatViewModel : ObservableObject
 
     private static (string Thinking, string Content) SplitThinkingContent(string text)
     {
-        int start = text.IndexOf("<think>", StringComparison.Ordinal);
-        if (start >= 0)
+        if (string.IsNullOrWhiteSpace(text)) return (string.Empty, text);
+
+        var match = Regex.Match(text, @"<\|?(?:think|thought)\|?>(.*?)(?:</\|?(?:think|thought)\|?>|<\|/(?:think|thought)\|?>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        if (match.Success)
         {
-            int end = text.IndexOf("</think>", start + 7, StringComparison.Ordinal);
-            if (end >= 0)
-            {
-                string thinking = text.Substring(start + 7, end - (start + 7)).Trim();
-                string remaining = text.Remove(start, end + 8 - start).Trim();
-                return (thinking, remaining);
-            }
-            else
-            {
-                string thinking = text.Substring(start + 7).Trim();
-                string remaining = text.Substring(0, start).Trim();
-                return (thinking, remaining);
-            }
+            string thinking = match.Groups[1].Value.Trim();
+            string remaining = text.Remove(match.Index, match.Length).Trim();
+            return (thinking, remaining);
         }
+
         return (string.Empty, text);
     }
 }

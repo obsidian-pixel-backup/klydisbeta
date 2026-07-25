@@ -171,26 +171,42 @@ public partial class ChatView : UserControl
         return null;
     }
 
+    private ScrollViewer? FindNestedScrollViewer(DependencyObject? element)
+    {
+        _scrollViewer ??= FindScrollViewer(MessagesList);
+        while (element != null && element != MessagesList)
+        {
+            if (element is ScrollViewer sv && sv != _scrollViewer)
+            {
+                return sv;
+            }
+            element = element is Visual || element is System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(element)
+                : LogicalTreeHelper.GetParent(element);
+        }
+        return null;
+    }
+
     private void MessagesList_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        // Several message templates nest their own ScrollViewer (markdown content,
-        // tool output, thinking panels). Those would otherwise swallow the wheel
-        // event whenever the cursor happened to be over them, making the outer
-        // chat pane randomly "stop scrolling". Always drive the outer scroll
-        // ourselves and mark the event handled before it can reach a nested one.
         _scrollViewer ??= FindScrollViewer(MessagesList);
         if (_scrollViewer == null)
         {
             return;
         }
 
-        // Add an impulse rather than jumping/animating to a computed target directly.
-        // A trackpad or a fast wheel fires many events per rendered frame; accumulating
-        // into one velocity value that OnScrollRendering integrates and decays every
-        // frame absorbs a whole burst as one continuous motion. Computing a fresh
-        // animation target from VerticalOffset on every single event (the previous
-        // approach) reads a value that lags the true position between frames, so
-        // high-frequency input kept restarting from a stale point and barely moved.
+        var innerViewer = FindNestedScrollViewer(e.OriginalSource as DependencyObject);
+        if (innerViewer != null && innerViewer.ScrollableHeight > 0)
+        {
+            bool canScrollUp = e.Delta > 0 && innerViewer.VerticalOffset > 0;
+            bool canScrollDown = e.Delta < 0 && innerViewer.VerticalOffset < innerViewer.ScrollableHeight;
+            if (canScrollUp || canScrollDown)
+            {
+                // Allow inner ScrollViewer (tool output, code block, thinking panel) to handle scrolling
+                return;
+            }
+        }
+
         _scrollVelocity = Math.Clamp(_scrollVelocity - e.Delta * 6.0, -6000, 6000);
 
         if (!_scrollAnimating)
@@ -328,9 +344,22 @@ public partial class ChatView : UserControl
             else
             {
                 e.Handled = true;
-                if (DataContext is ChatViewModel vm && vm.SendMessageCommand.CanExecute(null))
+                if (DataContext is ChatViewModel vm)
                 {
-                    vm.SendMessageCommand.Execute(null);
+                    if (vm.IsGenerating || vm.IsModelLoading)
+                    {
+                        if (vm.EnqueueMessageCommand.CanExecute(null))
+                        {
+                            vm.EnqueueMessageCommand.Execute(null);
+                        }
+                    }
+                    else
+                    {
+                        if (vm.SendMessageCommand.CanExecute(null))
+                        {
+                            vm.SendMessageCommand.Execute(null);
+                        }
+                    }
                 }
             }
         }

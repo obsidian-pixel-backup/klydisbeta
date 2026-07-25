@@ -131,8 +131,12 @@ public class OffloadStrategy
         int recommendedContext = contextLength;
         int targetGpuLayers;
 
-        // Check if full model fits in available VRAM at full native context length
+        // Check if full model fits in net available VRAM (or usable VRAM headroom)
         if (fullModelVramCostMb <= netAvailableVramMb)
+        {
+            targetGpuLayers = totalLayers;
+        }
+        else if (strategyType == OffloadStrategyType.FullGpu && fullModelVramCostMb <= (usableVramMb + 500))
         {
             targetGpuLayers = totalLayers;
         }

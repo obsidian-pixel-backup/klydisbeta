@@ -32,7 +32,7 @@ public abstract class ChatTemplate
 /// Core inference engine that uses LLamaSharp to load and run GGUF models in-process.
 /// Completely replaces Ollama dependency.
 /// </summary>
-public sealed class InferenceEngine : IInferenceEngine, IDisposable
+public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDisposable
 {
     private readonly ILogger<InferenceEngine> _logger;
     private LLamaWeights? _weights;
@@ -42,7 +42,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     private string _lastEvaluatedPrompt = string.Empty;
     private readonly SemaphoreSlim _modelLock = new SemaphoreSlim(1, 1);
     private CancellationTokenSource? _activeGenerationCts;
+    private Task? _activeGenerationTask;
     private readonly object _generationCtsLock = new();
+
+    private readonly object _contextResetLock = new();
 
     public SpeculativeEngine SpeculativeEngine { get; } = new();
     public SpeculativeDecodingService? SpeculativeDecodingService { get; set; }
@@ -55,6 +58,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         set => _selectedDraftModelPath = string.IsNullOrWhiteSpace(value) ? "auto" : value;
     }
     public string SpeculativeStatus { get; private set; } = "Speculative decoding initialized.";
+
+    /// <summary>
+    /// Gets or sets target KV cache quantization precision. Default is Q4_0.
+    /// </summary>
+    public KvCacheQuantizationType TargetKvQuantization { get; set; } = KvCacheQuantizationType.Q4_0;
+
+    /// <summary>
+    /// Gets current KV cache memory estimate and architecture metrics.
+    /// </summary>
+    public KvCacheMemoryEstimate? CurrentKvCacheEstimate { get; private set; }
 
     /// <summary>
     /// Gets the telemetry recorded during the most recent generation.
@@ -94,20 +107,61 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     /// <summary>
     /// Gets the loaded context size budget.
     /// </summary>
-    public uint ContextSize => _modelParams?.ContextSize ?? 4096;
+    public uint ContextSize => _modelParams?.ContextSize ?? 32768;
 
     /// <summary>
     /// Gets the path of the currently loaded model.
     /// </summary>
     public string? CurrentModelPath { get; private set; }
 
+    private INativeResourceDisposer? _nativeResourceDisposer;
+
+    /// <summary>
+    /// Gets or sets the native resource disposer for offloading VRAM/handle cleanup off the UI thread.
+    /// </summary>
+    public INativeResourceDisposer? NativeResourceDisposer
+    {
+        get => _nativeResourceDisposer;
+        set
+        {
+            _nativeResourceDisposer = value;
+            if (SpeculativeEngine != null)
+            {
+                SpeculativeEngine.NativeResourceDisposer = value;
+            }
+        }
+    }
+
     /// <summary>
     /// Initializes a new instance of the <see cref="InferenceEngine"/> class.
     /// </summary>
     /// <param name="logger">The logger instance.</param>
-    public InferenceEngine(ILogger<InferenceEngine> logger)
+    /// <param name="nativeResourceDisposer">Optional background native resource disposer.</param>
+    public InferenceEngine(ILogger<InferenceEngine> logger, INativeResourceDisposer? nativeResourceDisposer = null)
     {
         _logger = logger;
+        NativeResourceDisposer = nativeResourceDisposer;
+    }
+
+    private void SafeOffloadDisposal(params IDisposable?[] resources)
+    {
+        var disposer = NativeResourceDisposer;
+        if (disposer != null)
+        {
+            disposer.EnqueueForDisposal(resources);
+        }
+        else
+        {
+            Task.Run(() =>
+            {
+                var ordered = resources.Where(r => r != null)
+                                       .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
+                foreach (var r in ordered)
+                {
+                    try { r?.Dispose(); } catch { }
+                }
+            });
+        }
     }
 
     /// <summary>
@@ -152,6 +206,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         {
             await CancelActiveGenerationAsync();
             await _modelLock.WaitAsync();
+            bool success = false;
             try
             {
                 _logger.LogInformation("Loading model from {ModelPath} with {GpuLayers} GPU layers.", modelPath, offloadPlan.GpuLayers);
@@ -159,8 +214,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 SpeculativeEngine.Unload();
                 UnloadModelInternal();
 
-                // Lock process execution strictly to Physical P-Cores to prevent E-Core throttling
-                Hardware.CpuAffinityHelper.ApplyPCoreAffinityToProcess();
+                // Only lock process CPU affinity mask for CPU-only execution (0 GPU layers)
+                if (offloadPlan.GpuLayers == 0)
+                {
+                    Hardware.CpuAffinityHelper.ApplyPCoreAffinityToProcess();
+                }
 
                 // Configure model parameters for maximum GPU throughput
                 var parameters = new ModelParams(modelPath)
@@ -170,43 +228,66 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                     BatchSize = (uint)offloadPlan.RecommendedBatchSize,
                     UBatchSize = (uint)offloadPlan.RecommendedBatchSize, // Align physical batch size with BatchSize
                     FlashAttention = true,
-                    Threads = Hardware.CpuAffinityHelper.GetPCoreCount(),
-                    BatchThreads = Hardware.CpuAffinityHelper.GetPCoreCount(),
+                    Threads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
+                    BatchThreads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
                     // Enable Memory map to eliminate double-buffering in System RAM
                     UseMemorymap = true,
                     UseMemoryLock = false
                 };
                 
-                // Target KV cache precision set to Q4_0 for maximum memory efficiency and throughput
-                parameters.TypeK = LLama.Native.GGMLType.GGML_TYPE_Q4_0;
-                parameters.TypeV = LLama.Native.GGMLType.GGML_TYPE_Q4_0;
+                // Target KV cache precision set based on TargetKvQuantization configuration
+                var kvType = TargetKvQuantization switch
+                {
+                    KvCacheQuantizationType.F16 => LLama.Native.GGMLType.GGML_TYPE_F16,
+                    KvCacheQuantizationType.Q8_0 => LLama.Native.GGMLType.GGML_TYPE_Q8_0,
+                    KvCacheQuantizationType.Q4_1 => LLama.Native.GGMLType.GGML_TYPE_Q4_1,
+                    _ => LLama.Native.GGMLType.GGML_TYPE_Q4_0
+                };
+                parameters.TypeK = kvType;
+                parameters.TypeV = kvType;
+
+                var metadata = Models.GgufMetadataReader.Parse(modelPath);
+                if (metadata != null)
+                {
+                    CurrentKvCacheEstimate = KvCacheCalculator.Calculate(metadata, offloadPlan.RecommendedContextSize, TargetKvQuantization);
+                    _logger.LogInformation("KV Cache VRAM estimate ({Arch}): {Mb} MB ({Gb} GB), {Bpt} bytes/token.",
+                        CurrentKvCacheEstimate.AttentionArchitecture,
+                        CurrentKvCacheEstimate.TotalVramMegabytes,
+                        CurrentKvCacheEstimate.TotalVramGigabytes,
+                        CurrentKvCacheEstimate.BytesPerToken);
+                }
 
                 _modelParams = parameters;
-                try
-                {
-                    _weights = LLamaWeights.LoadFromFile(parameters);
-                    _context = _weights.CreateContext(parameters);
-                    
-                    // Using InteractiveExecutor for hybrid fast-path prefix caching
-                    _executor = new InteractiveExecutor(_context);
-                    _lastEvaluatedPrompt = string.Empty;
+                _weights = LLamaWeights.LoadFromFile(parameters);
+                _context = _weights.CreateContext(parameters);
+                
+                // Using InteractiveExecutor for hybrid fast-path prefix caching
+                _executor = new InteractiveExecutor(_context);
+                _lastEvaluatedPrompt = string.Empty;
 
-                    CurrentModelPath = modelPath;
-                    _logger.LogInformation("Model loaded successfully.");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to load LLama model or create context from {ModelPath}.", modelPath);
-                    UnloadModelInternal();
-                    throw;
-                }
+                CurrentModelPath = modelPath;
+                Architecture = !string.IsNullOrWhiteSpace(metadata?.Architecture)
+                    ? metadata.Architecture
+                    : System.IO.Path.GetFileNameWithoutExtension(modelPath);
+                _logger.LogInformation("Model loaded successfully with architecture '{Architecture}'.", Architecture);
+                success = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to load LLama model or create context from {ModelPath}.", modelPath);
+                UnloadModelInternal();
+                ModelStateChanged?.Invoke(false, null);
+                throw;
             }
             finally
             {
                 _modelLock.Release();
             }
 
-            ModelStateChanged?.Invoke(true, modelPath);
+            if (success)
+            {
+                ModelStateChanged?.Invoke(true, modelPath);
+            }
         });
     }
 
@@ -235,6 +316,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         }
         CancellationToken generationToken = linkedCts.Token;
 
+        Task? generationTask = null;
         await _modelLock.WaitAsync(ct);
         try
         {
@@ -255,7 +337,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 SingleReader = true
             });
 
-            var generationTask = Task.Run(async () =>
+            string savedLastEvaluatedPrompt = _lastEvaluatedPrompt;
+            int savedTokenCount = 0;
+            if (isIsolated && !string.IsNullOrEmpty(savedLastEvaluatedPrompt) && _context != null)
+            {
+                try { savedTokenCount = GetTokenCount(savedLastEvaluatedPrompt); } catch { }
+            }
+
+            generationTask = Task.Run(async () =>
             {
                 bool completedNormally = false;
                 try
@@ -270,12 +359,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                     if (isIsolated)
                     {
                         _logger.LogDebug("Executing isolated inference task. Context tracking will reset after execution.");
-                        ResetContextInternal();
+                        if (string.IsNullOrEmpty(savedLastEvaluatedPrompt))
+                        {
+                            ResetContextInternal();
+                        }
                         textToEvaluate = prompt;
                     }
                     else
                     {
                         // HYBRID EXECUTOR LOGIC: Fast-path for appended conversation turns, full reset for new chats
+                        var cleanLastPrompt = !string.IsNullOrEmpty(_lastEvaluatedPrompt) ? SanitizeThinkingTags(_lastEvaluatedPrompt) : null;
                         if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt, StringComparison.Ordinal))
                         {
                             textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
@@ -283,6 +376,13 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
                             // Strip leading turn-ending stop tokens (and trailing newlines/spaces) to prevent AntiPrompts
                             // from matching at token 0 of prompt pre-fill.
+                            textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
+                        }
+                        else if (!string.IsNullOrEmpty(cleanLastPrompt) && prompt.StartsWith(cleanLastPrompt, StringComparison.Ordinal))
+                        {
+                            textToEvaluate = prompt.Substring(cleanLastPrompt.Length);
+                            _logger.LogDebug("Fast-path inference triggered via sanitized prompt prefix. Initial delta length: {DeltaLength} chars.", textToEvaluate.Length);
+
                             textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
                         }
                         else
@@ -327,8 +427,9 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                     
                     if (!isIsolated)
                     {
-                        // Update the state hash to include both the input prompt and the generated response
-                        _lastEvaluatedPrompt = prompt + generatedContent.ToString();
+                        // Update the state hash to include both the input prompt and the sanitized generated response
+                        var cleanGen = SanitizeThinkingTags(generatedContent.ToString());
+                        _lastEvaluatedPrompt = prompt + cleanGen;
                     }
                     completedNormally = true;
 
@@ -371,13 +472,37 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 }
                 finally
                 {
-                    if (isIsolated || !completedNormally)
+                    if (isIsolated)
+                    {
+                        if (!string.IsNullOrEmpty(savedLastEvaluatedPrompt) && _context != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid && savedTokenCount > 0)
+                        {
+                            try
+                            {
+                                _context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, (LLamaPos)savedTokenCount, (LLamaPos)(-1));
+                                _lastEvaluatedPrompt = savedLastEvaluatedPrompt;
+                            }
+                            catch
+                            {
+                                ResetContextInternal();
+                            }
+                        }
+                        else
+                        {
+                            ResetContextInternal();
+                        }
+                    }
+                    else if (!completedNormally)
                     {
                         ResetContextInternal();
                     }
                     channel.Writer.Complete();
                 }
             }, CancellationToken.None);
+
+            lock (_generationCtsLock)
+            {
+                _activeGenerationTask = generationTask;
+            }
 
             try
             {
@@ -409,6 +534,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
                 {
                     _activeGenerationCts = null;
                 }
+                if (_activeGenerationTask == generationTask)
+                {
+                    _activeGenerationTask = null;
+                }
             }
             try { linkedCts.Dispose(); } catch (ObjectDisposedException) { }
             _modelLock.Release();
@@ -439,14 +568,19 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
 
     public Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default)
     {
-        return GenerateTextAsync(prompt, isIsolated: false, ct);
+        return GenerateTextAsync(prompt, isIsolated: false, maxTokens: 256, ct: ct);
     }
 
-    public async Task<string> GenerateTextAsync(string prompt, bool isIsolated, CancellationToken ct = default)
+    public Task<string> GenerateTextAsync(string prompt, bool isIsolated, CancellationToken ct = default)
+    {
+        return GenerateTextAsync(prompt, isIsolated: isIsolated, maxTokens: 256, ct: ct);
+    }
+
+    public async Task<string> GenerateTextAsync(string prompt, bool isIsolated, int maxTokens, CancellationToken ct = default)
     {
         var inferenceParams = new InferenceParams 
         { 
-            MaxTokens = -1,
+            MaxTokens = maxTokens > 0 ? maxTokens : 256,
             SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
             {
                 Temperature = 0.7f,
@@ -479,14 +613,53 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
         }
     }
 
-    private void ResetContextInternal()
+    internal void ResetContextInternal()
     {
-        _lastEvaluatedPrompt = string.Empty;
-        if (_weights != null && _modelParams != null)
+        lock (_contextResetLock)
         {
-            _context?.Dispose();
-            _context = _weights.CreateContext(_modelParams);
-            _executor = new InteractiveExecutor(_context);
+            _lastEvaluatedPrompt = string.Empty;
+            if (_weights != null && _modelParams != null)
+            {
+                var oldContext = _context;
+                _context = null;
+                _executor = null;
+
+                if (oldContext != null)
+                {
+                    try
+                    {
+                        oldContext.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Error disposing old context during ResetContextInternal.");
+                    }
+                }
+
+                try
+                {
+                    _context = _weights.CreateContext(_modelParams);
+                    _executor = new InteractiveExecutor(_context);
+                    _logger?.LogDebug("Clean context recreation completed in ResetContextInternal.");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogError(ex, "Failed to recreate context during ResetContextInternal.");
+                    _context = null;
+                    _executor = null;
+                }
+            }
+            else
+            {
+                var oldContext = _context;
+                _context = null;
+                _executor = null;
+
+                if (oldContext != null)
+                {
+                    SafeOffloadDisposal(oldContext);
+                }
+            }
         }
     }
 
@@ -581,10 +754,13 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     public async Task CancelActiveGenerationAsync()
     {
         CancellationTokenSource? ctsToCancel;
+        Task? taskToAwait;
         lock (_generationCtsLock)
         {
             ctsToCancel = _activeGenerationCts;
             _activeGenerationCts = null;
+            taskToAwait = _activeGenerationTask;
+            _activeGenerationTask = null;
         }
 
         if (ctsToCancel != null)
@@ -596,9 +772,21 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
             }
             catch (ObjectDisposedException) { }
 
-            ctsToCancel.Dispose();
+            try
+            {
+                ctsToCancel.Dispose();
+            }
+            catch (ObjectDisposedException) { }
         }
-        await Task.CompletedTask;
+
+        if (taskToAwait != null)
+        {
+            try
+            {
+                await taskToAwait.ConfigureAwait(false);
+            }
+            catch (Exception) { }
+        }
     }
 
     /// <summary>
@@ -608,10 +796,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     {
         await CancelActiveGenerationAsync();
 
-        await _modelLock.WaitAsync(ct);
+        await _modelLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            SpeculativeEngine.Unload();
+            await SpeculativeEngine.UnloadAsync().ConfigureAwait(false);
             UnloadModelInternal();
         }
         finally
@@ -650,20 +838,79 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
             _executor = null;
         }
 
-        if (_context != null)
-        {
-            _context.Dispose();
-            _context = null;
-        }
+        var ctx = _context;
+        _context = null;
 
-        if (_weights != null)
-        {
-            _weights.Dispose();
-            _weights = null;
-        }
+        var weights = _weights;
+        _weights = null;
 
         CurrentModelPath = null;
-        _logger.LogInformation("Model unloaded and native resources freed.");
+
+        if (ctx != null || weights != null)
+        {
+            SafeOffloadDisposal(ctx, weights);
+        }
+
+        _logger.LogInformation("Model unloaded and native resource disposal offloaded.");
+    }
+
+    /// <summary>
+    /// Saves native KV context state snapshot to disk file.
+    /// </summary>
+    public async Task SaveStateAsync(string filePath)
+    {
+        await _modelLock.WaitAsync();
+        try
+        {
+            if (_context != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
+            {
+                _context.SaveState(filePath);
+                _logger?.LogInformation("Successfully saved native KV state snapshot to {FilePath}", filePath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to save native KV state snapshot to {FilePath}", filePath);
+        }
+        finally
+        {
+            _modelLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Loads native KV context state snapshot from disk file.
+    /// </summary>
+    public async Task LoadStateAsync(string filePath)
+    {
+        await _modelLock.WaitAsync();
+        try
+        {
+            if (_context != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid && System.IO.File.Exists(filePath))
+            {
+                _context.LoadState(filePath);
+                _logger?.LogInformation("Successfully restored native KV state snapshot from {FilePath}", filePath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to restore native KV state snapshot from {FilePath}", filePath);
+        }
+        finally
+        {
+            _modelLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Disposes the inference engine asynchronously and releases all native resources.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        await UnloadModelAsync().ConfigureAwait(false);
+        await SpeculativeEngine.DisposeAsync().ConfigureAwait(false);
+        _modelLock.Dispose();
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>
@@ -672,6 +919,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable
     public void Dispose()
     {
         UnloadModel();
+        SpeculativeEngine.Dispose();
         _modelLock.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    private static string SanitizeThinkingTags(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        var clean = System.Text.RegularExpressions.Regex.Replace(text, @"<think>.*?(?:</think>|$)", "", System.Text.RegularExpressions.RegexOptions.Singleline | System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+        clean = System.Text.RegularExpressions.Regex.Replace(clean, @"</?think>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+        return string.IsNullOrWhiteSpace(clean) ? text : clean;
     }
 }

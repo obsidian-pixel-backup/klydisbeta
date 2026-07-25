@@ -17,7 +17,7 @@ namespace Klydis.Core.Inference;
 /// Manages speculative draft token generation, zero-VRAM N-gram lookup fallback,
 /// batched target model verification, dynamic candidate scheduling, and KV cache sequence rewinding.
 /// </summary>
-public sealed class SpeculativeEngine : IDisposable
+public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
 {
     private readonly ILogger<SpeculativeEngine>? _logger;
     private LLamaWeights? _draftWeights;
@@ -26,6 +26,10 @@ public sealed class SpeculativeEngine : IDisposable
     private InteractiveExecutor? _draftExecutor;
     private readonly SemaphoreSlim _draftLock = new(1, 1);
     private readonly NGramLookupEngine _ngramEngine = new();
+
+    private int _activeDraftCount = 0;
+    private readonly object _draftStateLock = new();
+    private TaskCompletionSource<bool>? _draftZeroActiveTcs;
 
     public bool IsLoaded => _draftWeights != null && _draftContext != null;
     public string? LoadedDraftPath { get; private set; }
@@ -66,9 +70,36 @@ public sealed class SpeculativeEngine : IDisposable
     /// </summary>
     public bool ForceAcceptDraftTokens { get; set; } = false;
 
-    public SpeculativeEngine(ILogger<SpeculativeEngine>? logger = null)
+    /// <summary>
+    /// Gets or sets the native resource disposer for offloading VRAM/handle cleanup off the UI thread.
+    /// </summary>
+    public INativeResourceDisposer? NativeResourceDisposer { get; set; }
+
+    public SpeculativeEngine(ILogger<SpeculativeEngine>? logger = null, INativeResourceDisposer? nativeResourceDisposer = null)
     {
         _logger = logger;
+        NativeResourceDisposer = nativeResourceDisposer;
+    }
+
+    private void SafeOffloadDisposal(params IDisposable?[] resources)
+    {
+        var disposer = NativeResourceDisposer;
+        if (disposer != null)
+        {
+            disposer.EnqueueForDisposal(resources);
+        }
+        else
+        {
+            Task.Run(() =>
+            {
+                var ordered = resources.Where(r => r != null)
+                                       .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
+                foreach (var r in ordered)
+                {
+                    try { r?.Dispose(); } catch { }
+                }
+            });
+        }
     }
 
     public Task LoadDraftModelAsync(string draftPath, Hardware.OffloadPlan offloadPlan)
@@ -113,6 +144,19 @@ public sealed class SpeculativeEngine : IDisposable
         });
     }
 
+    public async Task UnloadAsync()
+    {
+        await _draftLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await UnloadInternalAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _draftLock.Release();
+        }
+    }
+
     public void Unload()
     {
         _draftLock.Wait();
@@ -126,23 +170,89 @@ public sealed class SpeculativeEngine : IDisposable
         }
     }
 
+    private async Task UnloadInternalAsync()
+    {
+        try
+        {
+            Task? waitTask = null;
+            lock (_draftStateLock)
+            {
+                if (_activeDraftCount > 0)
+                {
+                    _draftZeroActiveTcs ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    waitTask = _draftZeroActiveTcs.Task;
+                }
+            }
+
+            if (waitTask != null)
+            {
+                await waitTask.ConfigureAwait(false);
+            }
+
+            LLamaContext? draftCtx = null;
+            LLamaWeights? draftWeights = null;
+
+            lock (_draftStateLock)
+            {
+                _draftExecutor = null;
+                draftCtx = _draftContext;
+                _draftContext = null;
+                draftWeights = _draftWeights;
+                _draftWeights = null;
+                _draftModelParams = null;
+                LoadedDraftPath = null;
+                _draftZeroActiveTcs = null;
+            }
+
+            if (draftCtx != null || draftWeights != null)
+            {
+                SafeOffloadDisposal(draftCtx, draftWeights);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Error unloading draft model.");
+        }
+    }
+
     private void UnloadInternal()
     {
         try
         {
-            _draftExecutor = null;
-            if (_draftContext != null)
+            Task? waitTask = null;
+            lock (_draftStateLock)
             {
-                _draftContext.Dispose();
+                if (_activeDraftCount > 0)
+                {
+                    _draftZeroActiveTcs ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    waitTask = _draftZeroActiveTcs.Task;
+                }
+            }
+
+            if (waitTask != null)
+            {
+                waitTask.Wait();
+            }
+
+            LLamaContext? draftCtx = null;
+            LLamaWeights? draftWeights = null;
+
+            lock (_draftStateLock)
+            {
+                _draftExecutor = null;
+                draftCtx = _draftContext;
                 _draftContext = null;
-            }
-            if (_draftWeights != null)
-            {
-                _draftWeights.Dispose();
+                draftWeights = _draftWeights;
                 _draftWeights = null;
+                _draftModelParams = null;
+                LoadedDraftPath = null;
+                _draftZeroActiveTcs = null;
             }
-            _draftModelParams = null;
-            LoadedDraftPath = null;
+
+            if (draftCtx != null || draftWeights != null)
+            {
+                SafeOffloadDisposal(draftCtx, draftWeights);
+            }
         }
         catch (Exception ex)
         {
@@ -586,9 +696,17 @@ public sealed class SpeculativeEngine : IDisposable
         }
     }
 
+    public async ValueTask DisposeAsync()
+    {
+        await UnloadAsync().ConfigureAwait(false);
+        _draftLock.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
     public void Dispose()
     {
         Unload();
         _draftLock.Dispose();
+        GC.SuppressFinalize(this);
     }
 }

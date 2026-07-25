@@ -61,11 +61,11 @@ public class PromptTemplateEngine
                         ChatRole.System => "system",
                         ChatRole.User => "user",
                         ChatRole.Assistant => "assistant",
-                        ChatRole.Tool => "tool",
+                        ChatRole.Tool => "user",
                         _ => "user"
                     };
-                    string content = msg.Role == ChatRole.Tool && !string.IsNullOrEmpty(msg.Name) 
-                        ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" 
+                    string content = msg.Role == ChatRole.Tool 
+                        ? (string.IsNullOrEmpty(msg.Name) ? $"<tool_response>\n{msg.Content}\n</tool_response>" : $"<tool_response>\n[Tool Result for '{msg.Name}']:\n{msg.Content}\n</tool_response>")
                         : msg.Content;
                     sb.Append($"<|im_start|>{roleStr}\n{content}<|im_end|>\n");
                 }
@@ -81,7 +81,7 @@ public class PromptTemplateEngine
                         ChatRole.System => "system",
                         ChatRole.User => "user",
                         ChatRole.Assistant => "assistant",
-                        ChatRole.Tool => "tool",
+                        ChatRole.Tool => "ipython",
                         _ => "user"
                     };
                     string content = msg.Role == ChatRole.Tool && !string.IsNullOrEmpty(msg.Name) 
@@ -138,8 +138,8 @@ public class PromptTemplateEngine
                         ChatRole.Tool => "user",
                         _ => "user"
                     };
-                    string content = msg.Role == ChatRole.Tool && !string.IsNullOrEmpty(msg.Name) 
-                        ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" 
+                    string content = msg.Role == ChatRole.Tool 
+                        ? (!string.IsNullOrEmpty(msg.Name) ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" : $"[Tool Result]:\n{msg.Content}")
                         : msg.Content;
                     sb.Append($"<start_of_turn>{roleStr}\n{content}<end_of_turn>\n");
                 }
@@ -154,11 +154,11 @@ public class PromptTemplateEngine
                         ChatRole.System => "system",
                         ChatRole.User => "user",
                         ChatRole.Assistant => "assistant",
-                        ChatRole.Tool => "tool",
+                        ChatRole.Tool => "user",
                         _ => "user"
                     };
-                    string content = msg.Role == ChatRole.Tool && !string.IsNullOrEmpty(msg.Name) 
-                        ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" 
+                    string content = msg.Role == ChatRole.Tool 
+                        ? (!string.IsNullOrEmpty(msg.Name) ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" : $"[Tool Result]:\n{msg.Content}")
                         : msg.Content;
                     sb.Append($"<|{roleStr}|>\n{content}<|end|>\n");
                 }
@@ -169,7 +169,12 @@ public class PromptTemplateEngine
             default:
                 foreach (var msg in messages)
                 {
-                    sb.Append($"{msg.Role}: {msg.Content}\n");
+                    string prefix = msg.Role switch
+                    {
+                        ChatRole.Tool => !string.IsNullOrEmpty(msg.Name) ? $"Tool ({msg.Name})" : "Tool",
+                        _ => msg.Role.ToString()
+                    };
+                    sb.Append($"{prefix}: {msg.Content}\n");
                 }
                 sb.Append("Assistant: ");
                 break;

@@ -58,14 +58,14 @@ public static class GgufMetadataReader
                 // Version 1 uses uint32 for tensor and KV counts
                 ulong tensorCountV1 = reader.ReadUInt32();
                 ulong kvCountV1 = reader.ReadUInt32();
-                return ParseKvs(reader, kvCountV1);
+                return ParseKvs(reader, kvCountV1, filePath);
             }
             else
             {
                 // Version 2 and 3 use uint64
                 ulong tensorCount = reader.ReadUInt64();
                 ulong kvCount = reader.ReadUInt64();
-                return ParseKvs(reader, kvCount);
+                return ParseKvs(reader, kvCount, filePath);
             }
         }
         catch
@@ -74,7 +74,7 @@ public static class GgufMetadataReader
         }
     }
 
-    private static GgufMetadata ParseKvs(BinaryReader reader, ulong kvCount)
+    private static GgufMetadata ParseKvs(BinaryReader reader, ulong kvCount, string? filePath = null)
     {
         var rawKvs = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
@@ -96,10 +96,25 @@ public static class GgufMetadataReader
         string? architecture = rawKvs.TryGetValue("general.architecture", out var archVal) && archVal is string archStr ? archStr : null;
 
         string? quantizationType = null;
-        if (rawKvs.TryGetValue("general.quantization_version", out var qvVal) && qvVal is IConvertible qv)
-            quantizationType = $"v{Convert.ToUInt32(qv)}";
-        else if (rawKvs.TryGetValue("general.file_type", out var ftVal) && ftVal is IConvertible ft)
+        if (rawKvs.TryGetValue("general.file_type", out var ftVal) && ftVal is IConvertible ft)
+        {
             quantizationType = GetFileTypeString(Convert.ToUInt32(ft));
+        }
+
+        if (string.IsNullOrEmpty(quantizationType) || quantizationType.StartsWith("Type_", StringComparison.OrdinalIgnoreCase))
+        {
+            string fileName = !string.IsNullOrEmpty(filePath) ? Path.GetFileName(filePath) : string.Empty;
+            string detected = ExtractQuantFromFileName(fileName);
+            if (!string.IsNullOrEmpty(detected))
+            {
+                quantizationType = detected;
+            }
+        }
+
+        if (string.IsNullOrEmpty(quantizationType) && rawKvs.TryGetValue("general.quantization_version", out var qvVal) && qvVal is IConvertible qv)
+        {
+            quantizationType = $"v{Convert.ToUInt32(qv)}";
+        }
 
         long? blockCount = GetLongValue(rawKvs, architecture, "block_count");
         long? contextLength = GetLongValue(rawKvs, architecture, "context_length");
@@ -223,16 +238,55 @@ public static class GgufMetadataReader
             1 => "F16",
             2 => "Q4_0",
             3 => "Q4_1",
+            7 => "Q8_0",
             8 => "Q5_0",
             9 => "Q5_1",
             10 => "Q2_K",
+            11 => "Q3_K_S",
             12 => "Q3_K_M",
-            14 => "Q4_K_M",
-            15 => "Q4_K_S",
-            16 => "Q5_K_M",
-            17 => "Q6_K",
-            18 => "Q8_0",
+            13 => "Q3_K_L",
+            14 => "Q4_K_S",
+            15 => "Q4_K_M",
+            16 => "Q5_K_S",
+            17 => "Q5_K_M",
+            18 => "Q6_K",
+            19 => "IQ2_XXS",
+            20 => "IQ2_XS",
+            21 => "Q2_K_S",
+            22 => "IQ3_XS",
+            23 => "IQ3_S",
+            24 => "IQ2_S",
+            25 => "IQ2_M",
+            26 => "IQ1_S",
+            27 => "IQ1_M",
+            28 => "IQ4_NL",
+            29 => "IQ4_XS",
+            30 => "IQ3_M",
             _ => $"Type_{fileType}"
         };
+    }
+
+    private static string ExtractQuantFromFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return string.Empty;
+
+        var knownQuants = new[]
+        {
+            "Q4_K_M", "Q4_K_S", "Q4_0", "Q4_1",
+            "Q8_0", "Q5_K_M", "Q5_K_S", "Q5_0", "Q5_1",
+            "Q6_K", "Q2_K", "Q3_K_M", "Q3_K_S", "Q3_K_L",
+            "IQ4_NL", "IQ4_XS", "IQ3_S", "IQ3_M", "IQ2_XXS", "IQ2_XS",
+            "F16", "F32"
+        };
+
+        foreach (var quant in knownQuants)
+        {
+            if (fileName.Contains(quant, StringComparison.OrdinalIgnoreCase))
+            {
+                return quant;
+            }
+        }
+
+        return string.Empty;
     }
 }

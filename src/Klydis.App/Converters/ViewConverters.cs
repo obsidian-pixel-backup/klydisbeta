@@ -9,9 +9,12 @@ public class RoleToVisibilityConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        var role = value?.ToString();
+        string? role = value is ViewModels.ChatMessageViewModel msg ? msg.Role : value?.ToString();
         var targetRole = parameter?.ToString();
-        return string.Equals(role, targetRole, StringComparison.OrdinalIgnoreCase) ? Visibility.Visible : Visibility.Collapsed;
+
+        return string.Equals(role, targetRole, StringComparison.OrdinalIgnoreCase)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
 }

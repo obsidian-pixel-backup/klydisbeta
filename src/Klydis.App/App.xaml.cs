@@ -69,6 +69,9 @@ public partial class App : Application
 
             var messageStore = ServiceProvider.GetRequiredService<Klydis.Core.Memory.MessageStore>();
             await messageStore.InitializeAsync();
+
+            var skillLibraryManager = ServiceProvider.GetRequiredService<Klydis.Core.Skills.SkillLibraryManager>();
+            await skillLibraryManager.InitializeAsync();
         }
         catch (Exception ex)
         {
@@ -102,21 +105,25 @@ public partial class App : Application
         });
 
         // Core Services
+        services.AddSingleton<INativeResourceDisposer, NativeResourceDisposer>();
         services.AddSingleton<SpeculativeDecodingService>();
         services.AddSingleton<InferenceEngine>(sp =>
         {
             var logger = sp.GetRequiredService<ILogger<InferenceEngine>>();
-            var engine = new InferenceEngine(logger);
+            var disposer = sp.GetRequiredService<INativeResourceDisposer>();
+            var engine = new InferenceEngine(logger, disposer);
             engine.SpeculativeDecodingService = sp.GetRequiredService<SpeculativeDecodingService>();
             return engine;
         });
         services.AddSingleton<Klydis.Core.Chat.IInferenceEngine>(sp => sp.GetRequiredService<InferenceEngine>());
         services.AddSingleton<ModelRegistry>();
         services.AddSingleton<ModelDiscoveryService>();
+        services.AddSingleton<ModelQuantizerService>();
         services.AddSingleton<System.Net.Http.HttpClient>();
         services.AddSingleton<HuggingFaceClient>();
         services.AddSingleton<MessageStore>();
         services.AddSingleton<ContextOrchestrator>();
+        services.AddSingleton<ModelMessageQueue>();
         services.AddSingleton<ChatEngine>();
         services.AddSingleton<ToolExecutor>();
         services.AddSingleton<PromptTemplateEngine>();
@@ -124,12 +131,15 @@ public partial class App : Application
         services.AddSingleton<GpuProfiler>();
         services.AddSingleton<SystemProfiler>();
         services.AddSingleton<OffloadStrategy>();
+        services.AddSingleton<Klydis.Core.Skills.SkillLibraryManager>();
+        services.AddSingleton<Klydis.Core.Skills.DynamicSkillSelector>();
         services.AddSingleton<ThemeService>();
 
         // ViewModels
         services.AddTransient<MainViewModel>();
         services.AddTransient<ChatViewModel>();
         services.AddTransient<ModelLibraryViewModel>();
+        services.AddTransient<SkillLibraryViewModel>();
         services.AddTransient<SystemMonitorViewModel>();
         services.AddTransient<SettingsViewModel>();
         
@@ -137,9 +147,13 @@ public partial class App : Application
         services.AddTransient<MainWindow>();
     }
 
-    protected override void OnExit(ExitEventArgs e)
+    protected override async void OnExit(ExitEventArgs e)
     {
-        if (ServiceProvider is IDisposable disposable)
+        if (ServiceProvider is IAsyncDisposable asyncDisposable)
+        {
+            await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+        }
+        else if (ServiceProvider is IDisposable disposable)
         {
             disposable.Dispose();
         }

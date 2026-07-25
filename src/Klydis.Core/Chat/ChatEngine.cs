@@ -104,11 +104,32 @@ public interface IInferenceEngine
     IAsyncEnumerable<string> GenerateAsync(string prompt, LLama.Common.InferenceParams inferenceParams, bool triggerEvents = true, bool isIsolated = false, CancellationToken ct = default);
     
     /// <summary>
+    /// Gets or sets target KV cache quantization precision.
+    /// </summary>
+    KvCacheQuantizationType TargetKvQuantization { get; set; }
+
+    /// <summary>
+    /// Gets current KV cache memory estimate and architecture metrics.
+    /// </summary>
+    KvCacheMemoryEstimate? CurrentKvCacheEstimate { get; }
+
+    /// <summary>
+    /// Saves native KV context state to disk snapshot file.
+    /// </summary>
+    Task SaveStateAsync(string filePath);
+
+    /// <summary>
+    /// Loads native KV context state from disk snapshot file.
+    /// </summary>
+    Task LoadStateAsync(string filePath);
+
+    /// <summary>
     /// Streams tokens for a given prompt.
     /// </summary>
     IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, CancellationToken ct);
     Task<string> GenerateTextAsync(string prompt, CancellationToken ct = default);
     Task<string> GenerateTextAsync(string prompt, bool isIsolated, CancellationToken ct = default);
+    Task<string> GenerateTextAsync(string prompt, bool isIsolated, int maxTokens, CancellationToken ct = default);
     void ResetContext();
     int GetTokenCount(string text);
     Task CancelActiveGenerationAsync();
@@ -125,14 +146,32 @@ public class ChatEngine(
     ToolExecutor toolExecutor,
     Klydis.Core.Memory.MessageStore messageStore,
     Klydis.Core.Memory.ContextOrchestrator contextOrchestrator,
-    ILogger<ChatEngine> logger)
+    ILogger<ChatEngine> logger,
+    ModelMessageQueue? messageQueue = null)
 {
     private readonly List<ChatMessage> _history = new();
     private readonly List<(string ToolName, string ArgsHash)> _recentTools = new();
+    private const int RollingCompressionThreshold = 30000;
 
-    public Guid CurrentSessionId { get; private set; } = Guid.NewGuid();
+    public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
+    public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
     public bool IsGenerating { get; private set; }
     public double TokensPerSecond { get; private set; }
+    public IReadOnlyList<ChatMessage> History => _history.AsReadOnly();
+
+    /// <summary>
+    /// Gets or sets target KV cache quantization precision on the underlying inference engine.
+    /// </summary>
+    public KvCacheQuantizationType TargetKvQuantization
+    {
+        get => inferenceEngine.TargetKvQuantization;
+        set => inferenceEngine.TargetKvQuantization = value;
+    }
+
+    /// <summary>
+    /// Gets the current KV cache memory estimate from the underlying inference engine.
+    /// </summary>
+    public KvCacheMemoryEstimate? CurrentKvCacheEstimate => inferenceEngine.CurrentKvCacheEstimate;
 
     /// <summary>
     /// Clears the chat history to start a new session.
@@ -141,37 +180,46 @@ public class ChatEngine(
     {
         _history.Clear();
         _recentTools.Clear();
-        CurrentSessionId = Guid.NewGuid();
+        CurrentSessionId = Guid.NewGuid().ToString();
     }
 
     /// <summary>
     /// Loads conversation history and sets the active session.
     /// </summary>
-    public void LoadHistory(IEnumerable<ChatMessage> history, Guid sessionId)
+    public void LoadHistory(IEnumerable<ChatMessage> history, string sessionId)
     {
         _history.Clear();
         _history.AddRange(history);
         _recentTools.Clear();
-        CurrentSessionId = sessionId;
+        CurrentSessionId = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString() : sessionId;
+    }
+
+    /// <summary>
+    /// Cancels any active generation in the underlying inference engine.
+    /// </summary>
+    public async Task CancelActiveGenerationAsync()
+    {
+        await inferenceEngine.CancelActiveGenerationAsync();
     }
 
     /// <summary>
     /// Streams a response for the user message, handling tool calls automatically.
     /// </summary>
+    /// <summary>
+    /// Streams a response for the user message, handling tool calls automatically.
+    /// </summary>
     public async IAsyncEnumerable<ChatStreamEvent> StreamResponseAsync(
         string userMessage, 
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        string? skillContext = null)
     {
-        if (IsGenerating)
-            throw new InvalidOperationException("Already generating a response.");
-
         IsGenerating = true;
         _recentTools.Clear();
         
         _history.Add(new ChatMessage(ChatRole.User, userMessage));
         await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.User, userMessage, 0, null);
         
-        var enumerator = StreamResponseInternalAsync(ct).GetAsyncEnumerator(ct);
+        var enumerator = StreamResponseInternalAsync(ct, skillContext).GetAsyncEnumerator(ct);
         try
         {
             while (true)
@@ -215,7 +263,8 @@ public class ChatEngine(
     }
 
     private async IAsyncEnumerable<ChatStreamEvent> StreamResponseInternalAsync(
-        [EnumeratorCancellation] CancellationToken ct)
+        [EnumeratorCancellation] CancellationToken ct,
+        string? skillContext = null)
     {
         var templateType = promptEngine.DetectTemplate(inferenceEngine.Architecture);
         var nativeStopTokens = promptEngine.GetStopTokens(templateType);
@@ -231,12 +280,35 @@ public class ChatEngine(
         {
             iterationCount++;
             
-        var session = await messageStore.GetSessionAsync(CurrentSessionId.ToString());
+            // Execute automated rolling compression if history tokens reach or exceed 30,000 tokens
+            int estimatedHistoryTokens = _history.Sum(m => (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(m.Content) : contextOrchestrator.EstimateTokens(m.Content)) + 25);
+            if (estimatedHistoryTokens >= RollingCompressionThreshold)
+            {
+                logger.LogInformation("Active history tokens ({Tokens}) reached rolling threshold ({Threshold}). Compressing older context into WorldState.", estimatedHistoryTokens, RollingCompressionThreshold);
+                await contextOrchestrator.PerformRollingCompressionAsync(_history, CurrentSessionId.ToString(), RollingCompressionThreshold);
+            }
+
+            var session = await messageStore.GetSessionAsync(CurrentSessionId.ToString());
         var worldStateHeader = (session != null && !string.IsNullOrWhiteSpace(session.WorldState))
             ? $"\n\nLong-term Memory / World State (summarized older context):\n{session.WorldState}"
             : "";
 
-        var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nIMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING:\n1. If you need to think or plan, use <think>...</think> tags FIRST.\n2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.\n3. To use a tool, output a JSON block exactly like this: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>\n4. You can provide normal text context before or after tool calls, but keep it outside of think tags.\n5. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.\n6. DO NOT repeat the exact same tool call if it just failed or returned an error. If a tool call fails, try alternative tools or different arguments to achieve the results instead of repeating the same call. Adjust your approach or ask the user for help.{worldStateHeader}";
+        if (MessageQueue != null && toolExecutor.MessageQueue == null)
+        {
+            toolExecutor.MessageQueue = MessageQueue;
+        }
+
+        var pendingSteer = MessageQueue?.GetPendingSteer(CurrentSessionId.ToString());
+        var queueNotice = (pendingSteer != null && pendingSteer.Count > 0)
+            ? "\n\n[PENDING QUEUED STEERING MESSAGES AVAILABLE]\n" +
+              "You have pending queued message(s) from the user with Mode='Steer':\n" +
+              string.Join("\n", pendingSteer.Select(m => $"- Queue ID: {m.Id} | Content: \"{m.Content}\"")) +
+              "\nWhen you reach the optimal time during your reasoning or execution task to incorporate a queued message, call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to retrieve and steer using that message."
+            : "";
+
+        var skillHeader = !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
+
+        var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\nIMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING:\n1. If you need to think or plan, use <think>...</think> tags FIRST.\n2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.\n3. To use a tool, output a JSON block exactly like this: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>\n4. CRITICAL: Whenever the user asks you to perform an action, test tools, inspect system/files, execute commands, or manage skills, YOU MUST CALL THE TOOL IMMEDIATELY using the <tool_call> tag. Do not just state that you will run a tool—OUTPUT THE <tool_call> TAG DIRECTLY.\n5. SKILL BRAIN & LEARNING: You are connected to a Skills Library Brain. You can use 'list_skills' or 'search_skills' to discover skills, 'get_skill_details' or 'activate_skill' to inspect/activate specialized domain instructions, and 'learn_skill' to create and save new custom skills to your library brain when learning new workflows or user directives.\n6. Examples of tool calls:\n   - Call tool with no arguments: <tool_call>{{\"name\": \"get_system_info\", \"arguments\": {{}}}}</tool_call>\n   - Search skills: <tool_call>{{\"name\": \"search_skills\", \"arguments\": {{\"query\": \"wpf\"}}}}</tool_call>\n   - Learn skill: <tool_call>{{\"name\": \"learn_skill\", \"arguments\": {{\"name\": \"Skill Name\", \"description\": \"...\", \"category\": \"...\", \"prompt_instruction\": \"...\"}}}}</tool_call>\n7. You can provide normal text before or after tool calls outside of think tags.\n8. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.\n9. DO NOT repeat the exact same tool call if it just failed or returned an error. If a tool call fails, try alternative tools or different arguments to achieve the results instead of repeating the same call. Adjust your approach or ask the user for help.{worldStateHeader}{queueNotice}{skillHeader}";
         
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
         
@@ -244,20 +316,33 @@ public class ChatEngine(
         var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType);
         int sysPromptTokens = inferenceEngine.GetTokenCount(sysOnlyPrompt);
 
-        // Dynamic sliding context window calculation reserving response headroom
+        // Dynamic sliding context window calculation reserving response headroom and safety margin
         int maxBudget = (int)inferenceEngine.ContextSize;
-        int reservedForResponse = maxBudget <= 4096 ? 2048 : Math.Min(Math.Max(maxBudget / 2, 4096), 8192);
-        int targetBudget = Math.Max(maxBudget - reservedForResponse, 1024);
+        int reservedForResponse = maxBudget switch
+        {
+            <= 4096 => 1536,
+            <= 16384 => Math.Min(maxBudget / 3, 4096),
+            <= 65536 => Math.Min(maxBudget / 4, 8192),
+            _ => Math.Min(maxBudget / 4, 16384)
+        };
+        int safetyMargin = 64;
+        int targetBudget = Math.Max(maxBudget - reservedForResponse - safetyMargin, 512);
 
         var activeMessages = new List<ChatMessage>();
         int currentTokens = sysPromptTokens;
         bool hasDroppedMessages = false;
 
-        // Iterate backwards from the most recent history message
-        for (int i = _history.Count - 1; i >= 0; i--)
+        ChatMessage? initialUserMsg = _history.Count > 0 ? _history[0] : null;
+        int initialUserTokens = initialUserMsg != null ? (inferenceEngine.GetTokenCount(initialUserMsg.Content) + 25) : 0;
+        
+        // Reserve budget up front for the user's initial prompt goal (_history[0])
+        currentTokens += initialUserTokens;
+
+        // Iterate backwards from the most recent history message down to index 1 (skipping initial goal)
+        for (int i = _history.Count - 1; i >= 1; i--)
         {
             var msg = _history[i];
-            int msgTokens = inferenceEngine.GetTokenCount(msg.Content) + 20; // 20 tokens for formatting overhead
+            int msgTokens = inferenceEngine.GetTokenCount(msg.Content) + 25; // 25 tokens for template formatting overhead
             if (currentTokens + msgTokens <= targetBudget)
             {
                 activeMessages.Insert(0, msg);
@@ -266,8 +351,14 @@ public class ChatEngine(
             else
             {
                 hasDroppedMessages = true;
-                logger.LogInformation("Context limit reached. Dropping older message from active prompt.");
+                logger.LogInformation("Context limit reached. Dropping intermediate message from active prompt.");
             }
+        }
+
+        // Always preserve the user's initial prompt goal (_history[0]) at index 0 of active messages
+        if (initialUserMsg != null)
+        {
+            activeMessages.Insert(0, initialUserMsg);
         }
 
         if (hasDroppedMessages)
@@ -290,6 +381,19 @@ public class ChatEngine(
         messages.AddRange(activeMessages);
 
         var prompt = promptEngine.ApplyTemplate(messages, templateType);
+        int finalPromptTokens = inferenceEngine.GetTokenCount(prompt);
+
+        // Safety truncation loop: If template tokens exceed targetBudget, prune intermediate active messages (preserving history[0])
+        while (finalPromptTokens > targetBudget && activeMessages.Count > 1)
+        {
+            // Remove message at index 1 (after initial user prompt) to protect _history[0]
+            activeMessages.RemoveAt(1);
+            hasDroppedMessages = true;
+            messages = new List<ChatMessage> { sysPromptMsg };
+            messages.AddRange(activeMessages);
+            prompt = promptEngine.ApplyTemplate(messages, templateType);
+            finalPromptTokens = inferenceEngine.GetTokenCount(prompt);
+        }
 
         var fullResponseBuilder = new StringBuilder();
         bool isThinking = false;
@@ -401,22 +505,27 @@ public class ChatEngine(
                                        new[] { "<think>", "<tool_call>", "<|tool_call|>" };
                                        
                 bool endsWithPartial = false;
-                int safeLen = unyieldedText.Length;
+                int maxPartialLen = 0;
                 
                 foreach (var tag in tagsToCheck)
                 {
                     for (int len = 1; len < tag.Length; len++)
                     {
-                        if (unyieldedText.EndsWith(tag.Substring(0, len), StringComparison.Ordinal))
+                        var prefix = tag.Substring(0, len);
+                        if (unyieldedText.EndsWith(prefix, StringComparison.Ordinal))
                         {
                             endsWithPartial = true;
-                            safeLen = Math.Min(safeLen, unyieldedText.Length - len);
+                            if (len > maxPartialLen)
+                            {
+                                maxPartialLen = len;
+                            }
                         }
                     }
                 }
                 
-                if (endsWithPartial)
+                if (endsWithPartial && maxPartialLen > 0)
                 {
+                    int safeLen = unyieldedText.Length - maxPartialLen;
                     string safePart = unyieldedText.Substring(0, safeLen);
                     if (!string.IsNullOrEmpty(safePart))
                     {
@@ -436,9 +545,14 @@ public class ChatEngine(
         }
 
         // Yield any leftover unyielded text at the end of streaming
-        if (!string.IsNullOrEmpty(unyieldedText) && !isToolCall)
+        if (!string.IsNullOrEmpty(unyieldedText))
         {
-            if (isThinking)
+            if (isToolCall)
+            {
+                // Stream ended inside a tool call block; suppress yielding raw JSON as plain text to UI
+                unyieldedText = string.Empty;
+            }
+            else if (isThinking)
             {
                 yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, unyieldedText);
             }
@@ -446,11 +560,25 @@ public class ChatEngine(
             {
                 yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
             }
+            unyieldedText = string.Empty;
         }
 
             var fullResponse = fullResponseBuilder.ToString();
-            _history.Add(new ChatMessage(ChatRole.Assistant, fullResponse));
-            await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Assistant, fullResponse, 0, null);
+
+            // Strip raw thinking tags so history stored in context does not poison future turns
+            var cleanHistoryResponse = Regex.Replace(fullResponse, @"<think>.*?(?:</think>|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"</?think>", "", RegexOptions.IgnoreCase).Trim();
+            if (string.IsNullOrWhiteSpace(cleanHistoryResponse))
+            {
+                cleanHistoryResponse = Regex.Replace(fullResponse, @"</?think>", "", RegexOptions.IgnoreCase).Trim();
+            }
+            if (string.IsNullOrWhiteSpace(cleanHistoryResponse))
+            {
+                cleanHistoryResponse = fullResponse;
+            }
+
+            _history.Add(new ChatMessage(ChatRole.Assistant, cleanHistoryResponse));
+            await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Assistant, cleanHistoryResponse, 0, null);
 
             // Parse for tool calls
             var toolCallRequests = ParseToolCalls(fullResponse);
@@ -459,15 +587,18 @@ public class ChatEngine(
             {
                 foreach (var req in toolCallRequests)
                 {
-                    var argsHash = JsonSerializer.Serialize(req.Arguments);
+                    var argsHash = GetCanonicalArgsHash(req.Arguments);
                     
-                    // Psycho loop detection
+                    // Psycho loop detection with canonical argument hashing
                     var recentMatches = _recentTools.Count(x => x.ToolName == req.Name && x.ArgsHash == argsHash);
                     if (recentMatches >= 3)
                     {
-                        logger.LogWarning("Psycho loop detected for tool {ToolName}. Halting.", req.Name);
-                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "Psycho loop detected. Aborting tool execution.");
-                        yield break;
+                        logger.LogWarning("Psycho loop detected for tool {ToolName}. Halting duplicate call execution.", req.Name);
+                        var warningText = $"[System Warning: Tool '{req.Name}' with identical arguments was executed {recentMatches} times. Repeated execution aborted. Use prior results to proceed.]";
+                        _history.Add(new ChatMessage(ChatRole.Tool, warningText, req.Name));
+                        await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, warningText, 0, null);
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, warningText);
+                        break;
                     }
 
                     _recentTools.Add((req.Name, argsHash));
@@ -483,10 +614,32 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolResult, toolOutput, new Dictionary<string, object> { ["Success"] = result.Success });
                 }
             }
+            else if (Regex.IsMatch(fullResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
+            {
+                // Assistant attempted a tool call tag but parsing produced 0 valid requests.
+                // Do not exit loop prematurely; provide feedback so the model can self-correct on the next iteration.
+                logger.LogWarning("Assistant emitted <tool_call> tag but JSON parsing failed.");
+                var parseErrorMsg = "[Tool Error: Failed to parse <tool_call> JSON. Please ensure arguments are valid JSON with 'name' and 'arguments'.]";
+                _history.Add(new ChatMessage(ChatRole.Tool, parseErrorMsg));
+                await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, parseErrorMsg, 0, null);
+                yield return new ChatStreamEvent(ChatStreamEventType.Error, parseErrorMsg);
+            }
             else
             {
-                // No tool calls, we're done
-                break;
+                // Check if generation ended prematurely mid-response (truncated before completing output)
+                bool isTruncatedMidGeneration = IsTruncatedMidGeneration(fullResponse);
+                if (isTruncatedMidGeneration && iterationCount < MAX_ITERATIONS)
+                {
+                    logger.LogInformation("Output generation cut off mid-sentence/section. Triggering auto-continuation iteration.");
+                    var continuationInstruction = "[System Instruction: Your previous output was truncated mid-generation due to output token constraints. Continue immediately from the exact point of truncation without repeating any previously written text.]";
+                    _history.Add(new ChatMessage(ChatRole.User, continuationInstruction));
+                    await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.User, continuationInstruction, 0, null);
+                }
+                else
+                {
+                    // No tool calls, no tool call tag attempted, and response is complete
+                    break;
+                }
             }
         }
 
@@ -498,58 +651,241 @@ public class ChatEngine(
         yield return new ChatStreamEvent(ChatStreamEventType.StreamEnd, "");
     }
 
+    private static bool IsTruncatedMidGeneration(string fullResponse)
+    {
+        if (string.IsNullOrWhiteSpace(fullResponse)) return false;
+
+        var trimmed = fullResponse.TrimEnd();
+        if (trimmed.Length == 0) return false;
+
+        // 1. Incomplete/truncated tool call tag (e.g. model started emitting <tool_call... but got cut off before tag closed)
+        if ((trimmed.Contains("<tool_call") && !trimmed.Contains("</tool_call>") && !trimmed.Contains("/>")) ||
+            (trimmed.Contains("<|tool_call") && !trimmed.Contains("</|tool_call|>") && !trimmed.Contains("<|/tool_call|>")))
+        {
+            return true;
+        }
+
+        // 2. Interrupted markdown section header or table divider cut off mid-structure
+        if (trimmed.EndsWith("----------------------------------------") ||
+            trimmed.EndsWith("========================================"))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private string GetCanonicalArgsHash(IDictionary<string, object>? args)
+    {
+        if (args == null || args.Count == 0) return "";
+        var sortedDict = new SortedDictionary<string, string>();
+        foreach (var kvp in args)
+        {
+            var valStr = ToolExecutor.UnwrapJsonElement(kvp.Value)?.ToString() ?? "";
+            sortedDict[kvp.Key] = valStr.Trim();
+        }
+        return JsonSerializer.Serialize(sortedDict);
+    }
+
+    private static string SanitizeJsonControlCharacters(string json)
+    {
+        if (string.IsNullOrEmpty(json)) return json;
+
+        var sb = new StringBuilder(json.Length + 16);
+        bool inString = false;
+        bool isEscaped = false;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (inString)
+            {
+                if (isEscaped)
+                {
+                    sb.Append(c);
+                    isEscaped = false;
+                }
+                else if (c == '\\')
+                {
+                    sb.Append(c);
+                    isEscaped = true;
+                }
+                else if (c == '"')
+                {
+                    sb.Append(c);
+                    inString = false;
+                }
+                else if (c == '\n')
+                {
+                    sb.Append("\\n");
+                }
+                else if (c == '\r')
+                {
+                    sb.Append("\\r");
+                }
+                else if (c == '\t')
+                {
+                    sb.Append("\\t");
+                }
+                else if (c < 0x20)
+                {
+                    sb.Append($"\\u{(int)c:x4}");
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+            else
+            {
+                if (c == '"')
+                {
+                    inString = true;
+                }
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static Dictionary<string, object> UnwrapArgs(Dictionary<string, object> rawArgs)
+    {
+        var result = new Dictionary<string, object>();
+        foreach (var kvp in rawArgs)
+        {
+            var val = ToolExecutor.UnwrapJsonElement(kvp.Value);
+            if (val != null)
+            {
+                result[kvp.Key] = val;
+            }
+        }
+        return result;
+    }
+
     private List<ToolCallRequest> ParseToolCalls(string response)
     {
         var results = new List<ToolCallRequest>();
-        
-        // Native <tool_call> JSON format (supports multiple calls and missing end tag)
-        var matches = Regex.Matches(response, @"<\|?tool_call\|?>\s*(\{.*?\})(?:\s*</\|?tool_call\|?>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        if (string.IsNullOrWhiteSpace(response)) return results;
+
+        var blocksToParse = new List<string>();
+
+        // Native <tool_call> JSON format (supports multiple calls, nested braces, and missing end tag)
+        var matches = Regex.Matches(response, @"<\|?tool_call\|?>(.*?)(?:</\|?tool_call\|?>|<\|/tool_call\|?>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
         foreach (Match match in matches)
+        {
+            var rawContent = match.Groups[1].Value.Trim();
+            if (!string.IsNullOrWhiteSpace(rawContent))
+            {
+                blocksToParse.Add(rawContent);
+            }
+        }
+
+        // Secondary fallback: if no <tool_call> tags found, check for [TOOL_CALLS] [...] format
+        if (blocksToParse.Count == 0)
+        {
+            var toolCallsTagMatch = Regex.Match(response, @"\[TOOL_CALLS\]\s*(\[.*?\]|\{.*?\})", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            if (toolCallsTagMatch.Success)
+            {
+                blocksToParse.Add(toolCallsTagMatch.Groups[1].Value.Trim());
+            }
+        }
+
+        foreach (var rawContent in blocksToParse)
         {
             try
             {
-                var jsonStr = match.Groups[1].Value.Trim();
-                
-                // Cleanup common markdown mistakes
-                if (jsonStr.StartsWith("```json")) jsonStr = jsonStr.Substring(7);
-                else if (jsonStr.StartsWith("```")) jsonStr = jsonStr.Substring(3);
-                if (jsonStr.EndsWith("```")) jsonStr = jsonStr.Substring(0, jsonStr.Length - 3);
-                jsonStr = jsonStr.Trim();
+                // Decode HTML entities (e.g. &quot;, &lt;, &gt;)
+                var content = System.Net.WebUtility.HtmlDecode(rawContent).Trim();
 
-                // If matched to end of string, remove trailing text after last brace
-                int lastBrace = jsonStr.LastIndexOf('}');
-                if (lastBrace >= 0)
+                // Cleanup common markdown mistakes (e.g. ```json ... ```)
+                if (content.StartsWith("```json", StringComparison.OrdinalIgnoreCase)) content = content.Substring(7);
+                else if (content.StartsWith("```", StringComparison.OrdinalIgnoreCase)) content = content.Substring(3);
+                if (content.EndsWith("```", StringComparison.OrdinalIgnoreCase)) content = content.Substring(0, content.Length - 3);
+                content = content.Trim();
+
+                int firstBrace = content.IndexOf('{');
+                int firstBracket = content.IndexOf('[');
+
+                if (firstBracket >= 0 && (firstBrace < 0 || firstBracket < firstBrace))
                 {
-                    jsonStr = jsonStr.Substring(0, lastBrace + 1);
+                    int lastBracket = content.LastIndexOf(']');
+                    if (lastBracket > firstBracket)
+                    {
+                        content = content.Substring(firstBracket, lastBracket - firstBracket + 1);
+                    }
+                    else
+                    {
+                        content = content.Substring(firstBracket) + "]";
+                    }
+                }
+                else if (firstBrace >= 0)
+                {
+                    int lastBrace = content.LastIndexOf('}');
+                    if (lastBrace > firstBrace)
+                    {
+                        content = content.Substring(firstBrace, lastBrace - firstBrace + 1);
+                    }
+                    else
+                    {
+                        content = content.Substring(firstBrace) + "}";
+                    }
                 }
 
-                if (string.IsNullOrWhiteSpace(jsonStr)) continue;
+                if (string.IsNullOrWhiteSpace(content)) continue;
 
-                var doc = JsonDocument.Parse(jsonStr);
-                if (doc.RootElement.TryGetProperty("name", out var nameProp))
+                // Sanitize raw unescaped newlines/tabs inside double-quoted string literals before JSON parsing
+                var sanitizedContent = SanitizeJsonControlCharacters(content);
+
+                int parsedCountBefore = results.Count;
+
+                try
                 {
-                    var name = nameProp.GetString();
-                    Dictionary<string, object>? args = new();
-                    
-                    if (doc.RootElement.TryGetProperty("arguments", out var argsProp))
+                    using var doc = JsonDocument.Parse(sanitizedContent, new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array)
                     {
-                        if (argsProp.ValueKind == JsonValueKind.Object)
+                        foreach (var element in doc.RootElement.EnumerateArray())
                         {
-                            args = JsonSerializer.Deserialize<Dictionary<string, object>>(argsProp.GetRawText());
-                        }
-                        else if (argsProp.ValueKind == JsonValueKind.String)
-                        {
-                            var str = argsProp.GetString();
-                            if (!string.IsNullOrWhiteSpace(str))
-                            {
-                                args = JsonSerializer.Deserialize<Dictionary<string, object>>(str);
-                            }
+                            var req = ProcessToolCallJsonElement(element);
+                            if (req != null) results.Add(req);
                         }
                     }
-
-                    if (name != null && args != null)
+                    else if (doc.RootElement.ValueKind == JsonValueKind.Object)
                     {
-                        results.Add(new ToolCallRequest(name, args));
+                        var req = ProcessToolCallJsonElement(doc.RootElement);
+                        if (req != null) results.Add(req);
+                    }
+                }
+                catch (JsonException jsonEx)
+                {
+                    logger.LogWarning(jsonEx, "JsonDocument parsing failed for <tool_call>; attempting fallback extraction.");
+                }
+
+                // Fallback loose regex extraction for name and arguments if JsonDocument parsing produced 0 new requests
+                if (results.Count == parsedCountBefore)
+                {
+                    var nameMatch = Regex.Match(content, @"""(?:name|function|tool|action)""\s*:\s*""([^""]+)""", RegexOptions.IgnoreCase);
+                    if (nameMatch.Success)
+                    {
+                        var fallbackName = nameMatch.Groups[1].Value;
+                        var fallbackArgs = new Dictionary<string, object>();
+
+                        var argMatches = Regex.Matches(content, @"""([a-zA-Z0-9_]+)""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.IgnoreCase);
+                        foreach (Match m in argMatches)
+                        {
+                            var key = m.Groups[1].Value;
+                            if (key.Equals("name", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("function", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("tool", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("action", StringComparison.OrdinalIgnoreCase) ||
+                                key.Equals("type", StringComparison.OrdinalIgnoreCase)) continue;
+                            var val = m.Groups[2].Value;
+                            fallbackArgs[key] = val;
+                        }
+
+                        if (!string.IsNullOrEmpty(fallbackName))
+                        {
+                            results.Add(new ToolCallRequest(fallbackName, fallbackArgs));
+                        }
                     }
                 }
             }
@@ -558,8 +894,83 @@ public class ChatEngine(
                 logger.LogError(ex, "Failed to parse <tool_call> JSON");
             }
         }
-        
+
         return results;
+    }
+
+    private static ToolCallRequest? ProcessToolCallJsonElement(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return null;
+
+        JsonElement targetElement = element;
+        if (element.TryGetProperty("function", out var funcObj) && funcObj.ValueKind == JsonValueKind.Object)
+        {
+            targetElement = funcObj;
+        }
+
+        string? name = null;
+        if (targetElement.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String) name = nameProp.GetString();
+        else if (targetElement.TryGetProperty("function", out var fnProp) && fnProp.ValueKind == JsonValueKind.String) name = fnProp.GetString();
+        else if (targetElement.TryGetProperty("tool", out var toolProp) && toolProp.ValueKind == JsonValueKind.String) name = toolProp.GetString();
+        else if (targetElement.TryGetProperty("action", out var actionProp) && actionProp.ValueKind == JsonValueKind.String) name = actionProp.GetString();
+
+        if (string.IsNullOrEmpty(name)) return null;
+
+        var args = new Dictionary<string, object>();
+        JsonElement argsProp = default;
+        bool foundArgsProp = false;
+
+        foreach (var propName in new[] { "arguments", "parameters", "args", "params", "action_input" })
+        {
+            if (targetElement.TryGetProperty(propName, out argsProp))
+            {
+                foundArgsProp = true;
+                break;
+            }
+        }
+
+        if (foundArgsProp)
+        {
+            if (argsProp.ValueKind == JsonValueKind.Object)
+            {
+                var rawDict = JsonSerializer.Deserialize<Dictionary<string, object>>(argsProp.GetRawText());
+                if (rawDict != null) args = UnwrapArgs(rawDict);
+            }
+            else if (argsProp.ValueKind == JsonValueKind.String)
+            {
+                var str = argsProp.GetString();
+                if (!string.IsNullOrWhiteSpace(str))
+                {
+                    var sanitizedStr = SanitizeJsonControlCharacters(str);
+                    try
+                    {
+                        var rawDict = JsonSerializer.Deserialize<Dictionary<string, object>>(sanitizedStr);
+                        if (rawDict != null) args = UnwrapArgs(rawDict);
+                    }
+                    catch
+                    {
+                        // Ignore string parse errors
+                    }
+                }
+            }
+        }
+        else
+        {
+            foreach (var prop in targetElement.EnumerateObject())
+            {
+                var pName = prop.Name.ToLowerInvariant();
+                if (pName == "name" || pName == "function" || pName == "tool" || pName == "action" || pName == "type")
+                    continue;
+
+                var val = ToolExecutor.UnwrapJsonElement(prop.Value);
+                if (val != null)
+                {
+                    args[prop.Name] = val;
+                }
+            }
+        }
+
+        return new ToolCallRequest(name, args);
     }
 
     /// <summary>
@@ -569,6 +980,12 @@ public class ChatEngine(
     {
         try
         {
+            if (IsGenerating)
+            {
+                logger.LogInformation("ChatEngine is generating; deriving title from user message to prevent lock contention.");
+                return DeriveTitleFromMessage(userMessage);
+            }
+
             var sysPrompt = "You are an AI that generates a concise 2-4 word title for a conversation based on the user's first message and the assistant's reply. Do not use quotes, punctuation, or thinking tags. Output ONLY the title.";
             var userPrompt = $"User: {userMessage}\nAssistant: {assistantResponse}\n\nTitle:";
 
@@ -588,7 +1005,7 @@ public class ChatEngine(
             generatedText = generatedText.Trim('"', '\'', ' ', '\n', '\r', '.', '*');
             
             if (string.IsNullOrWhiteSpace(generatedText))
-                return "New Chat";
+                return DeriveTitleFromMessage(userMessage);
 
             // Limit to max 50 chars just in case
             if (generatedText.Length > 50)
@@ -599,7 +1016,15 @@ public class ChatEngine(
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to generate title.");
-            return "New Chat";
+            return DeriveTitleFromMessage(userMessage);
         }
+    }
+
+    private static string DeriveTitleFromMessage(string userMessage)
+    {
+        if (string.IsNullOrWhiteSpace(userMessage)) return "New Chat";
+        var words = userMessage.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Take(5);
+        var title = string.Join(" ", words).Trim('"', '\'', ' ', '.', ',', '!', '?');
+        return string.IsNullOrWhiteSpace(title) ? "New Chat" : (title.Length > 50 ? title.Substring(0, 50).Trim() : title);
     }
 }

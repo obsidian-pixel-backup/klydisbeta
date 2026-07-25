@@ -216,7 +216,7 @@
             <Setter Property="Foreground" Value="{DynamicResource AccentPrimaryBrush}"/>
         </Style>
 
-        <!-- One tool invocation: status icon + name + expandable output -->
+        <!-- One tool invocation: status icon + name + command preview + expandable output -->
         <DataTemplate x:Key="ToolCallTemplate" DataType="{x:Type viewmodels:ToolCallViewModel}">
             <Border Background="{DynamicResource ToolBubbleBackgroundBrush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
@@ -238,6 +238,19 @@
                             </Grid>
                             <TextBlock Text="{Binding Name}" FontFamily="Consolas" FontSize="12.5" FontWeight="SemiBold"
                                        Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding CommandText, StringFormat=' › {0}'}" FontFamily="Consolas" FontSize="11.5"
+                                       Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="6,0,0,0"
+                                       TextTrimming="CharacterEllipsis" MaxWidth="380">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding CommandText}" Value="">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
                             <TextBlock Margin="10,0,0,0" FontSize="11.5" VerticalAlignment="Center"
                                        Foreground="{DynamicResource TextMutedBrush}">
                                 <TextBlock.Style>
@@ -263,10 +276,41 @@
                     <Border Background="{DynamicResource PanelBackgroundBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                             CornerRadius="8" Padding="10,8" Margin="0,6,0,2">
-                        <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                            <TextBlock Text="{Binding Output}" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource TextSecondaryBrush}"
-                                       FontFamily="Consolas" FontSize="12"/>
+                        <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <!-- Executing Command / Arguments -->
+                                <TextBlock Text="COMMAND / PARAMETERS" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,0,3">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Arguments}" Value="">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                                <Border Background="{DynamicResource SurfaceElevatedBrush}" CornerRadius="4" Padding="8,5" Margin="0,0,0,8">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Arguments}" Value="">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <TextBlock Text="{Binding Arguments}" TextWrapping="Wrap"
+                                               Foreground="{DynamicResource TextPrimaryBrush}"
+                                               FontFamily="Consolas" FontSize="12"/>
+                                </Border>
+
+                                <!-- Output -->
+                                <TextBlock Text="OUTPUT" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,2,0,3"/>
+                                <TextBlock Text="{Binding Output}" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource TextSecondaryBrush}"
+                                           FontFamily="Consolas" FontSize="12"/>
+                            </StackPanel>
                         </ScrollViewer>
                     </Border>
                 </Expander>
@@ -649,8 +693,10 @@
                                         <Border Background="{DynamicResource ThinkingBubbleBackgroundBrush}"
                                                 BorderBrush="{DynamicResource AccentSoftBrush}" BorderThickness="2,0,0,0"
                                                 Padding="12,8" CornerRadius="0,8,8,0" Margin="4,4,0,0">
-                                            <TextBlock Text="{Binding Content}" FontStyle="Italic" TextWrapping="Wrap" FontSize="12.5"
-                                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                            <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                                <TextBlock Text="{Binding Content}" FontStyle="Italic" TextWrapping="Wrap" FontSize="12.5"
+                                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                            </ScrollViewer>
                                         </Border>
                                     </Expander>
                                 </Border>
@@ -847,96 +893,337 @@
 
             <!-- Input Area -->
             <Border Grid.Row="2" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,12">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <!-- Queue Status Bar -->
+                    <Border Visibility="{Binding HasQueuedMessages, Converter={StaticResource BoolToVisConverter}}"
+                            Background="{DynamicResource CardBackgroundBrush}" 
+                            BorderBrush="{DynamicResource BorderMidBrush}" 
+                            BorderThickness="1" CornerRadius="8" Margin="0,0,0,10" Padding="10,6">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                                <TextBlock Text="⚡ Queue:" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,6,0"/>
+                                <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="10" Padding="6,1">
+                                    <TextBlock Text="{Binding QueuedMessages.Count, StringFormat='{}{0} item(s)'}" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                </Border>
+                            </StackPanel>
+                            <Button DockPanel.Dock="Right" Style="{DynamicResource GhostButton}" Command="{Binding ClearQueueCommand}" ToolTip="Clear all queued messages for this session" VerticalAlignment="Center" Margin="8,0,0,0" Padding="6,2">
+                                <TextBlock Text="✕ Clear All" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}"/>
+                            </Button>
+                            <ItemsControl ItemsSource="{Binding QueuedMessages}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel Orientation="Horizontal"/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="{DynamicResource SubCardBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Margin="4,2" Padding="6,3">
+                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Button Style="{DynamicResource GhostButton}" Command="{Binding DataContext.ToggleQueueItemModeCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" ToolTip="Click to toggle between Steer and Direct Send" Margin="0,0,6,0" Padding="4,1">
+                                                    <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="4,1">
+                                                        <TextBlock Text="{Binding ModeBadgeText}" FontSize="10.5" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                                    </Border>
+                                                </Button>
+                                                <TextBlock Text="{Binding Content}" MaxWidth="220" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}"/>
+                                                <Button Style="{DynamicResource GhostButton}" Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Margin="6,0,0,0" Padding="2" ToolTip="Cancel/Remove Queued Request">
+                                                    <TextBlock Text="✕" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                </Button>
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </DockPanel>
+                    </Border>
 
-                    <ComboBox Grid.Column="0" 
-                              ItemsSource="{Binding AvailableRiskLevels}"
-                              SelectedItem="{Binding SelectedRiskLevel}"
-                              Margin="0,0,10,0"
-                              Width="100"
-                              VerticalAlignment="Bottom"
-                              Height="40"
-                              Background="{DynamicResource InputBackgroundBrush}"
-                              Foreground="{DynamicResource TextPrimaryBrush}"
-                              BorderBrush="{DynamicResource BorderMidBrush}"
-                              BorderThickness="1"
-                              ToolTip="Set Model Tool Execution Risk Level">
-                        <ComboBox.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding}" Padding="4,2"/>
-                            </DataTemplate>
-                        </ComboBox.ItemTemplate>
-                    </ComboBox>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
 
-                    <Grid Grid.Column="1">
-                        <TextBox x:Name="InputTextBox" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
-                                 MinLines="1" MaxLines="6" TextWrapping="Wrap" AcceptsReturn="True"
-                                 PreviewKeyDown="InputTextBox_PreviewKeyDown"
-                                 Background="{DynamicResource InputBackgroundBrush}"
-                                 Foreground="{DynamicResource TextPrimaryBrush}"
-                                 BorderThickness="1" BorderBrush="{DynamicResource BorderMidBrush}"
-                                 Padding="12,10" VerticalContentAlignment="Center"
-                                 VerticalScrollBarVisibility="Auto" FontSize="15"/>
-                        <!-- State-aware placeholder -->
-                        <TextBlock IsHitTestVisible="False" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="15"
-                                   Foreground="{DynamicResource TextMutedBrush}">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                    <Setter Property="Text" Value="Message Klydis…"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsModelReady}" Value="False">
-                                            <Setter Property="Text" Value="Load a model below to start chatting"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding IsModelLoading}" Value="True">
-                                            <Setter Property="Text" Value="Model is loading — you can type while you wait…"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding IsGenerating}" Value="True">
-                                            <Setter Property="Text" Value="Klydis is responding…"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding Text, ElementName=InputTextBox}" Value="">
-                                            <Setter Property="Visibility" Value="Visible"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-                        <!-- Shortcut hint: only while focused and empty -->
-                        <TextBlock Text="Shift+Enter for new line" IsHitTestVisible="False"
-                                   Margin="0,0,14,0" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11"
-                                   Foreground="{DynamicResource TextMutedBrush}" Opacity="0.7">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                    <Style.Triggers>
-                                        <MultiDataTrigger>
-                                            <MultiDataTrigger.Conditions>
-                                                <Condition Binding="{Binding IsKeyboardFocused, ElementName=InputTextBox}" Value="True"/>
-                                                <Condition Binding="{Binding Text, ElementName=InputTextBox}" Value=""/>
-                                            </MultiDataTrigger.Conditions>
-                                            <Setter Property="Visibility" Value="Visible"/>
-                                        </MultiDataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Bottom">
+                            <ComboBox ItemsSource="{Binding AvailableRiskLevels}"
+                                      SelectedItem="{Binding SelectedRiskLevel}"
+                                      Width="90"
+                                      Height="40"
+                                      Background="{DynamicResource InputBackgroundBrush}"
+                                      Foreground="{DynamicResource TextPrimaryBrush}"
+                                      BorderBrush="{DynamicResource BorderMidBrush}"
+                                      BorderThickness="1"
+                                      ToolTip="Set Model Tool Execution Risk Level">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" Padding="4,2"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <Button Command="{Binding ToggleSelectedQueueModeCommand}" Margin="6,0,0,0" Height="40" Padding="8,0" Style="{DynamicResource SecondaryButton}" ToolTip="Toggle queue mode for sent/queued messages (Steer vs Direct Send)">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="Mode: " FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                    <TextBlock Text="{Binding SelectedQueueMode}" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+
+                        <Grid Grid.Column="1">
+                            <TextBox x:Name="InputTextBox" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
+                                     MinLines="1" MaxLines="6" TextWrapping="Wrap" AcceptsReturn="True"
+                                     PreviewKeyDown="InputTextBox_PreviewKeyDown"
+                                     Background="{DynamicResource InputBackgroundBrush}"
+                                     Foreground="{DynamicResource TextPrimaryBrush}"
+                                     BorderThickness="1" BorderBrush="{DynamicResource BorderMidBrush}"
+                                     Padding="12,10" VerticalContentAlignment="Center"
+                                     VerticalScrollBarVisibility="Auto" FontSize="15"/>
+                            <!-- State-aware placeholder -->
+                            <TextBlock IsHitTestVisible="False" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="15"
+                                       Foreground="{DynamicResource TextMutedBrush}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Setter Property="Text" Value="Message Klydis…"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsModelReady}" Value="False">
+                                                <Setter Property="Text" Value="Load a model below to start chatting"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsModelLoading}" Value="True">
+                                                <Setter Property="Text" Value="Model is loading — you can type while you wait…"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsGenerating}" Value="True">
+                                                <Setter Property="Text" Value="Klydis is responding… (Press Enter to queue)"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Text, ElementName=InputTextBox}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <!-- Shortcut hint: only while focused and empty -->
+                            <TextBlock Text="Shift+Enter for new line" IsHitTestVisible="False"
+                                       Margin="0,0,14,0" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11"
+                                       Foreground="{DynamicResource TextMutedBrush}" Opacity="0.7">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsKeyboardFocused, ElementName=InputTextBox}" Value="True"/>
+                                                    <Condition Binding="{Binding Text, ElementName=InputTextBox}" Value=""/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+
+                        <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
+                            <Path Data="M 2,8 L 13,8 M 8,3 L 13,8 L 8,13" Stroke="{DynamicResource TextInverse}" StrokeThickness="2" Width="15" Height="14" Stretch="Uniform" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                        </Button>
+
+                        <StackPanel Grid.Column="3" Orientation="Horizontal" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" VerticalAlignment="Bottom" Margin="10,0,0,0">
+                            <Button Style="{DynamicResource SecondaryButton}" Command="{Binding EnqueueMessageCommand}" Height="40" Padding="8,0" Margin="0,0,6,0" ToolTip="Add message to processing queue">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="Queue" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                </StackPanel>
+                            </Button>
+                            <Button Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Width="40" Height="40" Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="0" Padding="0" ToolTip="Stop generating">
+                                <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ErrorBrush}"/>
+                            </Button>
+                        </StackPanel>
                     </Grid>
-
-                    <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
-                        <Path Data="M 2,8 L 13,8 M 8,3 L 13,8 L 8,13" Stroke="{DynamicResource TextInverse}" StrokeThickness="2" Width="15" Height="14" Stretch="Uniform" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                    </Button>
-
-                    <Button Grid.Column="3" Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="0" Padding="0" ToolTip="Stop generating">
-                        <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ErrorBrush}"/>
-                    </Button>
-                </Grid>
+                </StackPanel>
             </Border>
+
+            <!-- In-App Modal Overlay for Tool Approvals & Alerts -->
+            <Grid Grid.Row="0" Grid.RowSpan="3" Panel.ZIndex="1000">
+                <Grid.Style>
+                    <Style TargetType="Grid">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsApprovalPending}" Value="True">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsAlertPending}" Value="True">
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Style>
+
+                <Grid.InputBindings>
+                    <KeyBinding Key="Esc" Command="{Binding DenyToolCommand}"/>
+                    <KeyBinding Key="Return" Command="{Binding ApproveToolCommand}"/>
+                </Grid.InputBindings>
+
+                <!-- Semi-transparent Dimmed Backdrop -->
+                <Border Background="#70000000">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Style.Triggers>
+                                <EventTrigger RoutedEvent="Loaded">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                </Border>
+
+                <!-- Tool Approval Modal Card (Emerges from User Input Section) -->
+                <Border HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                        Margin="24,0,24,18" Width="540" MaxWidth="640"
+                        Background="{DynamicResource SurfaceElevatedBrush}"
+                        BorderBrush="{DynamicResource BorderMidBrush}"
+                        BorderThickness="1" CornerRadius="16"
+                        Padding="22,18">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsApprovalPending}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="28" ShadowDepth="6" Direction="270" Color="#000000" Opacity="0.5"/>
+                    </Border.Effect>
+
+                    <StackPanel>
+                        <!-- Header with Icon & Title -->
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Border Grid.Column="0" Width="40" Height="40" CornerRadius="12" 
+                                    Background="{DynamicResource AccentSoftBrush}" Margin="0,0,14,0">
+                                <Path Data="M 12,2 L 22,6 V 12 C 22,17.5 17.5,21.8 12,23 C 6.5,21.8 2,17.5 2,12 V 6 Z M 12,8 V 13 M 12,16 V 17"
+                                      Stroke="{DynamicResource AccentPrimaryBrush}" StrokeThickness="2" 
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding PendingApprovalTitle}" FontSize="16" FontWeight="Bold" 
+                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <TextBlock Text="Action requires your confirmation before proceeding" FontSize="12" 
+                                           Foreground="{DynamicResource TextMutedBrush}" Margin="0,2,0,0"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Tool Content Area -->
+                        <Border Background="{DynamicResource InputBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" 
+                                BorderThickness="1" CornerRadius="10" Padding="14,12" Margin="0,0,0,16">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock Text="Requested Tool:" FontSize="12" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="6" Padding="8,3">
+                                        <TextBlock Text="{Binding PendingToolName}" FontSize="12.5" FontWeight="Bold" 
+                                                   Foreground="{DynamicResource AccentPrimaryBrush}" FontFamily="Consolas, Cascadia Code, Courier New, monospace"/>
+                                    </Border>
+                                </StackPanel>
+                                
+                                <TextBlock Text="{Binding PendingApprovalMessage}" FontSize="13.5" TextWrapping="Wrap" 
+                                           Foreground="{DynamicResource TextPrimaryBrush}" LineHeight="18" Margin="0,2,0,6"/>
+
+                                <!-- Arguments Detail Box -->
+                                <Border Margin="0,6,0,0" Padding="10,8" Background="{DynamicResource PanelBackgroundBrush}" 
+                                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6"
+                                        Visibility="{Binding PendingToolArguments, Converter={StaticResource StringToVisibilityConverter}}">
+                                    <ScrollViewer MaxHeight="120" VerticalScrollBarVisibility="Auto">
+                                        <TextBlock Text="{Binding PendingToolArguments}" FontSize="11.5" TextWrapping="Wrap" 
+                                                   Foreground="{DynamicResource TextSecondaryBrush}" 
+                                                   FontFamily="Consolas, Cascadia Code, Courier New, monospace"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Action Buttons -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Grid.Column="0" Text="Press Esc to Deny • Enter to Allow" 
+                                       FontSize="11" Foreground="{DynamicResource TextMutedBrush}" 
+                                       VerticalAlignment="Center" Opacity="0.75"/>
+
+                            <Button Grid.Column="1" Command="{Binding DenyToolCommand}" Style="{DynamicResource SecondaryButton}" 
+                                    Content="Deny" Width="90" Margin="0,0,10,0" Height="36"/>
+                            <Button Grid.Column="2" Command="{Binding ApproveToolCommand}" Style="{DynamicResource PrimaryButton}" 
+                                    Content="Allow Operation" Width="140" Height="36"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- Alert Modal Card -->
+                <Border HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                        Margin="24,0,24,18" Width="480" MaxWidth="580"
+                        Background="{DynamicResource SurfaceElevatedBrush}"
+                        BorderBrush="{DynamicResource BorderMidBrush}"
+                        BorderThickness="1" CornerRadius="16"
+                        Padding="22,18">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsAlertPending}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="28" ShadowDepth="6" Direction="270" Color="#000000" Opacity="0.5"/>
+                    </Border.Effect>
+
+                    <StackPanel>
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Border Grid.Column="0" Width="40" Height="40" CornerRadius="12" 
+                                    Background="{DynamicResource AccentSoftBrush}" Margin="0,0,14,0">
+                                <Path Data="M 12,2 C 6.48,2 2,6.48 2,12 C 2,17.52 6.48,22 12,22 C 17.52,22 22,17.52 22,12 C 22,6.48 17.52,2 12,2 Z M 13,17 L 11,17 L 11,15 L 13,15 L 13,17 Z M 13,13 L 11,13 L 11,7 L 13,7 L 13,13 Z"
+                                      Fill="{DynamicResource WarningBrush}"
+                                      Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding AlertTitle}" FontSize="16" FontWeight="Bold" 
+                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <Border Background="{DynamicResource InputBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" 
+                                BorderThickness="1" CornerRadius="10" Padding="14,12" Margin="0,0,0,16">
+                            <TextBlock Text="{Binding AlertMessage}" FontSize="13.5" TextWrapping="Wrap" 
+                                       Foreground="{DynamicResource TextPrimaryBrush}" LineHeight="18"/>
+                        </Border>
+
+                        <Button HorizontalAlignment="Right" Command="{Binding CloseAlertModalCommand}" Style="{DynamicResource PrimaryButton}" 
+                                Content="OK" Width="100" Height="36"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
         </Grid>
     </Grid>
 </UserControl>

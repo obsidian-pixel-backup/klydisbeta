@@ -26,6 +26,9 @@
         <DataTemplate DataType="{x:Type viewmodels:ChatViewModel}">
             <views:ChatView />
         </DataTemplate>
+        <DataTemplate DataType="{x:Type viewmodels:SkillLibraryViewModel}">
+            <views:SkillsView />
+        </DataTemplate>
         <Style TargetType="Button" x:Key="TitleBarButtonStyle">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
@@ -67,8 +70,8 @@
         </Style>
     </Window.Resources>
 
-    <Border Background="{DynamicResource WindowBackgroundBrush}" CornerRadius="10">
-        <Grid Margin="8">
+    <Border x:Name="MainBorder" Background="{DynamicResource WindowBackgroundBrush}" CornerRadius="10">
+        <Grid x:Name="MainGrid" Margin="8">
             <Grid.RowDefinitions>
             <RowDefinition Height="32"/>
             <RowDefinition Height="*"/>
@@ -128,6 +131,12 @@
                                  IsChecked="{Binding ActivePanel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Models}"
                                  Command="{Binding NavigateCommand}" CommandParameter="Models">
                         <Path Data="M 2,14 L 2,4 C 2,2 14,2 14,4 L 14,14 Z M 5,7 L 11,7" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}" StrokeThickness="1.5" Fill="Transparent"/>
+                    </RadioButton>
+                    <RadioButton Style="{DynamicResource ActivityTabStyle}" GroupName="ActivityBar" 
+                                 IsChecked="{Binding ActivePanel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Skills}"
+                                 Command="{Binding NavigateCommand}" CommandParameter="Skills"
+                                 ToolTip="Skill Library &amp; Brain">
+                        <Path Data="M 12 2 L 2 7 L 12 12 L 22 7 Z M 2 17 L 12 22 L 22 17 M 2 12 L 12 17 L 22 12" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}" StrokeThickness="1.5" Fill="Transparent"/>
                     </RadioButton>
                     <StackPanel Margin="0,-5,0,5" Visibility="{Binding ModelLibraryViewModel.HasActiveDownloads, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <ProgressBar Minimum="0" Maximum="100" Value="{Binding ModelLibraryViewModel.TotalDownloadProgress}" 

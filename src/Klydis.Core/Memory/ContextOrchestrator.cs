@@ -72,18 +72,43 @@ namespace Klydis.Core.Memory
             return (activeWindow, overflow);
         }
 
+        public ObsidianVaultManager? VaultManager { get; set; }
+
         /// <summary>
-        /// Assembles the final prompt string for the LLM inference.
+        /// Assembles the final prompt string for the LLM inference using 3-tiered memory partitioning.
         /// </summary>
         public async Task<string> BuildPromptAsync(string sessionId, string lastUserMessage, int maxTokenBudget)
         {
-            _logger.LogInformation("Building prompt for session {SessionId}", sessionId);
+            _logger.LogInformation("Building 3-tier memory prompt for session {SessionId}", sessionId);
 
             var session = await _store.GetSessionAsync(sessionId);
             var messages = await _store.GetMessagesAsync(sessionId, null);
 
-            int baseTokens = EstimateTokens(lastUserMessage) + 100; // Extra budget for safety
-            var (activeWindow, _) = PartitionContext(messages, maxTokenBudget - baseTokens);
+            int sysPromptTokens = 0;
+            if (session != null && !string.IsNullOrWhiteSpace(session.SystemPrompt))
+            {
+                sysPromptTokens += EstimateTokens(session.SystemPrompt) + 20;
+            }
+            if (session != null && !string.IsNullOrWhiteSpace(session.WorldState))
+            {
+                sysPromptTokens += EstimateTokens(session.WorldState) + 20;
+            }
+
+            // Retrieve Tier 3 Memory Vault cards if available
+            string vaultMemoryBlock = string.Empty;
+            if (VaultManager != null)
+            {
+                var matchingNotes = VaultManager.SearchVault(lastUserMessage, topK: 2);
+                if (matchingNotes.Count > 0)
+                {
+                    var noteSnippets = matchingNotes.Select(n => $"--- Memory Card: {n.Title} ---\n{n.Content}");
+                    vaultMemoryBlock = string.Join("\n\n", noteSnippets);
+                    sysPromptTokens += EstimateTokens(vaultMemoryBlock) + 30;
+                }
+            }
+
+            int baseTokens = EstimateTokens(lastUserMessage) + sysPromptTokens + 100; // Extra budget for system prompt, world state, vault memory, and formatting overhead
+            var (activeWindow, _) = PartitionContext(messages, Math.Max(maxTokenBudget - baseTokens, 512));
 
             var promptBuilder = new StringBuilder();
 
@@ -97,6 +122,11 @@ namespace Klydis.Core.Memory
                 promptBuilder.AppendLine($"<world_state>\n{session.WorldState}\n</world_state>\n");
             }
 
+            if (!string.IsNullOrWhiteSpace(vaultMemoryBlock))
+            {
+                promptBuilder.AppendLine($"<retrieved_memory_vault>\n{vaultMemoryBlock}\n</retrieved_memory_vault>\n");
+            }
+
             foreach (var msg in activeWindow)
             {
                 promptBuilder.AppendLine($"<{msg.Role.ToString().ToLower()}>\n{msg.Content}\n</{msg.Role.ToString().ToLower()}>\n");
@@ -105,6 +135,105 @@ namespace Klydis.Core.Memory
             promptBuilder.AppendLine($"<user>\n{lastUserMessage}\n</user>");
 
             return promptBuilder.ToString();
+        }
+
+        /// <summary>
+        /// Performs automated rolling compression on conversation history when token count exceeds the threshold (~30k tokens).
+        /// Summarizes older history into WorldState and prunes raw history messages in place.
+        /// </summary>
+        public async Task<bool> PerformRollingCompressionAsync(List<ChatMessage> history, string sessionId, int thresholdTokens = 30000, int keepRecentTokens = 4096)
+        {
+            if (history == null || history.Count <= 2) return false;
+
+            int totalTokens = 0;
+            foreach (var msg in history)
+            {
+                totalTokens += (_inferenceEngine != null && _inferenceEngine.IsModelLoaded 
+                    ? _inferenceEngine.GetTokenCount(msg.Content) 
+                    : EstimateTokens(msg.Content)) + 25;
+            }
+
+            if (totalTokens < thresholdTokens) return false;
+
+            _logger.LogInformation("Automated rolling compression triggered for session {SessionId} (Total tokens: {Tokens}, Threshold: {Threshold})", sessionId, totalTokens, thresholdTokens);
+
+            var session = await _store.GetSessionAsync(sessionId);
+            if (session == null) return false;
+
+            // Preserve initial message goal (history[0]) if user message
+            ChatMessage? initialMsg = history.Count > 0 ? history[0] : null;
+            int initialTokens = initialMsg != null 
+                ? ((_inferenceEngine != null && _inferenceEngine.IsModelLoaded ? _inferenceEngine.GetTokenCount(initialMsg.Content) : EstimateTokens(initialMsg.Content)) + 25) 
+                : 0;
+
+            // Gather recent messages up to keepRecentTokens budget from the end
+            var preservedRecent = new List<ChatMessage>();
+            int recentTokens = initialTokens;
+
+            int splitIndex = history.Count - 1;
+            for (int i = history.Count - 1; i >= 1; i--)
+            {
+                var msg = history[i];
+                int msgTokens = (_inferenceEngine != null && _inferenceEngine.IsModelLoaded 
+                    ? _inferenceEngine.GetTokenCount(msg.Content) 
+                    : EstimateTokens(msg.Content)) + 25;
+
+                if (recentTokens + msgTokens <= keepRecentTokens)
+                {
+                    preservedRecent.Insert(0, msg);
+                    recentTokens += msgTokens;
+                    splitIndex = i;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            // Extract overflow messages (between index 1 and splitIndex)
+            var overflow = history.Skip(1).Take(Math.Max(0, splitIndex - 1)).ToList();
+            if (overflow.Count == 0) return false;
+
+            // Persist full pre-compaction transcript overflow to disk archive
+            string archivePath = string.Empty;
+            try
+            {
+                var transcriptDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), ".klydis", "transcripts");
+                System.IO.Directory.CreateDirectory(transcriptDir);
+                archivePath = System.IO.Path.Combine(transcriptDir, $"archive_{sessionId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.txt");
+                var transcriptLines = overflow.Select(m => $"[{m.Role.ToString().ToUpper()}]\n{m.Content}\n---");
+                await System.IO.File.WriteAllLinesAsync(archivePath, transcriptLines);
+                _logger.LogInformation("Full pre-compaction transcript overflow archived to {ArchivePath}", archivePath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to write pre-compaction transcript archive to disk.");
+            }
+
+            var summaryItems = overflow
+                .Where(m => !string.IsNullOrWhiteSpace(m.Content) && m.Role != ChatRole.System)
+                .Select(m => $"- [{m.Role}] {(m.Content.Length > 150 ? m.Content[..150] + "..." : m.Content)}");
+
+            var summaryText = string.Join("\n", summaryItems);
+            var archiveNotice = !string.IsNullOrEmpty(archivePath) ? $"\n[Full pre-compaction history archive saved at: {archivePath}]" : "";
+            var existingState = session.WorldState ?? "";
+
+            var newWorldState = string.IsNullOrWhiteSpace(existingState)
+                ? $"Archived Context Summary:{archiveNotice}\n{summaryText}"
+                : $"{existingState}\n\nArchived Context Summary:{archiveNotice}\n{summaryText}";
+
+            await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
+
+            // Update in-memory history
+            history.Clear();
+            if (initialMsg != null)
+            {
+                history.Add(initialMsg);
+            }
+            history.AddRange(preservedRecent);
+
+            _logger.LogInformation("Automated rolling compression completed. Compacted {PrunedCount} messages into WorldState. Active history size: {ActiveCount}", overflow.Count, history.Count);
+            return true;
         }
 
         /// <summary>
@@ -118,24 +247,24 @@ namespace Klydis.Core.Memory
             var messages = await _store.GetMessagesAsync(sessionId, null);
             var unconsolidated = messages.Where(m => !m.IsConsolidated).ToList();
 
-            // Simple heuristic to identify overflow. You could also keep track of what was last summarized.
-            var (_, overflow) = PartitionContext(unconsolidated, 2048); // Arbitrary context budget for memory
+            // Simple heuristic to identify overflow.
+            var (_, overflow) = PartitionContext(unconsolidated, 2048);
 
             if (overflow.Count == 0) return;
 
-            if (!_inferenceEngine.IsModelLoaded)
-            {
-                _logger.LogWarning("Consolidation skipped: No model is currently loaded in the primary engine.");
-                return;
-            }
-
             _logger.LogInformation("Consolidating {Count} messages into world state for session {SessionId}", overflow.Count, sessionId);
 
-            var textToSummarize = string.Join("\n", overflow.Select(m => $"{m.Role}: {m.Content}"));
-            
-            string summarizationPrompt = $"Current World State:\n{session.WorldState ?? "None"}\n\nNew Interactions to incorporate:\n{textToSummarize}\n\nTask: Update the World State to concisely reflect these new interactions without losing crucial long-term information. Respond with ONLY the new updated world state text.";
+            // Extract concise key points from overflow messages to avoid deadlock during active generation turns
+            var summaryItems = overflow
+                .Where(m => !string.IsNullOrWhiteSpace(m.Content) && m.Role != ChatRole.System)
+                .Select(m => $"- [{m.Role}] {(m.Content.Length > 120 ? m.Content[..120] + "..." : m.Content)}");
 
-            string newWorldState = await _inferenceEngine.GenerateTextAsync(summarizationPrompt, isIsolated: true);
+            var summaryText = string.Join("\n", summaryItems);
+            var existingState = session.WorldState ?? "";
+            
+            var newWorldState = string.IsNullOrWhiteSpace(existingState)
+                ? $"Archived Context:\n{summaryText}"
+                : $"{existingState}\n{summaryText}";
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
             await _store.MarkMessagesAsConsolidatedAsync(overflow.Select(m => m.Id));
@@ -236,7 +365,7 @@ namespace Klydis.Core.Memory
             public async Task<List<(int DocId, double Score)>> SearchEnhancedAsync(string rawQuery, IInferenceEngine fastEngine, int topK = 3)
             {
                 string restructurePrompt = $"User query: \"{rawQuery}\"\n\nTask: Extract the core nouns, verbs, and technical keywords. Strip all conversational filler. Respond ONLY with the space-separated keywords.";
-                string filteredQuery = await fastEngine.GenerateTextAsync(restructurePrompt, isIsolated: true);
+                string filteredQuery = await fastEngine.GenerateTextAsync(restructurePrompt, isIsolated: true, maxTokens: 128);
                 
                 // Fallback if the fast model fails to generate anything or crashes
                 if (string.IsNullOrWhiteSpace(filteredQuery))

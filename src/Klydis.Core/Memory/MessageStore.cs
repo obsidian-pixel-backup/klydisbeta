@@ -166,9 +166,9 @@ public class MessageStore
     /// <summary>
     /// Creates a new chat session.
     /// </summary>
-    public async Task<string> CreateSessionAsync(string title, string? modelId)
+    public async Task<string> CreateSessionAsync(string title, string? modelId, string? customSessionId = null)
     {
-        string sessionId = Guid.NewGuid().ToString();
+        string sessionId = string.IsNullOrEmpty(customSessionId) ? Guid.NewGuid().ToString() : customSessionId;
         string now = DateTime.UtcNow.ToString("o");
         
         await using var connection = new SqliteConnection(_connectionString);
@@ -177,7 +177,8 @@ public class MessageStore
         await using var command = connection.CreateCommand();
         command.CommandText = @"
             INSERT INTO sessions (id, title, model_id, created_at, updated_at) 
-            VALUES (@id, @title, @modelId, @now, @now)";
+            VALUES (@id, @title, @modelId, @now, @now)
+            ON CONFLICT(id) DO UPDATE SET title = excluded.title, model_id = excluded.model_id, updated_at = excluded.updated_at";
             
         command.Parameters.AddWithValue("@id", sessionId);
         command.Parameters.AddWithValue("@title", title);
@@ -300,6 +301,9 @@ public class MessageStore
         
         await using var command = connection.CreateCommand();
         command.CommandText = @"
+            INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at)
+            VALUES (@sessionId, 'New Chat', @timestamp, @timestamp);
+
             INSERT INTO messages (session_id, role, content, timestamp, token_count, tool_calls_json, is_consolidated)
             VALUES (@sessionId, @role, @content, @timestamp, @tokenCount, @toolCallsJson, 0);
             

@@ -1,0 +1,209 @@
+<UserControl x:Class="Klydis.App.Views.SkillsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:converters="clr-namespace:Klydis.App.Converters"
+             mc:Ignorable="d" 
+             d:DesignHeight="700" d:DesignWidth="1000">
+
+    <UserControl.Resources>
+        <converters:BoolToVisConverter x:Key="BoolToVisConverter"/>
+        <converters:InverseBoolToVisConverter x:Key="InverseBoolToVisConverter"/>
+    </UserControl.Resources>
+
+    <Grid Background="{DynamicResource WindowBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Top Header Bar -->
+        <Border Grid.Row="0" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="16,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Path Data="M 12 2 L 2 7 L 12 12 L 22 7 Z M 2 17 L 12 22 L 22 17 M 2 12 L 12 17 L 22 12" 
+                          Stroke="{DynamicResource AccentPrimaryBrush}" StrokeThickness="2" Width="22" Height="22" Stretch="Uniform" Margin="0,0,10,0"/>
+                    <TextBlock Text="Skill Library &amp; Brain" FontSize="18" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Search & Filters -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,16,0">
+                    <TextBox Width="220" Height="32" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged}" 
+                             ToolTip="Search skills by name, tag, or description"
+                             Padding="8,6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
+                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" VerticalContentAlignment="Center" Margin="0,0,10,0"/>
+
+                    <ComboBox Width="180" Height="32" ItemsSource="{Binding Categories}" SelectedItem="{Binding SelectedCategory}"
+                              Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
+                              VerticalContentAlignment="Center"/>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Reload" Command="{Binding ReloadLibraryCommand}" 
+                            Padding="12,6" Margin="0,0,8,0" Background="Transparent" Foreground="{DynamicResource TextPrimaryBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+                    <Button Content="+ New Skill" Command="{Binding NewSkillCommand}" 
+                            Padding="14,6" Background="{DynamicResource AccentPrimaryBrush}" Foreground="White" FontWeight="SemiBold" BorderThickness="0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Main Body: 2 Columns (Skill List | Skill Editor) -->
+        <Grid Grid.Row="1" Margin="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="400"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left Skill List -->
+            <Border Grid.Column="0" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Margin="0,0,8,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Background="{DynamicResource TitleBarBackgroundBrush}" Padding="12,8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <TextBlock Text="{Binding FilteredSkills.Count, StringFormat='Skills ({0})'}" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </Border>
+
+                    <ListBox Grid.Row="1" ItemsSource="{Binding FilteredSkills}" SelectedItem="{Binding SelectedSkill}"
+                             Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Padding="10,8" Margin="2" Background="{DynamicResource InputBackgroundBrush}" CornerRadius="4" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Enable/Disable Checkbox -->
+                                        <CheckBox IsChecked="{Binding IsEnabled}" VerticalAlignment="Top" Margin="0,3,10,0"
+                                                  Command="{Binding DataContext.ToggleSkillCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                  CommandParameter="{Binding}"/>
+
+                                        <StackPanel Grid.Column="1">
+                                            <Grid>
+                                                <TextBlock Text="{Binding Name}" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" FontSize="13" TextTrimming="CharacterEllipsis"/>
+                                                <Border HorizontalAlignment="Right" Background="{DynamicResource AccentSecondaryBrush}" Padding="6,2" CornerRadius="3">
+                                                    <TextBlock Text="{Binding Category}" FontSize="10" Foreground="White"/>
+                                                </Border>
+                                            </Grid>
+
+                                            <TextBlock Text="{Binding Description}" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" Margin="0,4,0,4" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis"/>
+
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border Background="{DynamicResource TitleBarBackgroundBrush}" Padding="4,1" Margin="0,0,6,0" CornerRadius="2">
+                                                    <TextBlock Text="{Binding Source}" FontSize="10" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                                </Border>
+                                                <TextBlock Text="{Binding TagsText}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="10" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <!-- Right Skill Details & Editor -->
+            <Border Grid.Column="1" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="16">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Editor Header -->
+                    <Grid Grid.Row="0" Margin="0,0,0,12">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding EditName}" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                            <TextBlock Text="{Binding EditId, StringFormat='({0})'}" FontSize="12" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Editor Form & Code Box -->
+                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Skill Name" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding EditName, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="Category" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding EditCategory, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="10"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Complexity Level" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
+                                    <ComboBox ItemsSource="{Binding AvailableComplexities}" SelectedItem="{Binding EditComplexity}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="Tags (comma separated)" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
+                                    <TextBox Text="{Binding EditTags, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <StackPanel Margin="0,0,0,10">
+                                <TextBlock Text="Description" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
+                                <TextBox Text="{Binding EditDescription, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                            </StackPanel>
+
+                            <!-- Prompt Instructions Editor -->
+                            <StackPanel Margin="0,0,0,10">
+                                <TextBlock Text="Prompt Instructions &amp; Knowledge Directive (Markdown)" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4" FontWeight="SemiBold"/>
+                                <TextBox Text="{Binding EditInstruction, UpdateSourceTrigger=PropertyChanged}"
+                                         AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap" MinHeight="260"
+                                         FontFamily="Consolas, Courier New, monospace" FontSize="12"
+                                         Padding="10" Background="#1E1E1E" Foreground="#D4D4D4"
+                                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- Footer Buttons & Status -->
+                    <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,8,0,0">
+                        <Grid>
+                            <TextBlock Text="{Binding StatusMessage}" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" FontSize="12"/>
+
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button Content="Delete Skill" Command="{Binding DeleteSkillCommand}" Margin="0,0,10,0"
+                                        Padding="12,6" Background="#C62828" Foreground="White" BorderThickness="0"/>
+                                <Button Content="Save Changes" Command="{Binding SaveSkillCommand}"
+                                        Padding="16,6" Background="{DynamicResource SuccessBrush}" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -140,11 +140,14 @@ public partial class ModelLibraryViewModel : ObservableObject
 
     private readonly Klydis.Core.Models.ModelRegistry _registry;
     private readonly Klydis.Core.Models.HuggingFaceClient _hfClient;
+    private readonly Klydis.Core.Models.ModelQuantizerService? _quantizerService;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
     private readonly Klydis.Core.Hardware.GpuProfiler _gpuProfiler;
     private readonly Klydis.Core.Hardware.SystemProfiler _systemProfiler;
     private readonly Klydis.Core.Hardware.OffloadStrategy _offloadStrategy;
     private readonly DispatcherTimer _timer;
+    private System.Threading.CancellationTokenSource? _modelLoadCts;
+    private long _modelLoadSequenceId = 0;
 
     public ModelLibraryViewModel(
         Klydis.Core.Models.ModelRegistry registry,
@@ -152,10 +155,12 @@ public partial class ModelLibraryViewModel : ObservableObject
         Klydis.Core.Inference.InferenceEngine inferenceEngine,
         Klydis.Core.Hardware.GpuProfiler gpuProfiler,
         Klydis.Core.Hardware.SystemProfiler systemProfiler,
-        Klydis.Core.Hardware.OffloadStrategy offloadStrategy)
+        Klydis.Core.Hardware.OffloadStrategy offloadStrategy,
+        Klydis.Core.Models.ModelQuantizerService? quantizerService = null)
     {
         _registry = registry;
         _hfClient = hfClient;
+        _quantizerService = quantizerService;
         _inferenceEngine = inferenceEngine;
         _gpuProfiler = gpuProfiler;
         _systemProfiler = systemProfiler;
@@ -163,6 +168,7 @@ public partial class ModelLibraryViewModel : ObservableObject
         FilteredModels = new ObservableCollection<ModelCardViewModel>(Models);
         
         _registry.RegistryChanged += OnRegistryChanged;
+        _inferenceEngine.ModelStateChanged += OnModelStateChanged;
         
         _ = ScanAsync();
         _ = LoadHfModelsAsync();
@@ -174,6 +180,40 @@ public partial class ModelLibraryViewModel : ObservableObject
         };
         _timer.Tick += async (s, e) => await UpdateVramUsageAsync();
         _timer.Start();
+    }
+
+    private void OnModelStateChanged(bool isLoaded, string? modelPath)
+    {
+        Action updateUi = () =>
+        {
+            if (isLoaded && !string.IsNullOrEmpty(modelPath))
+            {
+                var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.FilePath == modelPath);
+                string loadedId = modelInfo?.Id ?? string.Empty;
+                CurrentlyLoadedModelId = loadedId;
+                foreach (var m in Models)
+                {
+                    m.IsLoaded = (m.ModelId == loadedId);
+                }
+            }
+            else if (!isLoaded)
+            {
+                CurrentlyLoadedModelId = string.Empty;
+                foreach (var m in Models)
+                {
+                    m.IsLoaded = false;
+                }
+            }
+        };
+
+        if (System.Windows.Application.Current != null)
+        {
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(updateUi);
+        }
+        else
+        {
+            updateUi();
+        }
     }
 
     private void OnRegistryChanged()
@@ -320,6 +360,20 @@ public partial class ModelLibraryViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private async Task QuantizeModelTo4BitAsync(string modelId)
+    {
+        if (string.IsNullOrEmpty(modelId) || _quantizerService == null) return;
+        var modelInfo = _registry.GetModel(modelId);
+        if (modelInfo == null || !System.IO.File.Exists(modelInfo.FilePath)) return;
+
+        bool success = await _quantizerService.QuantizeTo4BitAsync(modelInfo.FilePath, targetQuantType: "Q4_K_M");
+        if (success)
+        {
+            await _registry.SyncWithDiskAsync();
+        }
+    }
+
+    [RelayCommand]
     private async Task LoadModelAsync(string modelId)
     {
         if (string.IsNullOrEmpty(modelId)) return;
@@ -327,35 +381,40 @@ public partial class ModelLibraryViewModel : ObservableObject
         var modelInfo = _registry.GetModel(modelId);
         if (modelInfo == null) return;
 
-        CurrentlyLoadedModelId = modelId;
-        foreach (var m in Models) m.IsLoaded = (m.ModelId == modelId);
-        
+        if (_inferenceEngine.IsModelLoaded && _inferenceEngine.CurrentModelPath == modelInfo.FilePath)
+        {
+            CurrentlyLoadedModelId = modelId;
+            foreach (var m in Models) m.IsLoaded = (m.ModelId == modelId);
+            return;
+        }
+
+        long seqId = System.Threading.Interlocked.Increment(ref _modelLoadSequenceId);
+        _modelLoadCts?.Cancel();
+        _modelLoadCts?.Dispose();
+        _modelLoadCts = new System.Threading.CancellationTokenSource();
+        var ct = _modelLoadCts.Token;
+
         var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
         var systemInfo = await _systemProfiler.GetSystemInfoAsync();
+        if (ct.IsCancellationRequested || seqId != System.Threading.Volatile.Read(ref _modelLoadSequenceId)) return;
         
         try
         {
-            await _inferenceEngine.UnloadModelAsync();
+            await _inferenceEngine.UnloadModelAsync(ct);
+            if (ct.IsCancellationRequested || seqId != System.Threading.Volatile.Read(ref _modelLoadSequenceId)) return;
             
             // Read GGUF metadata for dynamic sizing
             var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
             int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
             long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
             
-            // Cap context length to a practical default. The model's trained context (often 1M+)
-            // is far too large for initial allocation. 32768 tokens is a practical default that
-            // fits comfortably in VRAM while allowing long conversations.
-            int rawContextLength = (int)(metadata?.ContextLength ?? 8192);
-            int contextLength = Math.Min(rawContextLength, 32768);
+            int rawContextLength = (int)(metadata?.ContextLength ?? 32768);
+            int contextLength = Math.Clamp(rawContextLength < 32768 ? 32768 : rawContextLength, 32768, 131072);
             
-            // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
-            // For Q8_0 KV cache, sizeof(element) = 1 byte. For FP16, sizeof(element) = 2 bytes.
-            // We use 1 byte since we configure Q8_0 KV cache in InferenceEngine.
-            long kvCachePerLayerBytes = 2048; // Safe default: 2 * 8 * 128 * 1 = 2048
+            long kvCachePerLayerBytes = 2048; // Safe default
             if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCount.Value > 0 && metadata.HeadCountKv.HasValue)
             {
                 long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
-                // K + V (2) * HeadCountKv * headDim * 1 byte (Q8_0 quantized KV cache)
                 kvCachePerLayerBytes = 2 * metadata.HeadCountKv.Value * headDim * 1;
             }
 
@@ -368,23 +427,32 @@ public partial class ModelLibraryViewModel : ObservableObject
                 systemInfo, 
                 Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
 
+            if (ct.IsCancellationRequested || seqId != System.Threading.Volatile.Read(ref _modelLoadSequenceId)) return;
+
             await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
+        }
+        catch (OperationCanceledException)
+        {
+            // Ignored - canceled by newer selection
         }
         catch (Exception)
         {
-            // Ensure UI handles the failure cleanly on the Dispatcher thread
-            if (System.Windows.Application.Current != null)
+            if (seqId == System.Threading.Volatile.Read(ref _modelLoadSequenceId))
             {
-                await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                Action resetUi = () =>
                 {
                     CurrentlyLoadedModelId = string.Empty;
                     foreach (var m in Models) m.IsLoaded = false;
-                });
-            }
-            else
-            {
-                CurrentlyLoadedModelId = string.Empty;
-                foreach (var m in Models) m.IsLoaded = false;
+                };
+
+                if (System.Windows.Application.Current != null)
+                {
+                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(resetUi);
+                }
+                else
+                {
+                    resetUi();
+                }
             }
         }
     }
@@ -511,9 +579,15 @@ public partial class ModelLibraryViewModel : ObservableObject
         try
         {
             var files = await _hfClient.GetModelFilesAsync(repoId);
+            var sortedFiles = files.OrderByDescending(f => 
+                f.QuantType.Contains("Q4_K_M", StringComparison.OrdinalIgnoreCase) ? 3 :
+                f.QuantType.Contains("Q4_0", StringComparison.OrdinalIgnoreCase) ? 2 :
+                f.QuantType.Contains("Q4", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                .ThenBy(f => f.SizeBytes);
+
             System.Windows.Application.Current.Dispatcher.Invoke(() =>
             {
-                foreach (var file in files)
+                foreach (var file in sortedFiles)
                 {
                     long estimatedVramMb = (long)((file.SizeBytes / (1024.0 * 1024.0)) * 1.2);
                     bool fitsInVram = VramTotalMb == 0 || estimatedVramMb <= VramTotalMb;

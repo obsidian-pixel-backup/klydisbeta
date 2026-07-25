@@ -16,9 +16,12 @@ using Klydis.Core.Models;
 /// </summary>
 internal class LoadedModelInfo
 {
+    private int _activeUseCount = 0;
+
     public InferenceEngine Engine { get; }
     public string ModelId { get; }
     public DateTime LastActive { get; set; }
+    public int ActiveUseCount => Volatile.Read(ref _activeUseCount);
 
     public LoadedModelInfo(InferenceEngine engine, string modelId)
     {
@@ -26,12 +29,25 @@ internal class LoadedModelInfo
         ModelId = modelId;
         LastActive = DateTime.UtcNow;
     }
+
+    public void IncrementActiveUse()
+    {
+        Interlocked.Increment(ref _activeUseCount);
+        LastActive = DateTime.UtcNow;
+    }
+
+    public void DecrementActiveUse()
+    {
+        int count = Interlocked.Decrement(ref _activeUseCount);
+        if (count < 0) Interlocked.Exchange(ref _activeUseCount, 0);
+        LastActive = DateTime.UtcNow;
+    }
 }
 
 /// <summary>
 /// Manages multiple loaded model instances, enforcing VRAM budgets, LRU eviction, and background idle unloading.
 /// </summary>
-public sealed class ModelPool : IDisposable
+public sealed class ModelPool : IDisposable, IAsyncDisposable
 {
     private readonly ModelRegistry _modelRegistry;
     private readonly GpuProfiler _gpuProfiler;
@@ -39,12 +55,11 @@ public sealed class ModelPool : IDisposable
     private readonly OffloadStrategy _offloadStrategy;
     private readonly ILogger<ModelPool> _logger;
     private readonly ILoggerFactory _loggerFactory;
-    
     private readonly ConcurrentDictionary<string, LoadedModelInfo> _loadedModels = new();
     private readonly SemaphoreSlim _poolLock = new(1, 1);
     private readonly CancellationTokenSource _idleTimeoutCts = new();
-    
     private readonly TimeSpan _idleTimeout = TimeSpan.FromMinutes(30);
+    private readonly INativeResourceDisposer? _nativeResourceDisposer;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ModelPool"/> class.
@@ -54,7 +69,8 @@ public sealed class ModelPool : IDisposable
         GpuProfiler gpuProfiler,
         SystemProfiler systemProfiler,
         OffloadStrategy offloadStrategy,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        INativeResourceDisposer? nativeResourceDisposer = null)
     {
         _modelRegistry = modelRegistry;
         _gpuProfiler = gpuProfiler;
@@ -62,9 +78,32 @@ public sealed class ModelPool : IDisposable
         _offloadStrategy = offloadStrategy;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<ModelPool>();
+        _nativeResourceDisposer = nativeResourceDisposer;
 
         // Start background idle eviction task
         _ = IdleEvictionLoopAsync(_idleTimeoutCts.Token);
+    }
+
+    /// <summary>
+    /// Tracks active use for a model to prevent eviction while an inference stream is active.
+    /// </summary>
+    public void TrackActiveUse(string modelId)
+    {
+        if (_loadedModels.TryGetValue(modelId, out var modelInfo))
+        {
+            modelInfo.IncrementActiveUse();
+        }
+    }
+
+    /// <summary>
+    /// Releases active use for a model after an inference stream completes.
+    /// </summary>
+    public void ReleaseActiveUse(string modelId)
+    {
+        if (_loadedModels.TryGetValue(modelId, out var modelInfo))
+        {
+            modelInfo.DecrementActiveUse();
+        }
     }
 
     /// <summary>
@@ -97,7 +136,7 @@ public sealed class ModelPool : IDisposable
             long safeVramThreshold = 2L * 1024 * 1024 * 1024;
             while (_loadedModels.Count > 0 && availableVram < safeVramThreshold)
             {
-                EvictLruModel();
+                await EvictLruModelAsync().ConfigureAwait(false);
                 var newGpuInfo = await _gpuProfiler.GetGpuInfoAsync();
                 availableVram = newGpuInfo != null ? newGpuInfo.FreeVramMb * 1024L * 1024L : 0;
             }
@@ -107,19 +146,17 @@ public sealed class ModelPool : IDisposable
             int totalLayers = metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32;
             long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
             
-            // Cap context length to practical default to prevent VRAM overallocation.
-            // The model's trained context (often 1M+) would require enormous KV cache.
-            int rawContextLength = (int)(metadata?.ContextLength ?? 8192);
-            int contextLength = Math.Min(rawContextLength, 32768);
+            int rawContextLength = (int)(metadata?.ContextLength ?? 32768);
+            int contextLength = Math.Clamp(rawContextLength < 32768 ? 32768 : rawContextLength, 32768, 131072);
             
             // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
-            // We use Q8_0 KV cache (configured in InferenceEngine), so sizeof = 1 byte.
-            long kvCachePerLayerBytes = 2048; // Safe default: 2 * 8 * 128 * 1
+            // Klydis enforces Q4_0 4-bit quantized KV cache (configured in InferenceEngine), so sizeof = 0.5 bytes.
+            long kvCachePerLayerBytes = 1024; // Safe default: 2 * 8 * 128 * 0.5 = 1024
             if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCountKv.HasValue)
             {
                 long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
-                // K + V (2) * HeadCountKv * headDim * 1 byte (Q8_0 quantized KV cache)
-                kvCachePerLayerBytes = 2 * metadata.HeadCountKv.Value * headDim * 1;
+                // K + V (2) * HeadCountKv * headDim * 0.5 bytes (Q4_0 4-bit quantized KV cache)
+                kvCachePerLayerBytes = (long)(2 * metadata.HeadCountKv.Value * headDim * 0.5);
             }
 
             var offloadPlan = _offloadStrategy.CalculatePlan(
@@ -132,7 +169,7 @@ public sealed class ModelPool : IDisposable
                 OffloadStrategyType.FullGpu);
             
             var engineLogger = _loggerFactory.CreateLogger<InferenceEngine>();
-            var engine = new InferenceEngine(engineLogger);
+            var engine = new InferenceEngine(engineLogger, _nativeResourceDisposer);
             await engine.LoadModelAsync(modelFilePath, offloadPlan);
 
             var newModelInfo = new LoadedModelInfo(engine, modelId);
@@ -147,11 +184,32 @@ public sealed class ModelPool : IDisposable
     }
 
     /// <summary>
+    /// Evicts the least recently used model from the pool asynchronously.
+    /// </summary>
+    internal async Task EvictLruModelAsync()
+    {
+        var lruModel = _loadedModels.Values
+            .Where(m => m.ActiveUseCount == 0)
+            .OrderBy(m => m.LastActive)
+            .FirstOrDefault();
+        if (lruModel != null)
+        {
+            _logger.LogInformation("Evicting LRU model {ModelId} to free VRAM.", lruModel.ModelId);
+            await lruModel.Engine.UnloadModelAsync().ConfigureAwait(false);
+            await lruModel.Engine.DisposeAsync().ConfigureAwait(false);
+            _loadedModels.TryRemove(lruModel.ModelId, out _);
+        }
+    }
+
+    /// <summary>
     /// Evicts the least recently used model from the pool.
     /// </summary>
     private void EvictLruModel()
     {
-        var lruModel = _loadedModels.Values.OrderBy(m => m.LastActive).FirstOrDefault();
+        var lruModel = _loadedModels.Values
+            .Where(m => m.ActiveUseCount == 0)
+            .OrderBy(m => m.LastActive)
+            .FirstOrDefault();
         if (lruModel != null)
         {
             _logger.LogInformation("Evicting LRU model {ModelId} to free VRAM.", lruModel.ModelId);
@@ -177,14 +235,14 @@ public sealed class ModelPool : IDisposable
                 {
                     var now = DateTime.UtcNow;
                     var idleModels = _loadedModels.Values
-                        .Where(m => now - m.LastActive > _idleTimeout)
+                        .Where(m => m.ActiveUseCount == 0 && now - m.LastActive > _idleTimeout)
                         .ToList();
 
                     foreach (var model in idleModels)
                     {
                         _logger.LogInformation("Unloading model {ModelId} due to idle timeout.", model.ModelId);
-                        model.Engine.UnloadModel();
-                        model.Engine.Dispose();
+                        await model.Engine.UnloadModelAsync(ct).ConfigureAwait(false);
+                        await model.Engine.DisposeAsync().ConfigureAwait(false);
                         _loadedModels.TryRemove(model.ModelId, out _);
                     }
                 }
@@ -202,6 +260,31 @@ public sealed class ModelPool : IDisposable
                 _logger.LogError(ex, "Error in idle eviction loop.");
             }
         }
+    }
+
+    /// <summary>
+    /// Disposes the pool and forcefully unloads all managed models asynchronously.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        _idleTimeoutCts.Cancel();
+        _idleTimeoutCts.Dispose();
+
+        await _poolLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            foreach (var model in _loadedModels.Values)
+            {
+                await model.Engine.DisposeAsync().ConfigureAwait(false);
+            }
+            _loadedModels.Clear();
+        }
+        finally
+        {
+            _poolLock.Release();
+            _poolLock.Dispose();
+        }
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>
@@ -226,5 +309,6 @@ public sealed class ModelPool : IDisposable
             _poolLock.Release();
             _poolLock.Dispose();
         }
+        GC.SuppressFinalize(this);
     }
 }
