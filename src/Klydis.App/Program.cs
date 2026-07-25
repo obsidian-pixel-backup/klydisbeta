@@ -84,21 +84,6 @@ public class Program
                 }
             }
 
-            // First sync any custom/updated native engine binaries from %USERPROFILE%\.klydis\native\
-            try
-            {
-                Klydis.Core.Inference.NativeEngineManager.EnsureDirectoriesExist();
-                int customCopied = Klydis.Core.Inference.NativeEngineManager.SyncCustomNativeEngine();
-                if (customCopied > 0)
-                {
-                    try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Synced {customCopied} updated native DLLs from .klydis\\native\\ to root.{Environment.NewLine}"); } catch {}
-                }
-            }
-            catch (Exception customEx)
-            {
-                try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Error syncing custom native engine: {customEx.Message}{Environment.NewLine}"); } catch {}
-            }
-
             // Copy the active backend's DLLs directly to the application execution root folder.
             // In llama.cpp (b1000+), dynamic backend libraries (like ggml-cuda.dll, ggml-cpu-*.dll)
             // MUST reside in the same folder as llama.dll / the main executable to be loaded successfully.
@@ -169,6 +154,22 @@ public class Program
             catch (Exception ex)
             {
                 try { File.AppendAllText("llama_native.log", $"[ROOT_COPY] FATAL: Failed root copy: {ex}{Environment.NewLine}"); } catch {}
+            }
+
+            // Sync any custom/updated native engine binaries from %USERPROFILE%\.klydis\native\ AFTER default runtime copy
+            // so that user-provided llama.dll or backend updates override default bundled runtimes.
+            try
+            {
+                Klydis.Core.Inference.NativeEngineManager.EnsureDirectoriesExist();
+                int customCopied = Klydis.Core.Inference.NativeEngineManager.SyncCustomNativeEngine();
+                if (customCopied > 0)
+                {
+                    try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Synced {customCopied} updated native DLLs from .klydis\\native\\ to root.{Environment.NewLine}"); } catch {}
+                }
+            }
+            catch (Exception customEx)
+            {
+                try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Error syncing custom native engine: {customEx.Message}{Environment.NewLine}"); } catch {}
             }
             
             // Configure LLamaSharp backend library preferences before anything else.

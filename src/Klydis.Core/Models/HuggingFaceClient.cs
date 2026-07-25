@@ -469,6 +469,12 @@ public partial class HuggingFaceClient
 
         fileStream.Dispose();
         
+        if (totalBytes > 0 && totalDownloaded < totalBytes)
+        {
+            _logger.LogError("Download of {Filename} ended prematurely: received {Downloaded} of {Total} bytes.", filename, totalDownloaded, totalBytes);
+            throw new InvalidOperationException($"Download terminated prematurely. Downloaded {totalDownloaded} bytes out of {totalBytes} total bytes for {filename}.");
+        }
+
         if (File.Exists(destinationPath)) File.Delete(destinationPath);
         File.Move(tempFilePath, destinationPath);
 

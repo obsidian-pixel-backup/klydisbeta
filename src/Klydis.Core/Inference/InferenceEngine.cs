@@ -273,8 +273,21 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     catch (Exception loadEx)
                     {
                         var overrideDir = NativeEngineManager.CustomNativeDirectory;
+                        string msg = loadEx.Message ?? string.Empty;
+
+                        if (msg.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) || 
+                            msg.Contains("blk.", StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(
+                                $"Failed to load model '{Path.GetFileName(modelPath)}': The GGUF file is incomplete, truncated, or missing tensors ({msg}).\n\n" +
+                                $"• The download may have been interrupted. Please delete this model file and re-download it.\n" +
+                                $"• If this model was split into multiple parts (e.g. 00001-of-00002.gguf), all parts must be downloaded.\n" +
+                                $"• To support new architecture tensor layouts, place an updated llama.dll build into '{overrideDir}' and restart.",
+                                loadEx);
+                        }
+
                         throw new InvalidOperationException(
-                            $"Failed to load model '{Path.GetFileName(modelPath)}' natively. Architecture '{compat.Architecture}' tensor layout is incompatible with the active native llama.dll (Native error: {loadEx.Message}). To support this model variant, place an updated llama.dll build into '{overrideDir}' and restart.",
+                            $"Failed to load model '{Path.GetFileName(modelPath)}' natively. Architecture '{compat.Architecture}' tensor layout is incompatible with the active native llama.dll (Native error: {msg}). To support this model variant, place an updated llama.dll build into '{overrideDir}' and restart.",
                             loadEx);
                     }
 

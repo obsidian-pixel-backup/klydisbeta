@@ -25,11 +25,11 @@ public static class GgufCompatibilityAdapter
 {
     private static readonly HashSet<string> SupportedArchitectures = new(StringComparer.OrdinalIgnoreCase)
     {
-        "llama", "qwen", "qwen2", "qwen2.5", "qwen3", "qwen35", "qwen3.5", "qwen36", "qwen3.6",
-        "mistral", "mixtral", "gemma", "gemma2", "phi", "phi2", "phi3", "phi4",
-        "starcoder", "starcoder2", "command-r", "internlm2", "deepseek", "deepseek2", "deepseek3",
+        "llama", "qwen", "qwen2", "qwen2.5", "qwen3", "qwen35", "qwen3.5", "qwen36", "qwen3.6", "qwq",
+        "mistral", "mixtral", "gemma", "gemma2", "gemma3", "phi", "phi2", "phi3", "phi4",
+        "starcoder", "starcoder2", "command-r", "internlm", "internlm2", "deepseek", "deepseek2", "deepseek3", "deepseek3.5",
         "mamba", "mamba2", "rwkv", "cohort", "stablelm", "nemotron", "granite", "smollm",
-        "chatglm", "dbrx", "exaone", "olmo", "decilm", "bert", "nomic-bert", "whisper"
+        "chatglm", "dbrx", "exaone", "olmo", "decilm", "bert", "nomic-bert", "whisper", "glm", "mllama", "minicpm"
     };
 
     /// <summary>
@@ -57,7 +57,7 @@ public static class GgufCompatibilityAdapter
                 IsSupported: false,
                 Architecture: "unknown",
                 BlockCount: null,
-                WarningMessage: "Failed to read GGUF header metadata. File may be corrupted or not a valid GGUF file.",
+                WarningMessage: "Failed to read GGUF header metadata. File may be corrupted, truncated, or not a valid GGUF file.",
                 RequiresUpdatedNativeBackend: false
             );
         }
@@ -65,23 +65,11 @@ public static class GgufCompatibilityAdapter
         string arch = metadata.Architecture ?? "unknown";
         long? blockCount = metadata.BlockCount;
 
-        if (SupportedArchitectures.Contains(arch) || arch.StartsWith("qwen", StringComparison.OrdinalIgnoreCase) || arch.StartsWith("deepseek", StringComparison.OrdinalIgnoreCase) || arch.StartsWith("llama", StringComparison.OrdinalIgnoreCase) || arch.StartsWith("phi", StringComparison.OrdinalIgnoreCase) || arch.StartsWith("gemma", StringComparison.OrdinalIgnoreCase))
-        {
-            return new GgufCompatibilityResult(
-                IsSupported: true,
-                Architecture: arch,
-                BlockCount: blockCount,
-                WarningMessage: null,
-                RequiresUpdatedNativeBackend: false
-            );
-        }
-
-        // Default evaluation for unlisted or emerging GGUF architectures: attempt standard native load
         return new GgufCompatibilityResult(
             IsSupported: true,
             Architecture: arch,
             BlockCount: blockCount,
-            WarningMessage: $"Architecture '{arch}' (with {blockCount ?? 0} blocks) is attempting standard native load.",
+            WarningMessage: null,
             RequiresUpdatedNativeBackend: false
         );
     }
