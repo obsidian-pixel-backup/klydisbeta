@@ -108,4 +108,61 @@ public static class NativeEngineManager
             // Non-critical
         }
     }
+
+    /// <summary>
+    /// Downloads and extracts an updated native llama.dll build into %USERPROFILE%\.klydis\native\.
+    /// </summary>
+    /// <param name="downloadUrl">Optional custom download URL for zip package containing llama.dll.</param>
+    /// <param name="logger">Optional logger for telemetry.</param>
+    /// <returns>True if downloaded and deployed successfully.</returns>
+    public static async System.Threading.Tasks.Task<bool> DownloadLatestNativeEngineAsync(string? downloadUrl = null, ILogger? logger = null)
+    {
+        EnsureDirectoriesExist();
+
+        downloadUrl ??= "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-bin-win-vulkan-x64.zip";
+
+        try
+        {
+            logger?.LogInformation("Downloading updated native engine package from {Url}", downloadUrl);
+
+            using var httpClient = new System.Net.Http.HttpClient();
+            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Klydis/1.0");
+
+            var tempZipPath = Path.Combine(Path.GetTempPath(), $"llama_native_{Guid.NewGuid():N}.zip");
+            var zipBytes = await httpClient.GetByteArrayAsync(downloadUrl);
+            await File.WriteAllBytesAsync(tempZipPath, zipBytes);
+
+            var tempExtractDir = Path.Combine(Path.GetTempPath(), $"llama_extracted_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(tempExtractDir);
+            System.IO.Compression.ZipFile.ExtractToDirectory(tempZipPath, tempExtractDir);
+
+            int copied = 0;
+            foreach (var file in Directory.GetFiles(tempExtractDir, "*.*", SearchOption.AllDirectories))
+            {
+                var ext = Path.GetExtension(file).ToLowerInvariant();
+                if (ext == ".dll" || ext == ".exe")
+                {
+                    var dest = Path.Combine(CustomNativeDirectory, Path.GetFileName(file));
+                    File.Copy(file, dest, overwrite: true);
+                    copied++;
+                }
+            }
+
+            try { File.Delete(tempZipPath); } catch { }
+            try { Directory.Delete(tempExtractDir, recursive: true); } catch { }
+
+            if (copied > 0)
+            {
+                SyncCustomNativeEngine(logger: logger);
+                logger?.LogInformation("Successfully deployed {Count} native binaries to {Dir}", copied, CustomNativeDirectory);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Failed to download native engine update from {Url}", downloadUrl);
+        }
+
+        return false;
+    }
 }
