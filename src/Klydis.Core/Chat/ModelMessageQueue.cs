@@ -141,13 +141,13 @@ public class ModelMessageQueue
     }
 
     /// <summary>
-    /// Finds a queued message by ID.
+    /// Finds a queued message by ID, optionally scoped to a session.
     /// </summary>
-    public QueuedMessage? GetById(Guid id)
+    public QueuedMessage? GetById(Guid id, string? sessionId = null)
     {
         lock (_lock)
         {
-            return _queue.FirstOrDefault(m => m.Id == id);
+            return _queue.FirstOrDefault(m => m.Id == id && (string.IsNullOrEmpty(sessionId) || m.SessionId == sessionId));
         }
     }
 
@@ -164,6 +164,10 @@ public class ModelMessageQueue
             {
                 msg.Status = status;
                 updated = true;
+                if (status == QueuedMessageStatus.Incorporated || status == QueuedMessageStatus.Cancelled)
+                {
+                    _queue.Remove(msg);
+                }
             }
         }
 

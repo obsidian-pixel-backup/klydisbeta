@@ -72,7 +72,6 @@
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -93,24 +92,8 @@
             </StackPanel>
         </Grid>
 
-        <!-- Filter Bar -->
-        <Border Grid.Row="1" Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="15,10" Margin="0,0,0,20" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
-            <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock Text="Filters:" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,15,0"/>
-                
-                <CheckBox Content="👁 Vision" IsChecked="{Binding FilterVisionOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,15,0" />
-                <CheckBox Content="🧠 Thinking" IsChecked="{Binding FilterThinkingOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,25,0" />
-
-                <TextBlock Text="Size:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <ComboBox ItemsSource="{Binding AvailableSizeFilters}" SelectedItem="{Binding SelectedSizeFilter}" Width="120" Margin="0,0,25,0" />
-
-                <TextBlock Text="Role:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <ComboBox ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding SelectedRoleFilter}" Width="150" />
-            </WrapPanel>
-        </Border>
-
         <!-- Columns -->
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="20"/> <!-- Spacer -->
@@ -125,10 +108,27 @@
                         <TextBlock Text="Hugging Face Hub" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" />
                     </StackPanel>
                     
-                    <Grid Margin="0,0,0,20">
-                        <TextBox Text="{Binding HfSearchText, UpdateSourceTrigger=PropertyChanged, Delay=500}" 
+                    <Grid Margin="0,0,0,10">
+                        <TextBox Text="{Binding HfSearchText, UpdateSourceTrigger=PropertyChanged, Delay=300}" 
                                  Tag="Search Hugging Face for GGUF models..." />
                     </Grid>
+
+                    <!-- Hugging Face Dedicated Filter Bar -->
+                    <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="10,8" Margin="0,0,0,15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                        <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <CheckBox Content="👁 Vision" IsChecked="{Binding HfFilterVisionOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0" />
+                            <CheckBox Content="🧠 Thinking" IsChecked="{Binding HfFilterThinkingOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,12,0" />
+
+                            <TextBlock Text="Size:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <ComboBox ItemsSource="{Binding AvailableSizeFilters}" SelectedItem="{Binding HfSelectedSizeFilter}" Width="100" Margin="0,0,12,0" />
+
+                            <TextBlock Text="Role:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <ComboBox ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding HfSelectedRoleFilter}" Width="110" Margin="0,0,10,0" />
+
+                            <Button Content="✕ Clear" Command="{Binding ClearHfFiltersCommand}" Style="{StaticResource SecondaryButton}" Padding="6,2" FontSize="11" VerticalAlignment="Center"
+                                    Visibility="{Binding IsHfSearchOrFilterActive, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        </WrapPanel>
+                    </Border>
 
                     <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="15" Margin="0,0,0,20"
                             Visibility="{Binding HasActiveDownloads, Converter={StaticResource BooleanToVisibilityConverter}}">
@@ -152,7 +152,16 @@
                         </ItemsControl>
                     </Border>
 
-                    <!-- Search Results (Only visible if searching) -->
+                    <!-- Search Indicator & Header when Searching or Filtering -->
+                    <StackPanel Visibility="{Binding IsHfSearchOrFilterActive, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,0,0,10">
+                        <Grid Margin="0,0,0,5">
+                            <TextBlock Text="Raw Hugging Face Search Results" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" />
+                            <TextBlock Text="🔍 Searching Hugging Face..." HorizontalAlignment="Right" Foreground="{DynamicResource AccentPrimaryBrush}" FontSize="12" FontStyle="Italic" VerticalAlignment="Center"
+                                       Visibility="{Binding HfIsSearching, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Search Results -->
                     <ItemsControl ItemsSource="{Binding HfResults}" ItemTemplate="{StaticResource HfModelCardTemplate}" Margin="0,0,0,20" />
 
                     <!-- Categories -->
@@ -178,8 +187,22 @@
                 <StackPanel>
                     <TextBlock Text="Local Models" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10" />
                     <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" 
-                             Margin="0,0,0,20"
+                             Margin="0,0,0,10"
                              Tag="Search local models..." />
+
+                    <!-- Local Model Dedicated Filters Bar -->
+                    <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="10,8" Margin="0,0,0,15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                        <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <CheckBox Content="👁 Vision" IsChecked="{Binding FilterVisionOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0" />
+                            <CheckBox Content="🧠 Thinking" IsChecked="{Binding FilterThinkingOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,12,0" />
+
+                            <TextBlock Text="Size:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <ComboBox ItemsSource="{Binding AvailableSizeFilters}" SelectedItem="{Binding SelectedSizeFilter}" Width="100" Margin="0,0,12,0" />
+
+                            <TextBlock Text="Role:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <ComboBox ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding SelectedRoleFilter}" Width="110" />
+                        </WrapPanel>
+                    </Border>
 
                     <ListBox ItemsSource="{Binding FilteredModels}" SelectedItem="{Binding SelectedLocalModel, Mode=TwoWay}"
                              Background="Transparent" BorderThickness="0"
@@ -264,7 +287,7 @@
 
                     <TextBlock Text="No models found. Download models from the Hugging Face Hub." 
                                Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" Margin="10"
-                               Visibility="{Binding FilteredModels.Count, Converter={StaticResource BooleanToVisibilityConverter}}" /> <!-- Assuming False/0 triggers this properly via a converter, might need a InverseCountToVisibilityConverter in a real app but keeping original logic -->
+                               Visibility="{Binding FilteredModels.Count, Converter={StaticResource BooleanToVisibilityConverter}}" />
                 </StackPanel>
             </ScrollViewer>
         </Grid>

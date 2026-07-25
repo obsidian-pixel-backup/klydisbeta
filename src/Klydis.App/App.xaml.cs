@@ -124,6 +124,8 @@ public partial class App : Application
         services.AddSingleton<MessageStore>();
         services.AddSingleton<ContextOrchestrator>();
         services.AddSingleton<ModelMessageQueue>();
+        services.AddSingleton<Klydis.Core.Chat.CamoufoxManager>();
+        services.AddSingleton<Klydis.Core.Chat.StealthBrowserService>();
         services.AddSingleton<ChatEngine>();
         services.AddSingleton<ToolExecutor>();
         services.AddSingleton<PromptTemplateEngine>();

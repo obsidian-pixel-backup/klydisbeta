@@ -56,18 +56,30 @@ public partial class ModelLibraryViewModel : ObservableObject
 
     private void UpdateTotalDownloadProgress()
     {
-        if (ActiveDownloads.Count == 0)
+        List<ActiveDownloadViewModel> snapshot;
+        if (System.Windows.Application.Current != null && !System.Windows.Application.Current.Dispatcher.CheckAccess())
+        {
+            System.Windows.Application.Current.Dispatcher.Invoke(() => UpdateTotalDownloadProgress());
+            return;
+        }
+
+        lock (ActiveDownloads)
+        {
+            snapshot = ActiveDownloads.ToList();
+        }
+
+        if (snapshot.Count == 0)
         {
             TotalDownloadProgress = 0;
             return;
         }
 
         double total = 0;
-        foreach (var download in ActiveDownloads)
+        foreach (var download in snapshot)
         {
             total += download.Progress;
         }
-        TotalDownloadProgress = total / ActiveDownloads.Count;
+        TotalDownloadProgress = total / snapshot.Count;
     }
 
     [ObservableProperty]
@@ -79,6 +91,7 @@ public partial class ModelLibraryViewModel : ObservableObject
     [ObservableProperty]
     private ObservableCollection<HfModelCardViewModel> _highestRatedModels = new();
 
+    // Local model filters
     [ObservableProperty]
     private bool _filterVisionOnly;
 
@@ -89,11 +102,23 @@ public partial class ModelLibraryViewModel : ObservableObject
     private string _selectedSizeFilter = "All Sizes";
 
     [ObservableProperty]
-    private ObservableCollection<string> _availableSizeFilters = new() { "All Sizes", "< 7B", "7B - 14B", "14B - 35B", "> 35B" };
-
-    [ObservableProperty]
     private string _selectedRoleFilter = "All Roles";
 
+    // Hugging Face isolated model filters
+    [ObservableProperty]
+    private bool _hfFilterVisionOnly;
+
+    [ObservableProperty]
+    private bool _hfFilterThinkingOnly;
+
+    [ObservableProperty]
+    private string _hfSelectedSizeFilter = "All Sizes";
+
+    [ObservableProperty]
+    private string _hfSelectedRoleFilter = "All Roles";
+
+    [ObservableProperty]
+    private ObservableCollection<string> _availableSizeFilters = new() { "All Sizes", "< 7B", "7B - 14B", "14B - 35B", "> 35B" };
 
     [ObservableProperty]
     private ObservableCollection<string> _availableRoleFilters = new() { "All Roles", "Chat", "Code", "Instruct", "Vision", "Researcher", "UI Designer", "None" };
@@ -109,14 +134,27 @@ public partial class ModelLibraryViewModel : ObservableObject
         }
     }
 
-    partial void OnFilterVisionOnlyChanged(bool value) { FilterModels(); ApplyHfFilters(); }
-    partial void OnFilterThinkingOnlyChanged(bool value) { FilterModels(); ApplyHfFilters(); }
+    // Local model filter change handlers (strictly isolated from HF)
+    partial void OnFilterVisionOnlyChanged(bool value) { FilterModels(); }
+    partial void OnFilterThinkingOnlyChanged(bool value) { FilterModels(); }
     partial void OnSelectedSizeFilterChanged(string value) { FilterModels(); }
     partial void OnSelectedRoleFilterChanged(string value) { FilterModels(); }
 
+    // Hugging Face filter change handlers (strictly isolated from Local models)
+    partial void OnHfFilterVisionOnlyChanged(bool value) { OnHfSearchOrFilterChanged(); }
+    partial void OnHfFilterThinkingOnlyChanged(bool value) { OnHfSearchOrFilterChanged(); }
+    partial void OnHfSelectedSizeFilterChanged(string value) { OnHfSearchOrFilterChanged(); }
+    partial void OnHfSelectedRoleFilterChanged(string value) { OnHfSearchOrFilterChanged(); }
+
+    public bool IsHfSearchOrFilterActive =>
+        !string.IsNullOrWhiteSpace(HfSearchText) ||
+        HfFilterVisionOnly ||
+        HfFilterThinkingOnly ||
+        (HfSelectedSizeFilter != null && HfSelectedSizeFilter != "All Sizes") ||
+        (HfSelectedRoleFilter != null && HfSelectedRoleFilter != "All Roles");
+
     private void ApplyHfFilters()
     {
-        var view1 = System.Windows.Data.CollectionViewSource.GetDefaultView(HfResults);
         var view2 = System.Windows.Data.CollectionViewSource.GetDefaultView(PopularModels);
         var view3 = System.Windows.Data.CollectionViewSource.GetDefaultView(NewestModels);
         var view4 = System.Windows.Data.CollectionViewSource.GetDefaultView(HighestRatedModels);
@@ -125,14 +163,13 @@ public partial class ModelLibraryViewModel : ObservableObject
         {
             if (obj is HfModelCardViewModel card)
             {
-                if (FilterVisionOnly && !card.IsVision) return false;
-                if (FilterThinkingOnly && !card.IsThinking) return false;
+                if (HfFilterVisionOnly && !card.IsVision) return false;
+                if (HfFilterThinkingOnly && !card.IsThinking) return false;
                 return true;
             }
             return false;
         };
 
-        if (view1 != null) { view1.Filter = filter; view1.Refresh(); }
         if (view2 != null) { view2.Filter = filter; view2.Refresh(); }
         if (view3 != null) { view3.Filter = filter; view3.Refresh(); }
         if (view4 != null) { view4.Filter = filter; view4.Refresh(); }
@@ -406,16 +443,16 @@ public partial class ModelLibraryViewModel : ObservableObject
             // Read GGUF metadata for dynamic sizing
             var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
             int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
-            long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
+            long layerSizeBytes = modelInfo.FileSizeBytes / Math.Max(1, totalLayers); // Approximation
             
-            int rawContextLength = (int)(metadata?.ContextLength ?? 32768);
-            int contextLength = Math.Clamp(rawContextLength < 32768 ? 32768 : rawContextLength, 32768, 131072);
+            int rawContextLength = (int)(metadata?.ContextLength ?? 4096);
+            int contextLength = Math.Clamp(rawContextLength, 2048, 131072);
             
-            long kvCachePerLayerBytes = 2048; // Safe default
-            if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCount.Value > 0 && metadata.HeadCountKv.HasValue)
+            long kvCachePerLayerBytes = 2048;
+            if (metadata != null)
             {
-                long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
-                kvCachePerLayerBytes = 2 * metadata.HeadCountKv.Value * headDim * 1;
+                var kvEst = Klydis.Core.Inference.KvCacheCalculator.Calculate(metadata, 1, Klydis.Core.Inference.KvCacheQuantizationType.Q4_0);
+                kvCachePerLayerBytes = (long)Math.Max(512, kvEst.BytesPerToken / Math.Max(1, kvEst.NumLayers));
             }
 
             var plan = _offloadStrategy.CalculatePlan(
@@ -425,7 +462,7 @@ public partial class ModelLibraryViewModel : ObservableObject
                 contextLength, 
                 gpuInfo, 
                 systemInfo, 
-                Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
+                Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
 
             if (ct.IsCancellationRequested || seqId != System.Threading.Volatile.Read(ref _modelLoadSequenceId)) return;
 
@@ -501,17 +538,38 @@ public partial class ModelLibraryViewModel : ObservableObject
     [ObservableProperty]
     private bool _isHfCategoriesVisible = true;
 
+    private System.Threading.CancellationTokenSource? _hfSearchCts;
+
     partial void OnHfSearchTextChanged(string value)
     {
-        IsHfCategoriesVisible = string.IsNullOrWhiteSpace(value);
-        if (!string.IsNullOrWhiteSpace(value))
+        OnHfSearchOrFilterChanged();
+    }
+
+    private void OnHfSearchOrFilterChanged()
+    {
+        bool active = IsHfSearchOrFilterActive;
+        IsHfCategoriesVisible = !active;
+
+        if (active)
         {
-            _ = HfSearchAsync();
+            _ = TriggerHfSearchAsync();
         }
         else
         {
+            _hfSearchCts?.Cancel();
             HfResults.Clear();
+            ApplyHfFilters();
         }
+    }
+
+    [RelayCommand]
+    private void ClearHfFilters()
+    {
+        HfSearchText = string.Empty;
+        HfFilterVisionOnly = false;
+        HfFilterThinkingOnly = false;
+        HfSelectedSizeFilter = "All Sizes";
+        HfSelectedRoleFilter = "All Roles";
     }
 
     [RelayCommand]
@@ -609,24 +667,168 @@ public partial class ModelLibraryViewModel : ObservableObject
     [RelayCommand]
     private async Task HfSearchAsync()
     {
+        await TriggerHfSearchAsync();
+    }
+
+    private async Task TriggerHfSearchAsync()
+    {
+        _hfSearchCts?.Cancel();
+        _hfSearchCts?.Dispose();
+        _hfSearchCts = new System.Threading.CancellationTokenSource();
+        var ct = _hfSearchCts.Token;
+
+        try
+        {
+            await Task.Delay(300, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
         HfIsSearching = true;
         try
         {
-            string query = HfSearchText;
-            if (FilterVisionOnly) query += " vision";
-            if (FilterThinkingOnly) query += " think";
-            
-            var results = await _hfClient.SearchModelsAsync(query, 20, "downloads");
-            HfResults.Clear();
-            foreach (var m in results) HfResults.Add(CreateHfCard(m));
-            
-            ApplyHfFilters();
+            var queryParts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(HfSearchText))
+            {
+                queryParts.Add(HfSearchText.Trim());
+            }
+
+            if (HfFilterVisionOnly) queryParts.Add("vision");
+            if (HfFilterThinkingOnly) queryParts.Add("think");
+
+            if (HfSelectedRoleFilter != "All Roles" && HfSelectedRoleFilter != "None")
+            {
+                switch (HfSelectedRoleFilter)
+                {
+                    case "Code": queryParts.Add("code"); break;
+                    case "Instruct": queryParts.Add("instruct"); break;
+                    case "Chat": queryParts.Add("chat"); break;
+                    case "Vision": queryParts.Add("vision"); break;
+                    case "Researcher": queryParts.Add("research"); break;
+                    case "UI Designer": queryParts.Add("ui"); break;
+                }
+            }
+
+            if (HfSelectedSizeFilter != "All Sizes")
+            {
+                switch (HfSelectedSizeFilter)
+                {
+                    case "< 7B": queryParts.Add("7b"); break;
+                    case "7B - 14B": queryParts.Add("7b"); break;
+                    case "14B - 35B": queryParts.Add("14b"); break;
+                    case "> 35B": queryParts.Add("70b"); break;
+                }
+            }
+
+            string hfQuery = string.Join(" ", queryParts.Distinct(StringComparer.OrdinalIgnoreCase));
+
+            var rawResults = await _hfClient.SearchModelsAsync(hfQuery, limit: 60, sort: "downloads", ct: ct);
+            if (ct.IsCancellationRequested) return;
+
+            if (rawResults.Count == 0 && queryParts.Count > 1 && !string.IsNullOrWhiteSpace(HfSearchText))
+            {
+                rawResults = await _hfClient.SearchModelsAsync(HfSearchText.Trim(), limit: 60, sort: "downloads", ct: ct);
+            }
+
+            if (ct.IsCancellationRequested) return;
+
+            var filteredList = rawResults.Where(info =>
+            {
+                if (HfFilterVisionOnly)
+                {
+                    bool isVision = info.RepoId.Contains("vision", StringComparison.OrdinalIgnoreCase) || 
+                                    info.RepoId.Contains("llava", StringComparison.OrdinalIgnoreCase) || 
+                                    info.RepoId.Contains("pixtral", StringComparison.OrdinalIgnoreCase) ||
+                                    info.RepoId.Contains("qwen-vl", StringComparison.OrdinalIgnoreCase) ||
+                                    info.Tags.Any(t => t.Contains("vision", StringComparison.OrdinalIgnoreCase) || 
+                                                       t.Contains("image", StringComparison.OrdinalIgnoreCase) ||
+                                                       t.Contains("vlm", StringComparison.OrdinalIgnoreCase) ||
+                                                       t.Contains("multimodal", StringComparison.OrdinalIgnoreCase)) ||
+                                    info.PipelineTag.Contains("image", StringComparison.OrdinalIgnoreCase) ||
+                                    info.PipelineTag.Contains("vision", StringComparison.OrdinalIgnoreCase);
+                    if (!isVision) return false;
+                }
+
+                if (HfFilterThinkingOnly)
+                {
+                    bool isThinking = info.RepoId.Contains("think", StringComparison.OrdinalIgnoreCase) || 
+                                      info.RepoId.Contains("-r1", StringComparison.OrdinalIgnoreCase) ||
+                                      info.Tags.Any(t => t.Contains("think", StringComparison.OrdinalIgnoreCase) ||
+                                                         t.Contains("chain-of-thought", StringComparison.OrdinalIgnoreCase) ||
+                                                         t.Contains("reasoning", StringComparison.OrdinalIgnoreCase));
+                    if (!isThinking) return false;
+                }
+
+                if (HfSelectedSizeFilter != "All Sizes")
+                {
+                    double? size = Klydis.Core.Models.HuggingFaceClient.ExtractParameterSize(info.RepoId, info.Tags);
+                    if (size.HasValue)
+                    {
+                        bool sizeMatches = HfSelectedSizeFilter switch
+                        {
+                            "< 7B" => size.Value < 7,
+                            "7B - 14B" => size.Value >= 7 && size.Value <= 14,
+                            "14B - 35B" => size.Value > 14 && size.Value <= 35,
+                            "> 35B" => size.Value > 35,
+                            _ => true
+                        };
+                        if (!sizeMatches) return false;
+                    }
+                }
+
+                if (HfSelectedRoleFilter != "All Roles" && HfSelectedRoleFilter != "None")
+                {
+                    bool roleMatches = HfSelectedRoleFilter switch
+                    {
+                        "Chat" => info.RepoId.Contains("chat", StringComparison.OrdinalIgnoreCase) || info.RepoId.Contains("instruct", StringComparison.OrdinalIgnoreCase),
+                        "Code" => info.RepoId.Contains("code", StringComparison.OrdinalIgnoreCase) || info.RepoId.Contains("coder", StringComparison.OrdinalIgnoreCase) || info.Tags.Any(t => t.Contains("code", StringComparison.OrdinalIgnoreCase)),
+                        "Instruct" => info.RepoId.Contains("instruct", StringComparison.OrdinalIgnoreCase),
+                        "Vision" => info.RepoId.Contains("vision", StringComparison.OrdinalIgnoreCase) || info.RepoId.Contains("vl", StringComparison.OrdinalIgnoreCase) || info.Tags.Any(t => t.Contains("vision", StringComparison.OrdinalIgnoreCase)),
+                        "Researcher" => info.RepoId.Contains("research", StringComparison.OrdinalIgnoreCase) || info.RepoId.Contains("r1", StringComparison.OrdinalIgnoreCase) || info.Tags.Any(t => t.Contains("math", StringComparison.OrdinalIgnoreCase) || t.Contains("reasoning", StringComparison.OrdinalIgnoreCase)),
+                        "UI Designer" => info.RepoId.Contains("ui", StringComparison.OrdinalIgnoreCase) || info.RepoId.Contains("design", StringComparison.OrdinalIgnoreCase),
+                        _ => true
+                    };
+                    if (!roleMatches) return false;
+                }
+
+                return true;
+            }).ToList();
+
+            var rankedList = Klydis.Core.Models.HuggingFaceClient.RankResults(filteredList, HfSearchText);
+
+            Action updateUi = () =>
+            {
+                if (ct.IsCancellationRequested) return;
+                HfResults.Clear();
+                foreach (var item in rankedList)
+                {
+                    HfResults.Add(CreateHfCard(item));
+                }
+            };
+
+            if (System.Windows.Application.Current != null)
+            {
+                System.Windows.Application.Current.Dispatcher.Invoke(updateUi);
+            }
+            else
+            {
+                updateUi();
+            }
         }
+        catch (OperationCanceledException) { }
         catch (Exception) { }
-        HfIsSearching = false;
+        finally
+        {
+            if (!ct.IsCancellationRequested)
+            {
+                HfIsSearching = false;
+            }
+        }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task DownloadModelAsync(HfFileViewModel file)
     {
         if (file == null) return;
@@ -638,6 +840,14 @@ public partial class ModelLibraryViewModel : ObservableObject
 
     private async Task StartDownloadAsync(string repoId, string fileName, string destPath)
     {
+        lock (ActiveDownloads)
+        {
+            if (ActiveDownloads.Any(d => string.Equals(d.FileName, fileName, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+        }
+
         var downloadVm = new ActiveDownloadViewModel
         {
             FileName = fileName,
@@ -647,8 +857,14 @@ public partial class ModelLibraryViewModel : ObservableObject
 
         System.Windows.Application.Current.Dispatcher.Invoke(() =>
         {
-            ActiveDownloads.Add(downloadVm);
-            OnPropertyChanged(nameof(HasActiveDownloads));
+            lock (ActiveDownloads)
+            {
+                if (!ActiveDownloads.Any(d => string.Equals(d.FileName, fileName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    ActiveDownloads.Add(downloadVm);
+                    OnPropertyChanged(nameof(HasActiveDownloads));
+                }
+            }
         });
 
         var progress = new Progress<Klydis.Core.Models.DownloadProgress>(p =>

@@ -246,6 +246,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 parameters.TypeK = kvType;
                 parameters.TypeV = kvType;
 
+                var compat = GgufCompatibilityAdapter.Evaluate(modelPath);
+                if (compat.WarningMessage != null)
+                {
+                    _logger.LogWarning("GGUF Pre-flight Notice: {Message}", compat.WarningMessage);
+                }
+
                 var metadata = Models.GgufMetadataReader.Parse(modelPath);
                 if (metadata != null)
                 {
@@ -258,11 +264,57 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
 
                 _modelParams = parameters;
-                _weights = LLamaWeights.LoadFromFile(parameters);
-                _context = _weights.CreateContext(parameters);
+                try
+                {
+                    try
+                    {
+                        _weights = LLamaWeights.LoadFromFile(parameters);
+                    }
+                    catch (Exception loadEx)
+                    {
+                        var overrideDir = NativeEngineManager.CustomNativeDirectory;
+                        throw new InvalidOperationException(
+                            $"Failed to load model '{Path.GetFileName(modelPath)}' natively. Architecture '{compat.Architecture}' tensor layout is incompatible with the active native llama.dll (Native error: {loadEx.Message}). To support this model variant, place an updated llama.dll build into '{overrideDir}' and restart.",
+                            loadEx);
+                    }
+
+                    if (_weights == null)
+                    {
+                        throw new InvalidOperationException($"Failed to load model weights from '{modelPath}'.");
+                    }
+
+                    _context = _weights.CreateContext(parameters);
+                    if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
+                    {
+                        throw new InvalidOperationException($"Failed to create context for model '{modelPath}'. Native context handle is invalid (insufficient GPU VRAM for the KV cache).");
+                    }
+
+                    _executor = new InteractiveExecutor(_context);
+                }
+                catch (Exception gpuEx) when (offloadPlan.GpuLayers != 0 && !compat.RequiresUpdatedNativeBackend)
+                {
+                    _logger.LogWarning(gpuEx, "GPU model/context creation failed for {ModelPath}. Falling back to CPU execution.", modelPath);
+                    UnloadModelInternal();
+
+                    // Fallback to CPU-only execution with conservative context
+                    parameters.GpuLayerCount = 0;
+                    parameters.ContextSize = (uint)Math.Min(4096, offloadPlan.RecommendedContextSize);
+
+                    _weights = LLamaWeights.LoadFromFile(parameters);
+                    if (_weights == null)
+                    {
+                        throw new InvalidOperationException($"CPU fallback failed to load model weights from '{modelPath}'.");
+                    }
+
+                    _context = _weights.CreateContext(parameters);
+                    if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
+                    {
+                        throw new InvalidOperationException($"CPU fallback failed to create context for '{modelPath}': {gpuEx.Message}");
+                    }
+
+                    _executor = new InteractiveExecutor(_context);
+                }
                 
-                // Using InteractiveExecutor for hybrid fast-path prefix caching
-                _executor = new InteractiveExecutor(_context);
                 _lastEvaluatedPrompt = string.Empty;
 
                 CurrentModelPath = modelPath;
@@ -368,7 +420,6 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     else
                     {
                         // HYBRID EXECUTOR LOGIC: Fast-path for appended conversation turns, full reset for new chats
-                        var cleanLastPrompt = !string.IsNullOrEmpty(_lastEvaluatedPrompt) ? SanitizeThinkingTags(_lastEvaluatedPrompt) : null;
                         if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt, StringComparison.Ordinal))
                         {
                             textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
@@ -376,13 +427,6 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                             // Strip leading turn-ending stop tokens (and trailing newlines/spaces) to prevent AntiPrompts
                             // from matching at token 0 of prompt pre-fill.
-                            textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
-                        }
-                        else if (!string.IsNullOrEmpty(cleanLastPrompt) && prompt.StartsWith(cleanLastPrompt, StringComparison.Ordinal))
-                        {
-                            textToEvaluate = prompt.Substring(cleanLastPrompt.Length);
-                            _logger.LogDebug("Fast-path inference triggered via sanitized prompt prefix. Initial delta length: {DeltaLength} chars.", textToEvaluate.Length);
-
                             textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
                         }
                         else
@@ -427,9 +471,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     
                     if (!isIsolated)
                     {
-                        // Update the state hash to include both the input prompt and the sanitized generated response
-                        var cleanGen = SanitizeThinkingTags(generatedContent.ToString());
-                        _lastEvaluatedPrompt = prompt + cleanGen;
+                        // Update the state hash to include both the input prompt and exact generated response matching native KV cache
+                        _lastEvaluatedPrompt = prompt + generatedContent.ToString();
                     }
                     completedNormally = true;
 

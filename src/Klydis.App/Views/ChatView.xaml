@@ -896,43 +896,62 @@
                 <StackPanel>
                     <!-- Queue Status Bar -->
                     <Border Visibility="{Binding HasQueuedMessages, Converter={StaticResource BoolToVisConverter}}"
-                            Background="{DynamicResource CardBackgroundBrush}" 
+                            Background="{DynamicResource SurfaceElevatedBrush}" 
                             BorderBrush="{DynamicResource BorderMidBrush}" 
                             BorderThickness="1" CornerRadius="8" Margin="0,0,0,10" Padding="10,6">
                         <DockPanel>
                             <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                                <TextBlock Text="⚡ Queue:" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,6,0"/>
-                                <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="10" Padding="6,1">
+                                <TextBlock Text="⚡ Queue:" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="10" Padding="6,1.5" VerticalAlignment="Center">
                                     <TextBlock Text="{Binding QueuedMessages.Count, StringFormat='{}{0} item(s)'}" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
                                 </Border>
                             </StackPanel>
-                            <Button DockPanel.Dock="Right" Style="{DynamicResource GhostButton}" Command="{Binding ClearQueueCommand}" ToolTip="Clear all queued messages for this session" VerticalAlignment="Center" Margin="8,0,0,0" Padding="6,2">
-                                <TextBlock Text="✕ Clear All" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}"/>
+                            <Button DockPanel.Dock="Right" Style="{DynamicResource GhostButton}" Command="{Binding ClearQueueCommand}" ToolTip="Clear all queued messages for this session" VerticalAlignment="Center" Margin="8,0,0,0" Padding="6,3">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="✕" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Clear All" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}"/>
+                                </StackPanel>
                             </Button>
-                            <ItemsControl ItemsSource="{Binding QueuedMessages}">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <WrapPanel Orientation="Horizontal"/>
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border Background="{DynamicResource SubCardBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Margin="4,2" Padding="6,3">
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <Button Style="{DynamicResource GhostButton}" Command="{Binding DataContext.ToggleQueueItemModeCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" ToolTip="Click to toggle between Steer and Direct Send" Margin="0,0,6,0" Padding="4,1">
-                                                    <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="4,1">
-                                                        <TextBlock Text="{Binding ModeBadgeText}" FontSize="10.5" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                                    </Border>
-                                                </Button>
-                                                <TextBlock Text="{Binding Content}" MaxWidth="220" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}"/>
-                                                <Button Style="{DynamicResource GhostButton}" Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" Margin="6,0,0,0" Padding="2" ToolTip="Cancel/Remove Queued Request">
-                                                    <TextBlock Text="✕" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
-                                                </Button>
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Focusable="False">
+                                <ItemsControl ItemsSource="{Binding QueuedMessages}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{DynamicResource InputBackgroundBrush}" 
+                                                    BorderBrush="{DynamicResource BorderBrush}" 
+                                                    BorderThickness="1" CornerRadius="6" Margin="0,0,6,0" Padding="6,4">
+                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <Button Style="{DynamicResource GhostButton}" 
+                                                            Command="{Binding DataContext.ToggleQueueItemModeCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" 
+                                                            CommandParameter="{Binding}" 
+                                                            ToolTip="Click to toggle between Steer and Direct Send" 
+                                                            Margin="0,0,6,0" Padding="0">
+                                                        <Border x:Name="ModeBadgeBorder" Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="5,1.5">
+                                                            <TextBlock x:Name="ModeText" Text="{Binding ModeBadgeText}" FontSize="10.5" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                                        </Border>
+                                                    </Button>
+                                                    <TextBlock Text="{Binding Content}" MaxWidth="220" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}"/>
+                                                    <Button Style="{DynamicResource QueueItemCloseButton}" 
+                                                            Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" 
+                                                            CommandParameter="{Binding}" 
+                                                            Margin="6,0,0,0" ToolTip="Cancel/Remove Queued Request"
+                                                            VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Border>
+                                            <DataTemplate.Triggers>
+                                                <DataTrigger Binding="{Binding ModeBadgeText}" Value="Direct Send">
+                                                    <Setter TargetName="ModeBadgeBorder" Property="Background" Value="#252A18"/>
+                                                    <Setter TargetName="ModeText" Property="Foreground" Value="#F59E0B"/>
+                                                </DataTrigger>
+                                            </DataTemplate.Triggers>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
                         </DockPanel>
                     </Border>
 
@@ -1023,17 +1042,16 @@
                             </TextBlock>
                         </Grid>
 
-                        <Button Grid.Column="2" Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Margin="10,0,0,0" Width="40" Height="40" VerticalAlignment="Bottom" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
-                            <Path Data="M 2,8 L 13,8 M 8,3 L 13,8 L 8,13" Stroke="{DynamicResource TextInverse}" StrokeThickness="2" Width="15" Height="14" Stretch="Uniform" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                        </Button>
-
-                        <StackPanel Grid.Column="3" Orientation="Horizontal" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" VerticalAlignment="Bottom" Margin="10,0,0,0">
+                        <StackPanel Grid.Column="2" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Bottom" Margin="10,0,0,0">
                             <Button Style="{DynamicResource SecondaryButton}" Command="{Binding EnqueueMessageCommand}" Height="40" Padding="8,0" Margin="0,0,6,0" ToolTip="Add message to processing queue">
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="Queue" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                    <TextBlock Text="+ Queue" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
                                 </StackPanel>
                             </Button>
-                            <Button Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Width="40" Height="40" Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="0" Padding="0" ToolTip="Stop generating">
+                            <Button Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Width="40" Height="40" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
+                                <Path Data="M 2,8 L 13,8 M 8,3 L 13,8 L 8,13" Stroke="{DynamicResource TextInverse}" StrokeThickness="2" Width="15" Height="14" Stretch="Uniform" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                            </Button>
+                            <Button Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" Width="40" Height="40" Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="0" Padding="0" ToolTip="Stop generating">
                                 <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ErrorBrush}"/>
                             </Button>
                         </StackPanel>

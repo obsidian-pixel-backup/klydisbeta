@@ -68,9 +68,11 @@ public class ToolExecutor(
     Klydis.Core.Memory.MessageStore messageStore, 
     Klydis.Core.Memory.ContextOrchestrator contextOrchestrator,
     ModelMessageQueue? messageQueue = null,
-    Klydis.Core.Skills.SkillLibraryManager? skillLibraryManager = null)
+    Klydis.Core.Skills.SkillLibraryManager? skillLibraryManager = null,
+    StealthBrowserService? stealthBrowserService = null)
 {
     private static readonly HttpClient _httpClient = new HttpClient();
+    private readonly StealthBrowserService? _stealthBrowserService = stealthBrowserService;
     
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public Klydis.Core.Skills.SkillLibraryManager? SkillLibraryManager { get; set; } = skillLibraryManager;
@@ -106,24 +108,27 @@ public class ToolExecutor(
             new("path", "string", "Absolute path to the file", true),
             new("content", "string", "Content to write", true)
         }, false),
-        new ToolDefinition("list_directory", "Lists directory contents with sizes", new List<ToolParameter>
+        new ToolDefinition("list_directory", "Lists immediate children of a directory with sizes. For very large directories (e.g. system32), consider using search_files instead.", new List<ToolParameter>
         {
             new("path", "string", "Absolute path to the directory", true)
         }, false),
-        new ToolDefinition("run_command", "Executes PowerShell command", new List<ToolParameter>
+        new ToolDefinition("run_command", "Executes a PowerShell command and returns stdout/stderr. Only use real PowerShell cmdlets. For app launching use Start-Process -FilePath ... -ArgumentList ... Pipe large outputs through Select-Object -First N.", new List<ToolParameter>
         {
-            new("command", "string", "Command to execute", true)
+            new("command", "string", "Command to execute", true),
+            new("working_directory", "string", "Optional working directory for command execution", false),
+            new("timeout_seconds", "integer", "Optional timeout in seconds (default 60)", false)
         }, false),
         new ToolDefinition("get_system_info", "Returns CPU, RAM, GPU, and disk info", new List<ToolParameter>(), false),
-        new ToolDefinition("search_web", "Searches the web for a query", new List<ToolParameter>
+        new ToolDefinition("search_web", "Searches the web and returns top 5 results with clean target URLs, titles, and snippets. Summarize results for the user rather than dumping raw output.", new List<ToolParameter>
         {
-            new("query", "string", "Search query", true)
+            new("query", "string", "Search query", true),
+            new("max_results", "integer", "Optional maximum results to return (default 5)", false)
         }, false),
-        new ToolDefinition("crawl_url", "Fetches JS-rendered HTML from URL using a headless browser and converts it to clean Markdown for LLMs.", new List<ToolParameter>
+        new ToolDefinition("crawl_url", "Fetches and renders a web page, extracts main content as clean Markdown. Use for reading specific documentation pages or articles.", new List<ToolParameter>
         {
             new("url", "string", "Target URL", true)
         }, false),
-        new ToolDefinition("search_files", "Searches directory for files matching pattern or containing text", new List<ToolParameter>
+        new ToolDefinition("search_files", "Searches directory recursively for files matching a pattern. Returns up to 20 matches. Do NOT call repeatedly with identical arguments.", new List<ToolParameter>
         {
             new("path", "string", "Directory to search", true),
             new("pattern", "string", "File pattern (e.g. *.cs)", true),
@@ -271,7 +276,11 @@ public class ToolExecutor(
         
         if (toolDef == null)
         {
-            return new ToolResult(request.Name, false, string.Empty, $"Tool '{request.Name}' not found.");
+            var validToolNames = string.Join(", ", tools.Select(t => t.Name));
+            var guidance = $"Tool '{request.Name}' does not exist in available system tools.\n" +
+                           $"Available valid tools are: [{validToolNames}].\n" +
+                           $"Guidance: To execute PowerShell commands, launch apps, or manage system processes, use 'run_command' with Start-Process syntax instead of inventing custom tool names.";
+            return new ToolResult(request.Name, false, string.Empty, guidance);
         }
 
         bool isRisky = IsRiskyRequest(request);
@@ -492,60 +501,94 @@ public class ToolExecutor(
         var command = GetStringArg(request.Arguments, "command");
         if (string.IsNullOrEmpty(command)) return new ToolResult(request.Name, false, "", "Command is required");
 
-        // Handle standard command chaining operators (&& -> ;) for PowerShell compatibility
+        var workingDir = GetStringArg(request.Arguments, "working_directory");
+        if (string.IsNullOrWhiteSpace(workingDir) || !Directory.Exists(workingDir))
+        {
+            workingDir = Directory.GetCurrentDirectory();
+        }
+
+        int timeoutMs = 60000;
+        if (request.Arguments != null && request.Arguments.TryGetValue("timeout_seconds", out var timeoutObj))
+        {
+            var unwrapped = UnwrapJsonElement(timeoutObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int sec) && sec > 0)
+            {
+                timeoutMs = Math.Clamp(sec, 5, 300) * 1000;
+            }
+        }
+
+        // Auto-normalize common PowerShell parameter binding mistakes (e.g. `start chrome --new-window http...` -> `Start-Process chrome -ArgumentList '--new-window', 'http...'`)
         var sanitizedCmd = Regex.Replace(command, @"(?<=\s|^)&&(?=\s|$)", ";");
+        var matchStartFlags = Regex.Match(sanitizedCmd, @"^(?:start|Start-Process)\s+([a-zA-Z0-9_\-\.\:\\]+)\s+(--?[a-zA-Z0-9_\-\.]+.*)$", RegexOptions.IgnoreCase);
+        if (matchStartFlags.Success)
+        {
+            string appName = matchStartFlags.Groups[1].Value;
+            string rawArgs = matchStartFlags.Groups[2].Value;
+            sanitizedCmd = $"Start-Process -FilePath \"{appName}\" -ArgumentList {rawArgs}";
+        }
+
         var encodedCmd = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitizedCmd));
 
-        // Use Task.Run to wrap synchronous process execution
-        return await Task.Run(() =>
+        try
         {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encodedCmd}",
+                WorkingDirectory = workingDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process == null) return new ToolResult(request.Name, false, "", "Failed to start process");
+
+            // Read stdout and stderr asynchronously concurrently with process execution to avoid pipe deadlocks
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+            var stderrTask = process.StandardError.ReadToEndAsync(ct);
+
+            using var timeoutCts = new CancellationTokenSource(timeoutMs);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encodedCmd}",
-                    WorkingDirectory = Directory.GetCurrentDirectory(),
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    StandardOutputEncoding = Encoding.UTF8,
-                    StandardErrorEncoding = Encoding.UTF8,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                using var process = Process.Start(psi);
-                if (process == null) return new ToolResult(request.Name, false, "", "Failed to start process");
-
-                // Timeout of 60 seconds
-                if (!process.WaitForExit(60000))
-                {
-                    try { process.Kill(); } catch { }
-                    return new ToolResult(request.Name, false, "", "Command timed out after 60 seconds");
-                }
-
-                var stdout = process.StandardOutput.ReadToEnd();
-                var stderr = process.StandardError.ReadToEnd();
-                
-                var output = stdout;
-                if (!string.IsNullOrEmpty(stderr))
-                {
-                    if (string.IsNullOrEmpty(output)) output = stderr;
-                    else output += $"\nSTDERR:\n{stderr}";
-                }
-
-                if (string.IsNullOrWhiteSpace(output) && process.ExitCode == 0)
-                {
-                    output = "Command executed successfully with no output.";
-                }
-
-                return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null);
+                await process.WaitForExitAsync(linkedCts.Token);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                return new ToolResult(request.Name, false, "", ex.Message);
+                try { process.Kill(entireProcessTree: true); } catch { }
+                if (timeoutCts.IsCancellationRequested)
+                {
+                    return new ToolResult(request.Name, false, "", $"Command timed out after {timeoutMs / 1000} seconds.");
+                }
+                throw;
             }
-        }, ct);
+
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+
+            var output = stdout;
+            if (!string.IsNullOrEmpty(stderr))
+            {
+                if (string.IsNullOrEmpty(output)) output = stderr;
+                else output += $"\nSTDERR:\n{stderr}";
+            }
+
+            if (string.IsNullOrWhiteSpace(output) && process.ExitCode == 0)
+            {
+                output = "Command executed successfully with no output.";
+            }
+
+            return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult(request.Name, false, "", ex.Message);
+        }
     }
 
 #pragma warning disable CA1416 // Validate platform compatibility
@@ -627,57 +670,146 @@ public class ToolExecutor(
     }
 #pragma warning restore CA1416
 
+    private static string UnwrapBingUrl(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return url;
+        if (url.Contains("bing.com/ck/a") && url.Contains("u=a1"))
+        {
+            var match = Regex.Match(url, @"u=a1([a-zA-Z0-9_\-]+)");
+            if (match.Success)
+            {
+                try
+                {
+                    string b64 = match.Groups[1].Value.Replace('-', '+').Replace('_', '/');
+                    switch (b64.Length % 4)
+                    {
+                        case 2: b64 += "=="; break;
+                        case 3: b64 += "="; break;
+                    }
+                    var bytes = Convert.FromBase64String(b64);
+                    return Encoding.UTF8.GetString(bytes);
+                }
+                catch { }
+            }
+        }
+        return url;
+    }
+
     private async Task<ToolResult> SearchWebAsync(ToolCallRequest request, CancellationToken ct)
     {
         var query = GetStringArg(request.Arguments, "query");
         if (string.IsNullOrEmpty(query)) return new ToolResult(request.Name, false, "", "Query is required");
 
+        int maxResults = 5;
+        if (request.Arguments != null && request.Arguments.TryGetValue("max_results", out var mrObj))
+        {
+            var unwrapped = UnwrapJsonElement(mrObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int r) && r > 0)
+            {
+                maxResults = Math.Clamp(r, 1, 10);
+            }
+        }
+
         try
         {
             var results = new List<string>();
 
-            // Attempt Bing Search (using a clean request configuration without user agent headers to bypass bot blocks)
+            // Tier 1: Stealth Browser Bing Search (or HttpClient Bing Search if stealth service unavailable)
             try
             {
-                var url = $"https://www.bing.com/search?q={Uri.EscapeDataString(query)}";
-                var requestMsg = new HttpRequestMessage(HttpMethod.Get, url);
-                
-                var response = await _httpClient.SendAsync(requestMsg, ct);
-                if (response.IsSuccessStatusCode)
+                var searchUrl = $"https://www.bing.com/search?q={Uri.EscapeDataString(query)}";
+                string? html = null;
+
+                if (_stealthBrowserService != null)
                 {
-                    var html = await response.Content.ReadAsStringAsync(ct);
+                    html = await _stealthBrowserService.RenderPageHtmlAsync(searchUrl, ct);
+                }
+
+                if (string.IsNullOrEmpty(html))
+                {
+                    var requestMsg = new HttpRequestMessage(HttpMethod.Get, searchUrl);
+                    requestMsg.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
+                    var response = await _httpClient.SendAsync(requestMsg, ct);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        html = await response.Content.ReadAsStringAsync(ct);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(html))
+                {
                     var doc = new HtmlDocument();
                     doc.LoadHtml(html);
                     
                     var algoNodes = doc.DocumentNode.SelectNodes("//li[contains(@class, 'b_algo')]");
                     if (algoNodes != null)
                     {
-                        foreach (var node in algoNodes.Take(5))
+                        foreach (var node in algoNodes.Take(maxResults))
                         {
                             var titleNode = node.SelectSingleNode(".//h2/a") ?? node.SelectSingleNode(".//a");
                             var title = titleNode != null ? HtmlEntity.DeEntitize(titleNode.InnerText).Trim() : "No Title";
-                            var link = titleNode != null ? titleNode.GetAttributeValue("href", "") : "";
+                            var rawLink = titleNode != null ? titleNode.GetAttributeValue("href", "") : "";
+                            var cleanLink = UnwrapBingUrl(rawLink);
                             
-                            var snippetNode = node.SelectSingleNode(".//p") ?? node.SelectSingleNode(".//div[contains(@class, 'b_caption')]/p") ?? node.SelectSingleNode(".//span");
+                            var snippetNode = node.SelectSingleNode(".//p") ?? node.SelectSingleNode(".//div[contains(@class, 'b_caption')]/p") ?? node.SelectSingleNode(".//span[contains(@class, 'b_snippet')]") ?? node.SelectSingleNode(".//span");
                             var snippet = snippetNode != null ? HtmlEntity.DeEntitize(snippetNode.InnerText).Trim() : "No Snippet";
                             
                             snippet = Regex.Replace(snippet, @"\s+", " ");
-                            results.Add($"Title: {title}\nLink: {link}\nSnippet: {snippet}");
+                            results.Add($"Title: {title}\nLink: {cleanLink}\nSnippet: {snippet}");
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Bing search failed; will attempt Wikipedia fallback.");
+                logger.LogWarning(ex, "Bing search failed; trying DuckDuckGo Lite fallback.");
             }
 
-            // Fallback to Wikipedia OpenSearch if no results were fetched
+            // Tier 2: DuckDuckGo Lite Search
             if (results.Count == 0)
             {
                 try
                 {
-                    var wikiUrl = $"https://en.wikipedia.org/w/api.php?action=opensearch&search={Uri.EscapeDataString(query)}&limit=5&namespace=0&format=json";
+                    var ddgUrl = $"https://lite.duckduckgo.com/lite/";
+                    var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("q", query) });
+                    var requestMsg = new HttpRequestMessage(HttpMethod.Post, ddgUrl) { Content = content };
+                    requestMsg.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+
+                    var response = await _httpClient.SendAsync(requestMsg, ct);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var html = await response.Content.ReadAsStringAsync(ct);
+                        var doc = new HtmlDocument();
+                        doc.LoadHtml(html);
+
+                        var resultNodes = doc.DocumentNode.SelectNodes("//td[contains(@class, 'result-snippet')]");
+                        var linkNodes = doc.DocumentNode.SelectNodes("//a[contains(@class, 'result-link')]");
+
+                        if (linkNodes != null)
+                        {
+                            int count = Math.Min(linkNodes.Count, maxResults);
+                            for (int i = 0; i < count; i++)
+                            {
+                                var title = HtmlEntity.DeEntitize(linkNodes[i].InnerText).Trim();
+                                var link = linkNodes[i].GetAttributeValue("href", "");
+                                var snippet = (resultNodes != null && i < resultNodes.Count) ? HtmlEntity.DeEntitize(resultNodes[i].InnerText).Trim() : "No Snippet";
+                                results.Add($"Title: {title}\nLink: {link}\nSnippet: {snippet}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "DuckDuckGo Lite fallback failed; trying Wikipedia search.");
+                }
+            }
+
+            // Tier 3: Wikipedia OpenSearch
+            if (results.Count == 0)
+            {
+                try
+                {
+                    var wikiUrl = $"https://en.wikipedia.org/w/api.php?action=opensearch&search={Uri.EscapeDataString(query)}&limit={maxResults}&namespace=0&format=json";
                     var requestMsg = new HttpRequestMessage(HttpMethod.Get, wikiUrl);
                     requestMsg.Headers.Add("User-Agent", "KlydisAssistant/1.0 (contact: info@klydis.local)");
                     
@@ -692,7 +824,7 @@ public class ToolExecutor(
                             var titles = root[1];
                             var descriptions = root[2];
                             var urls = root[3];
-                            int count = Math.Min(titles.GetArrayLength(), 5);
+                            int count = Math.Min(titles.GetArrayLength(), maxResults);
                             for (int i = 0; i < count; i++)
                             {
                                 results.Add($"Title: {titles[i].GetString()}\nLink: {urls[i].GetString()}\nSnippet: {descriptions[i].GetString()}");
@@ -708,9 +840,9 @@ public class ToolExecutor(
 
             if (results.Count == 0)
             {
-                return new ToolResult(request.Name, true, "No results found. (The search engine might be blocking the request)", null);
+                return new ToolResult(request.Name, true, "No results found.", null);
             }
-            return new ToolResult(request.Name, true, string.Join("\n\n", results), null);
+            return new ToolResult(request.Name, true, string.Join("\n\n---\n\n", results), null);
         }
         catch (Exception ex)
         {
@@ -725,17 +857,38 @@ public class ToolExecutor(
 
         try
         {
+            if (_stealthBrowserService != null)
+            {
+                logger.LogInformation("CrawlUrlAsync using StealthBrowserService for URL: {Url}", url);
+                var stealthResult = await _stealthBrowserService.CrawlUrlAsync(url, ct);
+                return new ToolResult(request.Name, true, stealthResult, null);
+            }
+
+            // Fallback to basic Playwright if stealth service is unavailable
             using var playwright = await Microsoft.Playwright.Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new Microsoft.Playwright.BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
             
-            // Go to page and wait for network to be idle
-            await page.GotoAsync(url, new Microsoft.Playwright.PageGotoOptions { WaitUntil = Microsoft.Playwright.WaitUntilState.NetworkIdle, Timeout = 30000 });
+            await page.GotoAsync(url, new Microsoft.Playwright.PageGotoOptions { WaitUntil = Microsoft.Playwright.WaitUntilState.NetworkIdle, Timeout = 20000 });
             
-            // Get HTML of the body
-            var html = await page.InnerHTMLAsync("body");
+            string title = await page.TitleAsync();
+
+            await page.EvaluateAsync(@"() => {
+                const noisySelectors = ['nav', 'footer', 'header', 'aside', '[role=""navigation""]', '[role=""banner""]', '.cookie-banner', '.ad-container', 'iframe'];
+                noisySelectors.forEach(s => document.querySelectorAll(s).forEach(el => el.remove()));
+            }");
+
+            string html = "";
+            var mainHandle = await page.QuerySelectorAsync("main, article, [role=\"main\"]");
+            if (mainHandle != null)
+            {
+                html = await mainHandle.InnerHTMLAsync();
+            }
+            else
+            {
+                html = await page.InnerHTMLAsync("body");
+            }
             
-            // Convert to Markdown
 #pragma warning disable CS0618
             var config = new ReverseMarkdown.Config
             {
@@ -747,9 +900,14 @@ public class ToolExecutor(
             var converter = new ReverseMarkdown.Converter(config);
             var markdown = converter.Convert(html);
             
-            if (markdown.Length > 20000) markdown = markdown[..20000] + "... [TRUNCATED]";
+            markdown = Regex.Replace(markdown, @"\n{3,}", "\n\n").Trim();
+            
+            var header = $"# Page Title: {title}\nSource URL: {url}\n\n---\n\n";
+            var fullOutput = header + markdown;
 
-            return new ToolResult(request.Name, true, markdown, null);
+            if (fullOutput.Length > 20000) fullOutput = fullOutput[..20000] + "\n\n... [TRUNCATED]";
+
+            return new ToolResult(request.Name, true, fullOutput, null);
         }
         catch (Microsoft.Playwright.PlaywrightException ex) when (ex.Message.Contains("Executable doesn't exist"))
         {
@@ -879,7 +1037,7 @@ public class ToolExecutor(
 
         if (!string.IsNullOrEmpty(queueIdStr) && Guid.TryParse(queueIdStr, out var queueId))
         {
-            msg = MessageQueue.GetById(queueId);
+            msg = MessageQueue.GetById(queueId, sessionId);
         }
 
         if (msg == null)

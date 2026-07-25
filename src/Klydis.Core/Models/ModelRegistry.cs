@@ -120,29 +120,66 @@ public class ModelRegistry
 
     public async Task AddActiveDownloadAsync(ActiveDownloadRecord record)
     {
-        string path = Path.Combine(_modelsDirectory, "active_downloads.json");
-        var list = await GetActiveDownloadsAsync();
-        list.RemoveAll(d => d.FileName == record.FileName && d.RepoId == record.RepoId);
-        list.Add(record);
-        
-        var options = new JsonSerializerOptions { WriteIndented = true };
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(list, options));
+        await _lock.WaitAsync();
+        try
+        {
+            string path = Path.Combine(_modelsDirectory, "active_downloads.json");
+            var list = await GetActiveDownloadsInternalAsync();
+            list.RemoveAll(d => d.FileName == record.FileName && d.RepoId == record.RepoId);
+            list.Add(record);
+            
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(list, options));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to add active download record for {FileName}", record.FileName);
+        }
+        finally
+        {
+            _lock.Release();
+        }
     }
 
     public async Task RemoveActiveDownloadAsync(string repoId, string fileName)
     {
-        string path = Path.Combine(_modelsDirectory, "active_downloads.json");
-        var list = await GetActiveDownloadsAsync();
-        int removed = list.RemoveAll(d => d.FileName == fileName && d.RepoId == repoId);
-        
-        if (removed > 0)
+        await _lock.WaitAsync();
+        try
         {
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(list, options));
+            string path = Path.Combine(_modelsDirectory, "active_downloads.json");
+            var list = await GetActiveDownloadsInternalAsync();
+            int removed = list.RemoveAll(d => d.FileName == fileName && d.RepoId == repoId);
+            
+            if (removed > 0)
+            {
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                await File.WriteAllTextAsync(path, JsonSerializer.Serialize(list, options));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to remove active download record for {FileName}", fileName);
+        }
+        finally
+        {
+            _lock.Release();
         }
     }
 
     public async Task<List<ActiveDownloadRecord>> GetActiveDownloadsAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            return await GetActiveDownloadsInternalAsync();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private async Task<List<ActiveDownloadRecord>> GetActiveDownloadsInternalAsync()
     {
         string path = Path.Combine(_modelsDirectory, "active_downloads.json");
         if (!File.Exists(path)) return new List<ActiveDownloadRecord>();

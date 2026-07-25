@@ -127,10 +127,18 @@ public partial class HuggingFaceClient
     /// <param name="limit">The maximum number of results to return.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A list of model information records.</returns>
-    public async Task<List<HfModelInfo>> SearchModelsAsync(string query, int limit = 20, string sort = "downloads", CancellationToken ct = default)
+    /// <summary>
+    /// Searches the Hugging Face API for GGUF models.
+    /// </summary>
+    /// <param name="query">The search query.</param>
+    /// <param name="limit">The maximum number of results to return.</param>
+    /// <param name="sort">The sort parameter (downloads, likes, etc.).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A list of model information records.</returns>
+    public async Task<List<HfModelInfo>> SearchModelsAsync(string query, int limit = 60, string sort = "downloads", CancellationToken ct = default)
     {
         var encodedQuery = string.IsNullOrWhiteSpace(query) ? "" : $"search={Uri.EscapeDataString(query)}&";
-        var url = $"https://huggingface.co/api/models?{encodedQuery}filter=gguf&sort={sort}&direction=-1&limit={limit}";
+        var url = $"https://huggingface.co/api/models?{encodedQuery}filter=gguf&sort={sort}&direction=-1&limit={limit}&expand[]=downloads&expand[]=likes&expand[]=tags&expand[]=pipeline_tag&expand[]=lastModified";
 
         _logger.LogInformation("Searching Hugging Face models with query: {Query}", query);
 
@@ -198,22 +206,38 @@ public partial class HuggingFaceClient
         if (!root.TryGetProperty("siblings", out var siblings))
             return files;
 
-        var ggufFiles = siblings.EnumerateArray()
-            .Select(s => s.GetProperty("rfilename").GetString())
-            .Where(f => !string.IsNullOrEmpty(f) && 
-                        f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) &&
-                        !f.Contains("-mtp", StringComparison.OrdinalIgnoreCase) &&
-                        !f.Contains("mtp-", StringComparison.OrdinalIgnoreCase) &&
-                        !repoId.Contains("-mtp", StringComparison.OrdinalIgnoreCase) &&
-                        !repoId.Contains("mtp-", StringComparison.OrdinalIgnoreCase))
+        var ggufElements = siblings.EnumerateArray()
+            .Where(s => {
+                if (!s.TryGetProperty("rfilename", out var rfn)) return false;
+                var f = rfn.GetString();
+                return !string.IsNullOrEmpty(f) && 
+                       f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) &&
+                       !f.Contains("-mtp", StringComparison.OrdinalIgnoreCase) &&
+                       !f.Contains("mtp-", StringComparison.OrdinalIgnoreCase) &&
+                       !repoId.Contains("-mtp", StringComparison.OrdinalIgnoreCase) &&
+                       !repoId.Contains("mtp-", StringComparison.OrdinalIgnoreCase);
+            })
             .ToList();
 
-        foreach (var filename in ggufFiles)
+        foreach (var element in ggufElements)
         {
-            if (filename == null) continue;
+            var filename = element.GetProperty("rfilename").GetString()!;
 
-            // Optional: Send a HEAD request to get the actual size if the API doesn't provide it
-            long sizeBytes = await GetFileSizeAsync(repoId, filename, ct);
+            long sizeBytes = 0;
+            if (element.TryGetProperty("size", out var sizeProp) && sizeProp.ValueKind == JsonValueKind.Number)
+            {
+                sizeBytes = sizeProp.GetInt64();
+            }
+            else if (element.TryGetProperty("lfs", out var lfsProp) && lfsProp.ValueKind == JsonValueKind.Object &&
+                     lfsProp.TryGetProperty("size", out var lfsSizeProp) && lfsSizeProp.ValueKind == JsonValueKind.Number)
+            {
+                sizeBytes = lfsSizeProp.GetInt64();
+            }
+
+            if (sizeBytes <= 0)
+            {
+                sizeBytes = await GetFileSizeAsync(repoId, filename, ct);
+            }
 
             var quantMatch = QuantTypeRegex().Match(filename);
             var quantType = quantMatch.Success ? quantMatch.Value : "Unknown";
@@ -225,6 +249,85 @@ public partial class HuggingFaceClient
         }
 
         return files;
+    }
+
+    /// <summary>
+    /// Utility to parse model parameter size in Billions (e.g. 7, 8, 14, 70, 0.5) from repository ID or tags.
+    /// </summary>
+    public static double? ExtractParameterSize(string repoId, string[] tags)
+    {
+        var match = Regex.Match(repoId, @"(?i)\b(\d+(?:\.\d+)?)\s*b\b");
+        if (match.Success && double.TryParse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture, out double size))
+        {
+            return size;
+        }
+
+        if (tags != null)
+        {
+            foreach (var tag in tags)
+            {
+                match = Regex.Match(tag, @"(?i)^(\d+(?:\.\d+)?)\s*b$");
+                if (match.Success && double.TryParse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture, out double tagSize))
+                {
+                    return tagSize;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Ranks Hugging Face search results by quality, uploader reputation, exact query matches, and popularity.
+    /// </summary>
+    public static List<HfModelInfo> RankResults(List<HfModelInfo> results, string query)
+    {
+        if (results == null || results.Count == 0) return new List<HfModelInfo>();
+
+        var reputableAuthors = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "bartowski", "unsloth", "TheBloke", "pmortensen", "mradermacher", 
+            "QuantFactory", "city96", "ggml-org", "meta-llama", "Qwen", 
+            "deepseek-ai", "mistralai", "google", "microsoft"
+        };
+
+        var queryTokens = string.IsNullOrWhiteSpace(query)
+            ? Array.Empty<string>()
+            : query.Split(new[] { ' ', '-', '_', '/' }, StringSplitOptions.RemoveEmptyEntries);
+
+        return results
+            .OrderByDescending(m =>
+            {
+                double score = 0;
+
+                // Reputable uploader boost
+                if (reputableAuthors.Contains(m.Author)) score += 1000;
+
+                // Popularity score
+                score += Math.Log10(m.Downloads + 1) * 100;
+                score += Math.Log10(m.Likes + 1) * 50;
+
+                // Query matching score
+                if (queryTokens.Length > 0)
+                {
+                    int matchCount = 0;
+                    foreach (var token in queryTokens)
+                    {
+                        if (m.RepoId.Contains(token, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matchCount++;
+                            score += 500;
+                        }
+                    }
+                    if (matchCount == queryTokens.Length)
+                    {
+                        score += 2000;
+                    }
+                }
+
+                return score;
+            })
+            .ToList();
     }
 
     /// <summary>

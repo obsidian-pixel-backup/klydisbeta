@@ -35,7 +35,7 @@ public partial class SessionInfo : ObservableObject
 /// <summary>
 /// ViewModel for the Chat interface.
 /// </summary>
-public partial class ChatViewModel : ObservableObject
+public partial class ChatViewModel : ObservableObject, IDisposable
 {
     private readonly ChatEngine? _chatEngine;
     private CancellationTokenSource? _generationCts;
@@ -43,6 +43,8 @@ public partial class ChatViewModel : ObservableObject
     private string? _generatingSessionId;
     private long _modelLoadSequenceId = 0;
     private bool _userExplicitlyUnloaded;
+    private bool _isProcessingQueue;
+    private EventHandler? _queueChangedHandler;
 
     [ObservableProperty]
     private string _inputText = string.Empty;
@@ -145,7 +147,8 @@ public partial class ChatViewModel : ObservableObject
 
         if (_messageQueue != null)
         {
-            _messageQueue.QueueChanged += (s, e) => RefreshQueueUI();
+            _queueChangedHandler = (s, e) => RefreshQueueUI();
+            _messageQueue.QueueChanged += _queueChangedHandler;
         }
 
         _toolExecutor.ToolApprovalHandlerAsync = ShowToolApprovalDialogAsync;
@@ -160,6 +163,22 @@ public partial class ChatViewModel : ObservableObject
         _registry.RegistryChanged += OnRegistryChanged;
         _inferenceEngine.ModelStateChanged += OnModelStateChanged;
         _ = InitializeSessionsAsync();
+    }
+
+    public void Dispose()
+    {
+        if (_messageQueue != null && _queueChangedHandler != null)
+        {
+            _messageQueue.QueueChanged -= _queueChangedHandler;
+            _queueChangedHandler = null;
+        }
+        _registry.RegistryChanged -= OnRegistryChanged;
+        _inferenceEngine.ModelStateChanged -= OnModelStateChanged;
+        if (_toolExecutor != null)
+        {
+            _toolExecutor.ToolApprovalRequested -= ToolExecutor_ToolApprovalRequested;
+        }
+        GC.SuppressFinalize(this);
     }
 
     private void OnModelStateChanged(bool isLoaded, string? modelPath)
@@ -391,38 +410,38 @@ public partial class ChatViewModel : ObservableObject
                 if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
                 var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
-                int totalLayers = metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32;
-                long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers;
-                int rawContextLength = (int)(metadata?.ContextLength ?? 32768);
-                int contextLength = Math.Clamp(rawContextLength < 32768 ? 32768 : rawContextLength, 32768, 131072);
+                int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
+                long layerSizeBytes = modelInfo.FileSizeBytes / Math.Max(1, totalLayers);
+                int rawContextLength = (int)(metadata?.ContextLength ?? 4096);
+                int contextLength = Math.Clamp(rawContextLength, 2048, 131072);
                 
-                // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
-                // Klydis enforces Q4_0 4-bit quantized KV cache (configured in InferenceEngine), so sizeof = 0.5 bytes.
-                long kvCachePerLayerBytes = 1024; // Safe default: 2 * 8 * 128 * 0.5 = 1024
-                if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCountKv.HasValue)
+                long kvCachePerLayerBytes = 2048;
+                if (metadata != null)
                 {
-                    long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
-                    // K + V (2) * HeadCountKv * headDim * 0.5 bytes (Q4_0 4-bit quantized KV cache)
-                    kvCachePerLayerBytes = (long)(2 * metadata.HeadCountKv.Value * headDim * 0.5);
+                    var kvEst = Klydis.Core.Inference.KvCacheCalculator.Calculate(metadata, 1, Klydis.Core.Inference.KvCacheQuantizationType.Q4_0);
+                    kvCachePerLayerBytes = (long)Math.Max(512, kvEst.BytesPerToken / Math.Max(1, kvEst.NumLayers));
                 }
 
                 var plan = _offloadStrategy.CalculatePlan(
-                    totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
+                    totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
                 
                 if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
                 await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
                 if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
-                // Decouple speculative draft model attachment from main model loading
-                try
+                // Isolate speculative draft model attachment into background task so draft failures never break main model loading
+                _ = Task.Run(async () =>
                 {
-                    await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
-                }
-                catch (Exception draftEx)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Speculative draft attachment failed: {draftEx}");
-                }
+                    try
+                    {
+                        await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
+                    }
+                    catch (Exception draftEx)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Speculative draft attachment failed: {draftEx}");
+                    }
+                });
 
                 if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
@@ -432,6 +451,7 @@ public partial class ChatViewModel : ObservableObject
                     {
                         if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                         {
+                            IsModelLoading = false;
                             IsModelReady = true;
                             ProcessNextQueuedMessageIfAvailable();
                         }
@@ -441,6 +461,7 @@ public partial class ChatViewModel : ObservableObject
                 {
                     if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                     {
+                        IsModelLoading = false;
                         IsModelReady = true;
                         ProcessNextQueuedMessageIfAvailable();
                     }
@@ -461,8 +482,19 @@ public partial class ChatViewModel : ObservableObject
                 string nativeLog = "";
                 try
                 {
-                    var logLines = System.IO.File.ReadLines("llama_native.log").TakeLast(15).ToList();
-                    nativeLog = "\n\nNative Log:\n" + string.Join("\n", logLines);
+                    if (System.IO.File.Exists("llama_native.log"))
+                    {
+                        using var fs = new System.IO.FileStream("llama_native.log", System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+                        if (fs.Length > 0)
+                        {
+                            long offset = Math.Max(0, fs.Length - 4096);
+                            fs.Seek(offset, System.IO.SeekOrigin.Begin);
+                            using var reader = new System.IO.StreamReader(fs);
+                            var tailText = reader.ReadToEnd();
+                            var lines = tailText.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).TakeLast(10);
+                            nativeLog = "\n\nNative Log:\n" + string.Join("\n", lines);
+                        }
+                    }
                 }
                 catch { }
 
@@ -474,6 +506,7 @@ public partial class ChatViewModel : ObservableObject
                     {
                         if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                         {
+                            IsModelLoading = false;
                             IsModelReady = false;
                             Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
                         }
@@ -483,6 +516,7 @@ public partial class ChatViewModel : ObservableObject
                 {
                     if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                     {
+                        IsModelLoading = false;
                         IsModelReady = false;
                         Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
                     }
@@ -992,24 +1026,38 @@ public partial class ChatViewModel : ObservableObject
             // If generation was not explicitly cancelled, auto-process next queued message
             if (!isCancelled)
             {
-                ProcessNextQueuedMessageIfAvailable();
+                ProcessNextQueuedMessageIfAvailable(localGeneratingSessionId);
             }
         }
     }
 
-    private void ProcessNextQueuedMessageIfAvailable()
+    private void ProcessNextQueuedMessageIfAvailable(string? targetSessionId = null)
     {
-        if (IsGenerating || !IsModelReady) return;
-        var sessionId = SelectedSession?.Id ?? string.Empty;
+        if (IsGenerating || !IsModelReady || _isProcessingQueue) return;
+        var sessionId = targetSessionId ?? SelectedSession?.Id ?? string.Empty;
+        if (string.IsNullOrEmpty(sessionId)) return;
+
+        // Ensure we only process if the target session is the active selected session
+        if (SelectedSession?.Id != sessionId) return;
+
         var nextItem = _messageQueue?.GetNextDirectSend(sessionId) ?? _messageQueue?.GetNextPending(sessionId);
         if (nextItem != null)
         {
+            _isProcessingQueue = true;
+            IsGenerating = true;
             _messageQueue?.MarkStatus(nextItem.Id, QueuedMessageStatus.Processing);
             _messageQueue?.Remove(nextItem.Id);
             Action action = async () =>
             {
-                await Task.Delay(150);
-                await SendMessageForTextAsync(nextItem.Content);
+                try
+                {
+                    await Task.Delay(100);
+                    await SendMessageForTextAsync(nextItem.Content);
+                }
+                finally
+                {
+                    _isProcessingQueue = false;
+                }
             };
 
             if (System.Windows.Application.Current?.Dispatcher != null)

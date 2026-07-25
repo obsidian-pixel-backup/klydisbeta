@@ -107,10 +107,11 @@ public class DynamicSkillSelector
                 }
             }
 
-            // Domain trigger heuristics
+            // Domain trigger heuristics (positive bonuses + negative penalties)
             score += EvaluateDomainHeuristics(skill.Id, lowerPrompt, matchedTerms);
 
-            if (score > 3.0)
+            // Minimum relevance threshold gating: require score >= 12.0 before a skill is candidate for injection
+            if (score >= 12.0)
             {
                 scoredSkills.Add((skill, score, matchedTerms));
             }
@@ -126,7 +127,7 @@ public class DynamicSkillSelector
             return new SkillReasoningResult
             {
                 DetectedComplexity = complexity,
-                ReasoningExplanation = $"Task evaluated at {complexity} complexity. No specialized skills triggered.",
+                ReasoningExplanation = $"Task evaluated at {complexity} complexity. No specialized skills triggered (threshold >= 12.0).",
                 FormattedPromptInjection = string.Empty
             };
         }
@@ -185,25 +186,106 @@ public class DynamicSkillSelector
         double bonus = 0;
         switch (skillId)
         {
+            case "webapp-testing":
+                // Require explicit web testing keywords (playwright, e2e, browser testing, selenium, headless)
+                bool isWebQaContext = lowerPrompt.Contains("playwright") || lowerPrompt.Contains("e2e") || lowerPrompt.Contains("browser test") || lowerPrompt.Contains("selenium") || lowerPrompt.Contains("webapp test");
+                if (isWebQaContext)
+                {
+                    bonus += 15.0;
+                    matchedTerms.Add("Web QA Domain");
+                }
+                else
+                {
+                    // Heavy penalty for general commands or tool testing prompts to prevent false activation
+                    bonus -= 25.0;
+                }
+                break;
+
+            case "windows-app-launcher":
+                if (lowerPrompt.Contains("open") || lowerPrompt.Contains("launch") || lowerPrompt.Contains("start app") || lowerPrompt.Contains("chrome") || lowerPrompt.Contains("steam") || lowerPrompt.Contains("notepad") || lowerPrompt.Contains("vscode") || lowerPrompt.Contains("calculator"))
+                {
+                    bonus += 14.0;
+                    matchedTerms.Add("Windows App Launch Intent");
+                }
+                break;
+
+            case "windows-browser-navigation":
+                if (lowerPrompt.Contains("youtube") || lowerPrompt.Contains("navigate") || lowerPrompt.Contains("open browser") || lowerPrompt.Contains("search video") || lowerPrompt.Contains("cat video") || lowerPrompt.Contains("chrome url"))
+                {
+                    bonus += 15.0;
+                    matchedTerms.Add("Browser Navigation Intent");
+                }
+                break;
+
+            case "windows-process-manager":
+                if (lowerPrompt.Contains("process") || lowerPrompt.Contains("taskkill") || lowerPrompt.Contains("stop-process") || lowerPrompt.Contains("cpu usage") || lowerPrompt.Contains("kill app"))
+                {
+                    bonus += 14.0;
+                    matchedTerms.Add("Process Manager Intent");
+                }
+                break;
+
+            case "windows-system-settings":
+                if (lowerPrompt.Contains("settings") || lowerPrompt.Contains("ms-settings") || lowerPrompt.Contains("display") || lowerPrompt.Contains("sound settings") || lowerPrompt.Contains("wifi settings"))
+                {
+                    bonus += 14.0;
+                    matchedTerms.Add("Windows Settings Intent");
+                }
+                break;
+
+            case "windows-file-explorer-nav":
+                if (lowerPrompt.Contains("explorer") || lowerPrompt.Contains("folder") || lowerPrompt.Contains("appdata") || lowerPrompt.Contains("shortcut") || lowerPrompt.Contains("directory path"))
+                {
+                    bonus += 12.0;
+                    matchedTerms.Add("File Explorer Intent");
+                }
+                break;
+
+            case "windows-media-audio-control":
+                if (lowerPrompt.Contains("volume") || lowerPrompt.Contains("mute") || lowerPrompt.Contains("audio device") || lowerPrompt.Contains("speaker") || lowerPrompt.Contains("sound volume"))
+                {
+                    bonus += 14.0;
+                    matchedTerms.Add("Media Audio Intent");
+                }
+                break;
+
+            case "windows-gaming-steam-manager":
+                if (lowerPrompt.Contains("steam") || lowerPrompt.Contains("play game") || lowerPrompt.Contains("game library") || lowerPrompt.Contains("rungameid"))
+                {
+                    bonus += 15.0;
+                    matchedTerms.Add("Steam Gaming Intent");
+                }
+                break;
+
+            case "windows-terminal-powershell-expert":
+                if (lowerPrompt.Contains("powershell") || lowerPrompt.Contains("cmdlet") || lowerPrompt.Contains("start-process") || lowerPrompt.Contains("script execution"))
+                {
+                    bonus += 12.0;
+                    matchedTerms.Add("PowerShell Expert Intent");
+                }
+                break;
+
             case "mcp-builder":
                 if (lowerPrompt.Contains("mcp") || lowerPrompt.Contains("context protocol") || lowerPrompt.Contains("fastmcp")) { bonus += 12; matchedTerms.Add("MCP Keyword"); }
                 break;
+
             case "algorithmic-art":
             case "canvas-design":
                 if (lowerPrompt.Contains("art") || lowerPrompt.Contains("p5") || lowerPrompt.Contains("canvas") || lowerPrompt.Contains("animation") || lowerPrompt.Contains("drawing")) { bonus += 12; matchedTerms.Add("Creative Art Keyword"); }
                 break;
+
             case "artifacts-builder":
                 if (lowerPrompt.Contains("artifact") || lowerPrompt.Contains("widget") || lowerPrompt.Contains("interactive app")) { bonus += 12; matchedTerms.Add("Artifact Keyword"); }
                 break;
+
             case "changelog-generator":
                 if (lowerPrompt.Contains("changelog") || lowerPrompt.Contains("release notes") || lowerPrompt.Contains("commits")) { bonus += 12; matchedTerms.Add("Changelog Keyword"); }
                 break;
+
             case "content-research-writer":
                 if (lowerPrompt.Contains("article") || lowerPrompt.Contains("blog") || lowerPrompt.Contains("write a report") || lowerPrompt.Contains("essay")) { bonus += 10; matchedTerms.Add("Writing Keyword"); }
                 break;
-            case "webapp-testing":
-                if (lowerPrompt.Contains("test") || lowerPrompt.Contains("playwright") || lowerPrompt.Contains("e2e") || lowerPrompt.Contains("qa")) { bonus += 10; matchedTerms.Add("Testing Keyword"); }
-                break;
+
             case "brand-guidelines":
                 if (lowerPrompt.Contains("brand") || lowerPrompt.Contains("logo") || lowerPrompt.Contains("palette") || lowerPrompt.Contains("colors")) { bonus += 10; matchedTerms.Add("Brand Keyword"); }
                 break;

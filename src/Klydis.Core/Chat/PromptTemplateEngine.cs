@@ -188,15 +188,20 @@ public class PromptTemplateEngine
     /// </summary>
     public ChatTemplate DetectTemplate(string architecture)
     {
+        if (string.IsNullOrWhiteSpace(architecture)) return ChatTemplate.ChatML;
+
         var arch = architecture.ToLowerInvariant();
         if (arch.Contains("llama")) return ChatTemplate.Llama3;
         if (arch.Contains("qwen")) return ChatTemplate.Qwen;
         if (arch.Contains("mistral") || arch.Contains("mixtral")) return ChatTemplate.Mistral;
         if (arch.Contains("gemma")) return ChatTemplate.Gemma;
         if (arch.Contains("phi")) return ChatTemplate.Phi;
+        if (arch.Contains("deepseek")) return ChatTemplate.ChatML;
+        if (arch.Contains("starcoder")) return ChatTemplate.ChatML;
+        if (arch.Contains("smollm") || arch.Contains("granite") || arch.Contains("nemotron")) return ChatTemplate.ChatML;
         if (arch.Contains("chatml")) return ChatTemplate.ChatML;
         
-        return ChatTemplate.ChatML; // Default fallback
+        return ChatTemplate.ChatML; // Universal default fallback for open-weights models
     }
 
     /// <summary>

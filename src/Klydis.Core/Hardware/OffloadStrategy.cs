@@ -132,19 +132,30 @@ public class OffloadStrategy
         int targetGpuLayers;
 
         // Check if full model fits in net available VRAM (or usable VRAM headroom)
-        if (fullModelVramCostMb <= netAvailableVramMb)
+        if (netAvailableVramMb > 0 && fullModelVramCostMb <= netAvailableVramMb)
         {
             targetGpuLayers = totalLayers;
         }
-        else if (strategyType == OffloadStrategyType.FullGpu && fullModelVramCostMb <= (usableVramMb + 500))
+        else if (strategyType == OffloadStrategyType.FullGpu && netAvailableVramMb > 0 && fullModelVramCostMb <= (netAvailableVramMb + 100))
         {
             targetGpuLayers = totalLayers;
+        }
+        else if (netAvailableVramMb > 0)
+        {
+            // Calculate maximum layers that fit in available VRAM at requested context
+            double vramPerLayerWithKvMb = layerSizeMb + ((kvCachePerLayerBytes * recommendedContext) / 1048576.0);
+            double availableForLayers = Math.Max(0, netAvailableVramMb - nonLayerWeightsMb);
+            targetGpuLayers = Math.Clamp((int)(availableForLayers / Math.Max(1.0, vramPerLayerWithKvMb)), 0, totalLayers);
+
+            if (targetGpuLayers == 0)
+            {
+                recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, contextLength);
+            }
         }
         else
         {
-            // Calculate maximum layers that fit in available VRAM at full native context
-            double vramPerLayerWithKvMb = layerSizeMb + ((kvCachePerLayerBytes * recommendedContext) / 1048576.0);
-            targetGpuLayers = Math.Clamp((int)(netAvailableVramMb / vramPerLayerWithKvMb), 1, totalLayers);
+            targetGpuLayers = 0;
+            recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, contextLength);
         }
 
         // Pass -1 when all layers fit to offload output head directly onto GPU
