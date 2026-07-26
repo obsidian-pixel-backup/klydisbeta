@@ -212,7 +212,7 @@ namespace Klydis.Core.Memory
 
             var summaryItems = overflow
                 .Where(m => !string.IsNullOrWhiteSpace(m.Content) && m.Role != ChatRole.System)
-                .Select(m => $"- [{m.Role}] {(m.Content.Length > 150 ? m.Content[..150] + "..." : m.Content)}");
+                .Select(m => $"- [{m.Role}] {(m.Content.Length > 300 ? m.Content[..300] + "..." : m.Content)}");
 
             var summaryText = string.Join("\n", summaryItems);
             var archiveNotice = !string.IsNullOrEmpty(archivePath) ? $"\n[Full pre-compaction history archive saved at: {archivePath}]" : "";
@@ -247,8 +247,11 @@ namespace Klydis.Core.Memory
             var messages = await _store.GetMessagesAsync(sessionId, null);
             var unconsolidated = messages.Where(m => !m.IsConsolidated).ToList();
 
-            // Simple heuristic to identify overflow.
-            var (_, overflow) = PartitionContext(unconsolidated, 2048);
+            // Scale consolidation partition to 15% of context (min 2048)
+            int consolidationBudget = _inferenceEngine != null && _inferenceEngine.IsModelLoaded
+                ? Math.Max(2048, (int)(_inferenceEngine.ContextSize * 0.15))
+                : 2048;
+            var (_, overflow) = PartitionContext(unconsolidated, consolidationBudget);
 
             if (overflow.Count == 0) return;
 
@@ -257,7 +260,7 @@ namespace Klydis.Core.Memory
             // Extract concise key points from overflow messages to avoid deadlock during active generation turns
             var summaryItems = overflow
                 .Where(m => !string.IsNullOrWhiteSpace(m.Content) && m.Role != ChatRole.System)
-                .Select(m => $"- [{m.Role}] {(m.Content.Length > 120 ? m.Content[..120] + "..." : m.Content)}");
+                .Select(m => $"- [{m.Role}] {(m.Content.Length > 250 ? m.Content[..250] + "..." : m.Content)}");
 
             var summaryText = string.Join("\n", summaryItems);
             var existingState = session.WorldState ?? "";

@@ -151,7 +151,15 @@ public class ChatEngine(
 {
     private readonly List<ChatMessage> _history = new();
     private readonly List<(string ToolName, string ArgsHash)> _recentTools = new();
-    private const int RollingCompressionThreshold = 30000;
+    
+    /// <summary>
+    /// Calculates the rolling compression threshold as 75% of the model's total context size.
+    /// </summary>
+    private int GetRollingCompressionThreshold()
+    {
+        int contextSize = (int)inferenceEngine.ContextSize;
+        return Math.Clamp((int)(contextSize * 0.75), 2048, 500000);
+    }
 
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
@@ -280,12 +288,15 @@ public class ChatEngine(
         {
             iterationCount++;
             
-            // Execute automated rolling compression if history tokens reach or exceed 30,000 tokens
+            // Execute automated rolling compression when history tokens reach 75% of context window
+            int rollingThreshold = GetRollingCompressionThreshold();
             int estimatedHistoryTokens = _history.Sum(m => (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(m.Content) : contextOrchestrator.EstimateTokens(m.Content)) + 25);
-            if (estimatedHistoryTokens >= RollingCompressionThreshold)
+            if (estimatedHistoryTokens >= rollingThreshold)
             {
-                logger.LogInformation("Active history tokens ({Tokens}) reached rolling threshold ({Threshold}). Compressing older context into WorldState.", estimatedHistoryTokens, RollingCompressionThreshold);
-                await contextOrchestrator.PerformRollingCompressionAsync(_history, CurrentSessionId.ToString(), RollingCompressionThreshold);
+                int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 32768);
+                logger.LogInformation("Active history tokens ({Tokens}) reached rolling threshold ({Threshold}, 75% of {Ctx} context). Compressing older context into WorldState. Keeping {KeepRecent} recent tokens.",
+                    estimatedHistoryTokens, rollingThreshold, (int)inferenceEngine.ContextSize, keepRecent);
+                await contextOrchestrator.PerformRollingCompressionAsync(_history, CurrentSessionId.ToString(), rollingThreshold, keepRecent);
             }
 
             var session = await messageStore.GetSessionAsync(CurrentSessionId.ToString());
@@ -604,7 +615,7 @@ public class ChatEngine(
             }
 
             _history.Add(new ChatMessage(ChatRole.Assistant, cleanHistoryResponse));
-            await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Assistant, cleanHistoryResponse, 0, null);
+            await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Assistant, fullResponse, 0, null);
 
             // Parse for tool calls
             var toolCallRequests = ParseToolCalls(fullResponse);
