@@ -1132,6 +1132,25 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// ModelMessageQueue exposes no in-place content update, so an edit is applied as a
+    /// remove-then-re-enqueue of the same session/mode with the new text. That means an
+    /// edited item loses its original queue position and reappears at the back (queue
+    /// order is by CreatedAt) - an accepted tradeoff to keep this change UI-only.
+    /// </summary>
+    [RelayCommand]
+    private void SaveQueuedItemEdit(QueuedMessageViewModel? item)
+    {
+        if (item == null || string.IsNullOrWhiteSpace(item.EditText)) return;
+
+        var sessionId = item.SessionId;
+        var mode = item.Mode;
+        var newText = item.EditText.Trim();
+
+        _messageQueue?.Remove(item.Id);
+        _messageQueue?.Enqueue(sessionId, newText, mode);
+    }
+
     [RelayCommand]
     private void ToggleSelectedQueueMode()
     {

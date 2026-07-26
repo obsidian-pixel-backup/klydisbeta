@@ -1,5 +1,6 @@
 using System;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using Klydis.Core.Chat;
 
 namespace Klydis.App.ViewModels;
@@ -21,6 +22,12 @@ public partial class QueuedMessageViewModel : ObservableObject
     [ObservableProperty]
     private QueuedMessageStatus _status;
 
+    [ObservableProperty]
+    private bool _isEditing;
+
+    [ObservableProperty]
+    private string _editText = string.Empty;
+
     public string ModeBadgeText => Mode == QueuedMessageMode.Steer ? "Steer" : "Direct Send";
 
     public QueuedMessageViewModel(QueuedMessage model)
@@ -31,5 +38,18 @@ public partial class QueuedMessageViewModel : ObservableObject
         Mode = model.Mode;
         Status = model.Status;
         CreatedAt = model.CreatedAt.ToLocalTime();
+    }
+
+    [RelayCommand]
+    private void BeginEdit()
+    {
+        EditText = Content;
+        IsEditing = true;
+    }
+
+    [RelayCommand]
+    private void CancelEdit()
+    {
+        IsEditing = false;
     }
 }
