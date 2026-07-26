@@ -638,22 +638,29 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         // The generating indicator lives in the transcript as the always-last
         // item, where the response will materialize — not pinned above the input.
         var typingIndicator = new ChatMessageViewModel { Role = "typing", Timestamp = DateTime.Now };
-        Messages.Add(typingIndicator);
+        if (SelectedSession?.Id == localGeneratingSessionId)
+        {
+            Messages.Add(typingIndicator);
+        }
 
         void OnUi(Action action)
         {
-            if (System.Windows.Application.Current?.Dispatcher != null)
+            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
-                System.Windows.Application.Current.Dispatcher.InvokeAsync(action, System.Windows.Threading.DispatcherPriority.Normal);
-            }
-            else
-            {
-                action();
+                if (System.Windows.Application.Current?.Dispatcher != null)
+                {
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(action, System.Windows.Threading.DispatcherPriority.Normal);
+                }
+                else
+                {
+                    action();
+                }
             }
         }
 
         void AppendMessage(ChatMessageViewModel message)
         {
+            if (localGeneratingSessionId == null || SelectedSession?.Id != localGeneratingSessionId) return;
             int indicatorIdx = Messages.IndexOf(typingIndicator);
             if (indicatorIdx >= 0)
             {
