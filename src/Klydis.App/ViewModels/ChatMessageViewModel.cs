@@ -134,6 +134,10 @@ public partial class ChatMessageViewModel : ObservableObject
 
     public ObservableCollection<ToolCallViewModel> ToolCalls { get; } = new();
 
+    public ObservableCollection<AttachmentItemViewModel> Attachments { get; } = new();
+
+    public bool HasAttachments => Attachments.Count > 0;
+
     [RelayCommand]
     private void BeginEdit()
     {

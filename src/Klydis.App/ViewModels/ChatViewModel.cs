@@ -1,10 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Media.Imaging;
+using Microsoft.Win32;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Klydis.Core.Chat;
@@ -110,6 +116,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     public ObservableCollection<SessionInfo> Sessions { get; } = new();
     public ObservableCollection<RiskLevel> AvailableRiskLevels { get; } = new();
     public ObservableCollection<QueuedMessageViewModel> QueuedMessages { get; } = new();
+    public ObservableCollection<AttachmentItemViewModel> PendingAttachments { get; } = new();
+
+    public bool HasPendingAttachments => PendingAttachments.Count > 0;
 
     private readonly Klydis.Core.Models.ModelRegistry _registry;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
@@ -593,10 +602,215 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         SelectedModelId = string.Empty;
     }
 
+    public void AddAttachment(AttachmentItemViewModel item)
+    {
+        item.OnRemoveRequested = RemoveAttachment;
+        PendingAttachments.Add(item);
+        OnPropertyChanged(nameof(HasPendingAttachments));
+    }
+
+    [RelayCommand]
+    public void RemoveAttachment(AttachmentItemViewModel item)
+    {
+        if (item != null)
+        {
+            PendingAttachments.Remove(item);
+            OnPropertyChanged(nameof(HasPendingAttachments));
+        }
+    }
+
+    [RelayCommand]
+    public void ClearPendingAttachments()
+    {
+        PendingAttachments.Clear();
+        OnPropertyChanged(nameof(HasPendingAttachments));
+    }
+
+    [RelayCommand]
+    public void AttachFiles()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Multiselect = true,
+            Title = "Attach Files or Code to Chat Context",
+            Filter = "All Supported Files|*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.gif;*.mp3;*.wav;*.m4a;*.ogg;*.cs;*.py;*.js;*.ts;*.html;*.css;*.json;*.md;*.txt;*.xml;*.yaml;*.yml;*.sql;*.cpp;*.h;*.c;*.java;*.sh;*.ps1;*.bat;*.pdf;*.docx;*.zip|Images|*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.gif|Audio|*.mp3;*.wav;*.m4a;*.ogg|Code & Text|*.cs;*.py;*.js;*.ts;*.html;*.css;*.json;*.md;*.txt;*.xml;*.yaml;*.yml;*.sql;*.cpp;*.h;*.c;*.java;*.sh;*.ps1;*.bat|All Files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            foreach (var file in dialog.FileNames)
+            {
+                AddAttachment(AttachmentItemViewModel.FromFile(file));
+            }
+        }
+    }
+
+    [RelayCommand]
+    public void AttachImage()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Multiselect = true,
+            Title = "Attach Images to Chat",
+            Filter = "Image Files|*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.gif|All Files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            foreach (var file in dialog.FileNames)
+            {
+                AddAttachment(AttachmentItemViewModel.FromFile(file));
+            }
+        }
+    }
+
+    [RelayCommand]
+    public void AttachAudio()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Multiselect = true,
+            Title = "Attach Audio Clips to Chat",
+            Filter = "Audio Files|*.mp3;*.wav;*.m4a;*.ogg;*.flac;*.aac;*.wma|All Files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            foreach (var file in dialog.FileNames)
+            {
+                AddAttachment(AttachmentItemViewModel.FromFile(file));
+            }
+        }
+    }
+
+    [RelayCommand]
+    public async Task CaptureScreenshotAsync()
+    {
+        try
+        {
+            await Task.Delay(150);
+            var bmp = CapturePrimaryScreen();
+            var item = AttachmentItemViewModel.FromImage(bmp, "Screenshot");
+            AddAttachment(item);
+        }
+        catch (Exception ex)
+        {
+            ShowAlert("Screenshot Error", $"Failed to capture screenshot: {ex.Message}");
+        }
+    }
+
+    public Func<Task<string?>?>? RequestTextContextHandler { get; set; }
+
+    [RelayCommand]
+    public async Task AddTextContextAsync()
+    {
+        if (RequestTextContextHandler != null)
+        {
+            var textTask = RequestTextContextHandler.Invoke();
+            if (textTask != null)
+            {
+                var text = await textTask;
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    AddAttachment(AttachmentItemViewModel.FromTextContext("Context Snippet", text));
+                }
+            }
+        }
+    }
+
+    public void HandleDropFiles(string[] filePaths)
+    {
+        if (filePaths == null || filePaths.Length == 0) return;
+        foreach (var file in filePaths)
+        {
+            if (File.Exists(file))
+            {
+                AddAttachment(AttachmentItemViewModel.FromFile(file));
+            }
+        }
+    }
+
+    public void HandleClipboardPaste()
+    {
+        try
+        {
+            if (Clipboard.ContainsImage())
+            {
+                var image = Clipboard.GetImage();
+                if (image != null)
+                {
+                    AddAttachment(AttachmentItemViewModel.FromImage(image, "Pasted_Image"));
+                }
+            }
+            else if (Clipboard.ContainsFileDropList())
+            {
+                var files = Clipboard.GetFileDropList();
+                foreach (string? file in files)
+                {
+                    if (!string.IsNullOrEmpty(file) && File.Exists(file))
+                    {
+                        AddAttachment(AttachmentItemViewModel.FromFile(file));
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Clipboard paste failed: {ex.Message}");
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindowDC(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    private static extern IntPtr ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("gdi32.dll")]
+    private static extern bool BitBlt(IntPtr hObject, int nXDest, int nYDest, int nWidth, int nHeight, IntPtr hObjectSource, int nXSrc, int nYSrc, int dwRop);
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleBitmap(IntPtr hDC, int nWidth, int nHeight);
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hDC);
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr hObject);
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+    private const int SRCCOPY = 0x00CC0020;
+
+    public static BitmapSource CapturePrimaryScreen()
+    {
+        int width = (int)SystemParameters.PrimaryScreenWidth;
+        int height = (int)SystemParameters.PrimaryScreenHeight;
+
+        IntPtr desktopHwnd = GetDesktopWindow();
+        IntPtr desktopDc = GetWindowDC(desktopHwnd);
+        IntPtr memDc = CreateCompatibleDC(desktopDc);
+        IntPtr hBitmap = CreateCompatibleBitmap(desktopDc, width, height);
+        IntPtr oldBitmap = SelectObject(memDc, hBitmap);
+
+        BitBlt(memDc, 0, 0, width, height, desktopDc, 0, 0, SRCCOPY);
+
+        SelectObject(memDc, oldBitmap);
+        DeleteDC(memDc);
+        ReleaseDC(desktopHwnd, desktopDc);
+
+        var bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+            hBitmap,
+            IntPtr.Zero,
+            Int32Rect.Empty,
+            BitmapSizeOptions.FromEmptyOptions());
+
+        DeleteObject(hBitmap);
+        return bitmapSource;
+    }
+
     [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task SendMessageAsync()
     {
-        if (string.IsNullOrWhiteSpace(InputText))
+        if (string.IsNullOrWhiteSpace(InputText) && PendingAttachments.Count == 0)
             return;
 
         if (IsGenerating || IsModelLoading)
@@ -607,20 +821,73 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         var userMessage = InputText;
         InputText = string.Empty;
-        await SendMessageForTextAsync(userMessage);
+
+        var attachedItems = PendingAttachments.ToList();
+        ClearPendingAttachments();
+
+        var sb = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(userMessage))
+        {
+            sb.AppendLine(userMessage);
+        }
+
+        foreach (var att in attachedItems)
+        {
+            if (att.Type == AttachmentType.TextContext || (!string.IsNullOrEmpty(att.Content) && att.Type != AttachmentType.Image && att.Type != AttachmentType.Screenshot))
+            {
+                sb.AppendLine($"\n\n[Attached Context: {att.FileName}]\n```\n{att.Content}\n```");
+            }
+            else if (att.Type == AttachmentType.Image || att.Type == AttachmentType.Screenshot)
+            {
+                if (!string.IsNullOrEmpty(att.FilePath))
+                {
+                    sb.AppendLine($"\n\n![{att.FileName}](file:///{att.FilePath.Replace('\\', '/')})");
+                }
+                else
+                {
+                    sb.AppendLine($"\n\n[Attached Image: {att.FileName}]");
+                }
+            }
+            else if (att.Type == AttachmentType.Audio)
+            {
+                sb.AppendLine($"\n\n[Attached Audio Clip: {att.FileName} ({att.SizeDisplay})]");
+            }
+            else
+            {
+                sb.AppendLine($"\n\n[Attached File: {att.FileName} ({att.SizeDisplay})]");
+            }
+        }
+
+        string fullText = sb.ToString().Trim();
+        await SendMessageForTextAndAttachmentsAsync(fullText, attachedItems);
     }
 
     private async Task SendMessageForTextAsync(string userMessage)
     {
+        await SendMessageForTextAndAttachmentsAsync(userMessage, null);
+    }
+
+    private async Task SendMessageForTextAndAttachmentsAsync(string userMessage, List<AttachmentItemViewModel>? attachments)
+    {
         if (string.IsNullOrWhiteSpace(userMessage))
             return;
 
-        Messages.Add(new ChatMessageViewModel
+        var userMsgVm = new ChatMessageViewModel
         {
             Role = "user",
             Content = userMessage,
             Timestamp = DateTime.Now
-        });
+        };
+
+        if (attachments != null)
+        {
+            foreach (var att in attachments)
+            {
+                userMsgVm.Attachments.Add(att);
+            }
+        }
+
+        Messages.Add(userMsgVm);
 
         IsGenerating = true;
         var localGeneratingSessionId = SelectedSession?.Id;

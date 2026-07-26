@@ -45,3 +45,16 @@ public class InverseBoolToVisConverter : IValueConverter
     }
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
 }
+
+public class NullToVisConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        bool isNull = value == null;
+        if (parameter?.ToString() == "Inverse")
+            return isNull ? Visibility.Visible : Visibility.Collapsed;
+        return isNull ? Visibility.Collapsed : Visibility.Visible;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+

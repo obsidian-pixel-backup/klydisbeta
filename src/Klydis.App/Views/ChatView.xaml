@@ -613,7 +613,29 @@
                                     <Border CornerRadius="14,14,4,14" Padding="14,8" HorizontalAlignment="Right" Margin="100,8,0,8"
                                             Background="{DynamicResource UserBubbleBackgroundBrush}" BorderThickness="0"
                                             Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
-                                        <DockPanel LastChildFill="True">
+                                        <StackPanel>
+                                             <!-- Attachments display -->
+                                             <ItemsControl ItemsSource="{Binding Attachments}" Visibility="{Binding HasAttachments, Converter={StaticResource BoolToVisConverter}}" Margin="0,0,0,6">
+                                                 <ItemsControl.ItemsPanel>
+                                                     <ItemsPanelTemplate>
+                                                         <WrapPanel HorizontalAlignment="Right"/>
+                                                     </ItemsPanelTemplate>
+                                                 </ItemsControl.ItemsPanel>
+                                                 <ItemsControl.ItemTemplate>
+                                                     <DataTemplate>
+                                                         <Border Background="#20FFFFFF" BorderBrush="#40FFFFFF" BorderThickness="1" CornerRadius="6" Margin="0,0,6,6" Padding="6,4">
+                                                             <StackPanel Orientation="Horizontal">
+                                                                 <Image Source="{Binding Thumbnail}" Width="24" Height="24" Margin="0,0,6,0" Stretch="UniformToFill"
+                                                                        Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}}"/>
+                                                                 <TextBlock Text="{Binding IconSymbol}" FontSize="14" Margin="0,0,4,0" VerticalAlignment="Center"
+                                                                            Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}, ConverterParameter=Inverse}"/>
+                                                                 <TextBlock Text="{Binding FileName}" FontSize="12" Foreground="{DynamicResource UserBubbleTextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                                             </StackPanel>
+                                                         </Border>
+                                                     </DataTemplate>
+                                                 </ItemsControl.ItemTemplate>
+                                             </ItemsControl>
+                                            <DockPanel LastChildFill="True">
                                             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="10,0,0,0">
                                                 <Button Command="{Binding BeginEditCommand}" 
                                                         Foreground="{DynamicResource UserBubbleTextBrush}"
@@ -645,6 +667,7 @@
                                             <TextBlock Text="{Binding Content}" Foreground="{DynamicResource UserBubbleTextBrush}"
                                                        TextWrapping="Wrap" VerticalAlignment="Center" FontSize="15" LineHeight="22"/>
                                         </DockPanel>
+                                        </StackPanel>
                                     </Border>
                                     
                                     <!-- Edit View -->
@@ -1004,7 +1027,48 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </ScrollViewer>
-                        </StackPanel>
+                    <!-- Pending Attachments Preview Container -->
+                    <Border Visibility="{Binding HasPendingAttachments, Converter={StaticResource BoolToVisConverter}}"
+                            Background="{DynamicResource SurfaceElevatedBrush}"
+                            BorderBrush="{DynamicResource BorderMidBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Margin="0,0,0,8"
+                            Padding="8,6">
+                        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                            <ItemsControl ItemsSource="{Binding PendingAttachments}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal"/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="{DynamicResource InputBackgroundBrush}"
+                                                BorderBrush="{DynamicResource AccentPrimaryBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="6"
+                                                Margin="0,0,8,0"
+                                                Padding="6,4">
+                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Image Source="{Binding Thumbnail}" Width="28" Height="28" Margin="0,0,6,0" Stretch="UniformToFill"
+                                                       Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}}"/>
+                                                <TextBlock Text="{Binding IconSymbol}" FontSize="14" Margin="0,0,4,0" VerticalAlignment="Center"
+                                                           Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}, ConverterParameter=Inverse}"/>
+                                                <StackPanel VerticalAlignment="Center" Margin="0,0,8,0">
+                                                    <TextBlock Text="{Binding FileName}" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Text="{Binding SizeDisplay}" FontSize="10" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                </StackPanel>
+                                                <Button Command="{Binding RemoveCommand}"
+                                                        Style="{DynamicResource QueueItemCloseButton}"
+                                                        Width="18" Height="18" VerticalAlignment="Center"
+                                                        ToolTip="Remove attachment"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
                     </Border>
 
                     <Grid>
@@ -1016,6 +1080,26 @@
                         </Grid.ColumnDefinitions>
 
                         <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Bottom">
+                            <!-- Plus Sign Context Button (+) -->
+                            <Button x:Name="AddContextButton"
+                                    Click="AddContextButton_Click"
+                                    Width="40" Height="40"
+                                    Margin="0,0,6,0"
+                                    Style="{DynamicResource SecondaryButton}"
+                                    ToolTip="Add Context &amp; Attachments (+)">
+                                <Button.ContextMenu>
+                                    <ContextMenu x:Name="AddContextContextMenu" Background="{DynamicResource SurfaceElevatedBrush}" Foreground="{DynamicResource TextPrimaryBrush}">
+                                        <MenuItem Header="📷 Take Screenshot" Command="{Binding CaptureScreenshotCommand}"/>
+                                        <MenuItem Header="📁 Attach Files or Code" Command="{Binding AttachFilesCommand}"/>
+                                        <MenuItem Header="🖼️ Attach Image" Command="{Binding AttachImageCommand}"/>
+                                        <MenuItem Header="🎙️ Attach Audio Clip" Command="{Binding AttachAudioCommand}"/>
+                                        <Separator/>
+                                        <MenuItem Header="📝 Add Text / Code Context Snippet" Command="{Binding AddTextContextCommand}"/>
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                                <TextBlock Text="+" FontSize="22" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                            </Button>
+
                             <ComboBox ItemsSource="{Binding AvailableRiskLevels}"
                                       SelectedItem="{Binding SelectedRiskLevel}"
                                       Width="90"
@@ -1040,10 +1124,11 @@
                             </Button>
                         </StackPanel>
 
-                        <Grid Grid.Column="1">
+                        <Grid Grid.Column="1" AllowDrop="True" DragOver="InputTextBox_DragOver" Drop="InputTextBox_Drop">
                             <TextBox x:Name="InputTextBox" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                                      MinLines="1" MaxLines="6" TextWrapping="Wrap" AcceptsReturn="True"
                                      PreviewKeyDown="InputTextBox_PreviewKeyDown"
+                                     AllowDrop="True" DragOver="InputTextBox_DragOver" Drop="InputTextBox_Drop"
                                      Background="{DynamicResource InputBackgroundBrush}"
                                      Foreground="{DynamicResource TextPrimaryBrush}"
                                      BorderThickness="1" BorderBrush="{DynamicResource BorderMidBrush}"
