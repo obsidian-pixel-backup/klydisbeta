@@ -17,23 +17,22 @@ public enum AttachmentType
 
 public partial class AttachmentItemViewModel : ObservableObject
 {
-    [ObservableProperty]
-    private string _id = Guid.NewGuid().ToString("N");
+    public string Id { get; } = Guid.NewGuid().ToString("N");
 
     [ObservableProperty]
     private string _fileName = string.Empty;
 
     [ObservableProperty]
-    private string? _filePath;
+    private string _filePath = string.Empty;
 
     [ObservableProperty]
     private AttachmentType _type = AttachmentType.File;
 
     [ObservableProperty]
-    private string? _content;
+    private string _sizeDisplay = string.Empty;
 
     [ObservableProperty]
-    private string _sizeDisplay = string.Empty;
+    private string _content = string.Empty;
 
     [ObservableProperty]
     private BitmapSource? _thumbnail;
@@ -49,81 +48,84 @@ public partial class AttachmentItemViewModel : ObservableObject
         OnRemoveRequested?.Invoke(this);
     }
 
-    public static AttachmentItemViewModel FromFile(string filePath)
+    public static AttachmentItemViewModel FromFile(string path)
     {
-        var fileInfo = new FileInfo(filePath);
+        var fileInfo = new FileInfo(path);
         string ext = fileInfo.Extension.ToLowerInvariant();
+        
         AttachmentType type = AttachmentType.File;
         string icon = "📄";
-        BitmapSource? thumb = null;
-        string content = string.Empty;
 
         if (ext is ".png" or ".jpg" or ".jpeg" or ".bmp" or ".webp" or ".gif")
         {
             type = AttachmentType.Image;
             icon = "🖼️";
-            thumb = LoadThumbnail(filePath);
         }
-        else if (ext is ".mp3" or ".wav" or ".m4a" or ".ogg" or ".flac" or ".aac" or ".wma")
+        else if (ext is ".wav" or ".mp3" or ".m4a" or ".ogg" or ".flac" or ".aac")
         {
             type = AttachmentType.Audio;
             icon = "🎙️";
         }
-        else if (ext is ".cs" or ".py" or ".js" or ".ts" or ".html" or ".css" or ".json" or ".md" or ".txt" or ".xml" or ".yaml" or ".yml" or ".sql" or ".cpp" or ".h" or ".c" or ".java" or ".sh" or ".ps1" or ".bat")
+        else if (ext is ".cs" or ".py" or ".js" or ".ts" or ".html" or ".css" or ".cpp" or ".c" or ".h" or ".json" or ".xml" or ".md" or ".txt" or ".sql" or ".sh" or ".bat" or ".ps1")
         {
             type = AttachmentType.File;
             icon = "💻";
+        }
+
+        BitmapSource? thumb = null;
+        if (type == AttachmentType.Image)
+        {
+            thumb = LoadThumbnail(path);
+        }
+
+        string sizeStr = FormatFileSize(fileInfo.Length);
+        string fileContent = string.Empty;
+
+        // If small text file, pre-read content for context window injection
+        if (type != AttachmentType.Image && type != AttachmentType.Audio && fileInfo.Length < 250 * 1024)
+        {
             try
             {
-                if (fileInfo.Length < 500_000) // limit inline reading to 500KB
-                {
-                    content = File.ReadAllText(filePath);
-                }
+                fileContent = File.ReadAllText(path);
             }
             catch { }
         }
 
-        string sizeStr;
-        if (fileInfo.Length < 1024)
-            sizeStr = $"{fileInfo.Length} B";
-        else if (fileInfo.Length < 1024 * 1024)
-            sizeStr = $"{fileInfo.Length / 1024.0:F1} KB";
-        else
-            sizeStr = $"{fileInfo.Length / (1024.0 * 1024.0):F1} MB";
-
         return new AttachmentItemViewModel
         {
             FileName = fileInfo.Name,
-            FilePath = filePath,
+            FilePath = path,
             Type = type,
             SizeDisplay = sizeStr,
-            IconSymbol = icon,
             Thumbnail = thumb,
-            Content = content
+            IconSymbol = icon,
+            Content = fileContent
         };
     }
 
-    public static AttachmentItemViewModel FromImage(BitmapSource bitmap, string label = "Screenshot")
+    public static AttachmentItemViewModel FromScreenshot(string path, BitmapSource bitmap)
     {
+        var fileInfo = new FileInfo(path);
         return new AttachmentItemViewModel
         {
-            FileName = $"{label}_{DateTime.Now:yyyyMMdd_HHmmss}.png",
-            Type = label.Contains("Screenshot", StringComparison.OrdinalIgnoreCase) ? AttachmentType.Screenshot : AttachmentType.Image,
-            SizeDisplay = $"{bitmap.PixelWidth}×{bitmap.PixelHeight}",
-            IconSymbol = "📷",
-            Thumbnail = bitmap
+            FileName = fileInfo.Name,
+            FilePath = path,
+            Type = AttachmentType.Screenshot,
+            SizeDisplay = FormatFileSize(fileInfo.Length),
+            Thumbnail = bitmap,
+            IconSymbol = "📷"
         };
     }
 
-    public static AttachmentItemViewModel FromTextContext(string title, string textContent)
+    public static AttachmentItemViewModel FromTextContext(string title, string text)
     {
-        int lineCount = textContent.Split('\n').Length;
         return new AttachmentItemViewModel
         {
             FileName = string.IsNullOrWhiteSpace(title) ? "Context Snippet" : title,
+            FilePath = string.Empty,
             Type = AttachmentType.TextContext,
-            Content = textContent,
-            SizeDisplay = $"{lineCount} lines ({textContent.Length} chars)",
+            SizeDisplay = $"{text.Length} chars",
+            Content = text,
             IconSymbol = "📝"
         };
     }
@@ -135,7 +137,7 @@ public partial class AttachmentItemViewModel : ObservableObject
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
             bitmap.UriSource = new Uri(path, UriKind.Absolute);
-            bitmap.DecodePixelWidth = 160; // downscale thumbnail
+            bitmap.DecodePixelWidth = 120;
             bitmap.CacheOption = BitmapCacheOption.OnLoad;
             bitmap.EndInit();
             bitmap.Freeze();
@@ -145,5 +147,12 @@ public partial class AttachmentItemViewModel : ObservableObject
         {
             return null;
         }
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / (1024.0 * 1024.0):F1} MB";
     }
 }

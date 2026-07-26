@@ -165,4 +165,37 @@ public static class NativeEngineManager
 
         return false;
     }
+
+    /// <summary>
+    /// Restarts the application by launching a new process and exiting the current one.
+    /// Used after downloading updated native engine DLLs that require a fresh process
+    /// to take effect (the in-memory llama.dll is locked by the running process).
+    /// </summary>
+    /// <param name="logger">Optional logger for telemetry.</param>
+    public static void RestartApplication(ILogger? logger = null)
+    {
+        try
+        {
+            var exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                logger?.LogInformation("Restarting application to apply updated native engine: {ExePath}", exePath);
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = exePath,
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                logger?.LogError("Cannot determine executable path for restart.");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Failed to start new process for restart.");
+        }
+
+        Environment.Exit(0);
+    }
 }

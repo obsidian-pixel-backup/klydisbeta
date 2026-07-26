@@ -2,29 +2,30 @@ using System.Windows;
 
 namespace Klydis.App.Views;
 
-public partial class TextContextDialog : Window
+public partial class TextContextWindow : Window
 {
     public string ContextTitle => TitleInput.Text.Trim();
     public string ContextText => ContentInput.Text;
 
-    public TextContextDialog()
+    public TextContextWindow()
     {
         InitializeComponent();
-        Loaded += (_, _) => ContentInput.Focus();
+        ContentInput.Focus();
     }
 
-    private void Add_Click(object sender, RoutedEventArgs e)
+    private void AttachButton_Click(object sender, RoutedEventArgs e)
     {
         if (string.IsNullOrWhiteSpace(ContentInput.Text))
         {
-            MessageBox.Show("Please enter context content.", "Empty Context", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show("Please enter or paste some text/code context before attaching.", "Empty Context", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+
         DialogResult = true;
         Close();
     }
 
-    private void Cancel_Click(object sender, RoutedEventArgs e)
+    private void CancelButton_Click(object sender, RoutedEventArgs e)
     {
         DialogResult = false;
         Close();

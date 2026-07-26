@@ -613,29 +613,7 @@
                                     <Border CornerRadius="14,14,4,14" Padding="14,8" HorizontalAlignment="Right" Margin="100,8,0,8"
                                             Background="{DynamicResource UserBubbleBackgroundBrush}" BorderThickness="0"
                                             Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
-                                        <StackPanel>
-                                             <!-- Attachments display -->
-                                             <ItemsControl ItemsSource="{Binding Attachments}" Visibility="{Binding HasAttachments, Converter={StaticResource BoolToVisConverter}}" Margin="0,0,0,6">
-                                                 <ItemsControl.ItemsPanel>
-                                                     <ItemsPanelTemplate>
-                                                         <WrapPanel HorizontalAlignment="Right"/>
-                                                     </ItemsPanelTemplate>
-                                                 </ItemsControl.ItemsPanel>
-                                                 <ItemsControl.ItemTemplate>
-                                                     <DataTemplate>
-                                                         <Border Background="#20FFFFFF" BorderBrush="#40FFFFFF" BorderThickness="1" CornerRadius="6" Margin="0,0,6,6" Padding="6,4">
-                                                             <StackPanel Orientation="Horizontal">
-                                                                 <Image Source="{Binding Thumbnail}" Width="24" Height="24" Margin="0,0,6,0" Stretch="UniformToFill"
-                                                                        Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}}"/>
-                                                                 <TextBlock Text="{Binding IconSymbol}" FontSize="14" Margin="0,0,4,0" VerticalAlignment="Center"
-                                                                            Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}, ConverterParameter=Inverse}"/>
-                                                                 <TextBlock Text="{Binding FileName}" FontSize="12" Foreground="{DynamicResource UserBubbleTextBrush}" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                                                             </StackPanel>
-                                                         </Border>
-                                                     </DataTemplate>
-                                                 </ItemsControl.ItemTemplate>
-                                             </ItemsControl>
-                                            <DockPanel LastChildFill="True">
+                                        <DockPanel LastChildFill="True">
                                             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="10,0,0,0">
                                                 <Button Command="{Binding BeginEditCommand}" 
                                                         Foreground="{DynamicResource UserBubbleTextBrush}"
@@ -663,11 +641,57 @@
                                                               Visibility="{Binding IsCopied, Converter={StaticResource BoolToVisConverter}}"/>
                                                     </Grid>
                                                 </Button>
+                                            </StackPanel>                                             <StackPanel VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Content}" Foreground="{DynamicResource UserBubbleTextBrush}"
+                                                           TextWrapping="Wrap" FontSize="15" LineHeight="22"/>
+                                                
+                                                <!-- Message Attachments Display -->
+                                                <ItemsControl ItemsSource="{Binding Attachments}" Margin="0,8,0,0"
+                                                              Visibility="{Binding HasAttachments, Converter={StaticResource BoolToVisConverter}}">
+                                                    <ItemsControl.ItemsPanel>
+                                                        <ItemsPanelTemplate>
+                                                            <WrapPanel Orientation="Horizontal"/>
+                                                        </ItemsPanelTemplate>
+                                                    </ItemsControl.ItemsPanel>
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border Background="#20FFFFFF" BorderBrush="#40FFFFFF" BorderThickness="1" CornerRadius="6" Margin="0,0,6,6" Padding="6,4">
+                                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                                    <Image Source="{Binding Thumbnail}" MaxWidth="160" MaxHeight="120" Stretch="Uniform" Margin="0,0,6,0">
+                                                                        <Image.Style>
+                                                                            <Style TargetType="Image">
+                                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                                <Style.Triggers>
+                                                                                    <DataTrigger Binding="{Binding Thumbnail}" Value="{x:Null}">
+                                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                                    </DataTrigger>
+                                                                                </Style.Triggers>
+                                                                            </Style>
+                                                                        </Image.Style>
+                                                                    </Image>
+                                                                    <TextBlock Text="{Binding IconSymbol}" FontSize="14" Margin="0,0,4,0" VerticalAlignment="Center">
+                                                                        <TextBlock.Style>
+                                                                            <Style TargetType="TextBlock">
+                                                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                                                <Style.Triggers>
+                                                                                    <DataTrigger Binding="{Binding Thumbnail}" Value="{x:Null}">
+                                                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                                                    </DataTrigger>
+                                                                                </Style.Triggers>
+                                                                            </Style>
+                                                                        </TextBlock.Style>
+                                                                    </TextBlock>
+                                                                    <StackPanel VerticalAlignment="Center">
+                                                                        <TextBlock Text="{Binding FileName}" MaxWidth="160" TextTrimming="CharacterEllipsis" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource UserBubbleTextBrush}"/>
+                                                                        <TextBlock Text="{Binding SizeDisplay}" FontSize="10" Foreground="{DynamicResource UserBubbleTextBrush}" Opacity="0.8"/>
+                                                                    </StackPanel>
+                                                                </StackPanel>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
                                             </StackPanel>
-                                            <TextBlock Text="{Binding Content}" Foreground="{DynamicResource UserBubbleTextBrush}"
-                                                       TextWrapping="Wrap" VerticalAlignment="Center" FontSize="15" LineHeight="22"/>
                                         </DockPanel>
-                                        </StackPanel>
                                     </Border>
                                     
                                     <!-- Edit View -->
@@ -972,18 +996,6 @@
                                                             </Border>
                                                         </Button>
                                                         <TextBlock Text="{Binding Content}" MaxWidth="180" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}"/>
-                                                        <!-- Only meaningful while a turn is actively streaming - jumps this
-                                                             item to the front by cancelling the in-progress generation and
-                                                             sending it immediately, instead of waiting for the current
-                                                             turn to finish and the normal queue order to reach it. -->
-                                                        <Button Style="{DynamicResource GhostButton}"
-                                                                Command="{Binding DataContext.ForceSendQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding}"
-                                                                Visibility="{Binding DataContext.IsGenerating, RelativeSource={RelativeSource AncestorType=UserControl}, Converter={StaticResource BoolToVisConverter}}"
-                                                                ToolTip="Interrupt current generation and send this now"
-                                                                Margin="6,0,0,0" Padding="2,0">
-                                                            <TextBlock Text="⚡" FontSize="11" Foreground="{DynamicResource WarningBrush}"/>
-                                                        </Button>
                                                         <Button Style="{DynamicResource GhostButton}"
                                                                 Command="{Binding BeginEditCommand}"
                                                                 ToolTip="Edit queued message"
@@ -1039,48 +1051,78 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </ScrollViewer>
-                    <!-- Pending Attachments Preview Container -->
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Pending Attachments Preview Panel -->
                     <Border Visibility="{Binding HasPendingAttachments, Converter={StaticResource BoolToVisConverter}}"
                             Background="{DynamicResource SurfaceElevatedBrush}"
                             BorderBrush="{DynamicResource BorderMidBrush}"
-                            BorderThickness="1"
-                            CornerRadius="8"
-                            Margin="0,0,0,8"
-                            Padding="8,6">
-                        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-                            <ItemsControl ItemsSource="{Binding PendingAttachments}">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <StackPanel Orientation="Horizontal"/>
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border Background="{DynamicResource InputBackgroundBrush}"
-                                                BorderBrush="{DynamicResource AccentPrimaryBrush}"
-                                                BorderThickness="1"
-                                                CornerRadius="6"
-                                                Margin="0,0,8,0"
-                                                Padding="6,4">
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <Image Source="{Binding Thumbnail}" Width="28" Height="28" Margin="0,0,6,0" Stretch="UniformToFill"
-                                                       Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}}"/>
-                                                <TextBlock Text="{Binding IconSymbol}" FontSize="14" Margin="0,0,4,0" VerticalAlignment="Center"
-                                                           Visibility="{Binding Thumbnail, Converter={StaticResource NullToVisConverter}, ConverterParameter=Inverse}"/>
-                                                <StackPanel VerticalAlignment="Center" Margin="0,0,8,0">
-                                                    <TextBlock Text="{Binding FileName}" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
-                                                    <TextBlock Text="{Binding SizeDisplay}" FontSize="10" Foreground="{DynamicResource TextMutedBrush}"/>
+                            BorderThickness="1" CornerRadius="8" Margin="0,0,0,10" Padding="10,8">
+                        <DockPanel>
+                            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="📎 Context Attachments:" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                    <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="10" Padding="6,1.5" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding PendingAttachments.Count, StringFormat='{}{0} item(s)'}" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                    </Border>
+                                </StackPanel>
+                                <Button DockPanel.Dock="Right" Style="{DynamicResource GhostButton}" Command="{Binding ClearPendingAttachmentsCommand}" ToolTip="Remove all attachments" VerticalAlignment="Center" Padding="6,3">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="✕ Clear All" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}"/>
+                                    </StackPanel>
+                                </Button>
+                            </DockPanel>
+
+                            <ScrollViewer MaxHeight="120" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                                <ItemsControl ItemsSource="{Binding PendingAttachments}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{DynamicResource InputBackgroundBrush}"
+                                                    BorderBrush="{DynamicResource BorderMidBrush}"
+                                                    BorderThickness="1" CornerRadius="8" Margin="0,0,8,8" Padding="6,4">
+                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <Image Source="{Binding Thumbnail}" Width="24" Height="24" Stretch="UniformToFill" Margin="0,0,6,0" VerticalAlignment="Center">
+                                                        <Image.Style>
+                                                            <Style TargetType="Image">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding Thumbnail}" Value="{x:Null}">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Image.Style>
+                                                    </Image>
+                                                    <TextBlock Text="{Binding IconSymbol}" FontSize="14" Margin="0,0,6,0" VerticalAlignment="Center">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding Thumbnail}" Value="{x:Null}">
+                                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                    <StackPanel VerticalAlignment="Center" Margin="0,0,6,0">
+                                                        <TextBlock Text="{Binding FileName}" MaxWidth="140" TextTrimming="CharacterEllipsis" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                        <TextBlock Text="{Binding SizeDisplay}" FontSize="10" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                    </StackPanel>
+                                                    <Button Style="{DynamicResource QueueItemCloseButton}" Command="{Binding RemoveCommand}" ToolTip="Remove attachment" VerticalAlignment="Center"/>
                                                 </StackPanel>
-                                                <Button Command="{Binding RemoveCommand}"
-                                                        Style="{DynamicResource QueueItemCloseButton}"
-                                                        Width="18" Height="18" VerticalAlignment="Center"
-                                                        ToolTip="Remove attachment"/>
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </ScrollViewer>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </DockPanel>
                     </Border>
 
                     <Grid>
@@ -1092,24 +1134,24 @@
                         </Grid.ColumnDefinitions>
 
                         <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,10,0" VerticalAlignment="Bottom">
-                            <!-- Plus Sign Context Button (+) -->
+                            <!-- Plus Sign (+) Context Menu Button -->
                             <Button x:Name="AddContextButton"
                                     Click="AddContextButton_Click"
-                                    Width="40" Height="40"
-                                    Margin="0,0,6,0"
+                                    Width="40" Height="40" Margin="0,0,6,0"
                                     Style="{DynamicResource SecondaryButton}"
-                                    ToolTip="Add Context &amp; Attachments (+)">
+                                    ToolTip="Add Attachments, Screenshots &amp; Context (+)">
                                 <Button.ContextMenu>
-                                    <ContextMenu x:Name="AddContextContextMenu" Background="{DynamicResource SurfaceElevatedBrush}" Foreground="{DynamicResource TextPrimaryBrush}">
+                                    <ContextMenu x:Name="ContextAddMenu" Background="{DynamicResource SurfaceElevatedBrush}" Foreground="{DynamicResource TextPrimaryBrush}">
                                         <MenuItem Header="📷 Take Screenshot" Command="{Binding CaptureScreenshotCommand}"/>
+                                        <Separator/>
                                         <MenuItem Header="📁 Attach Files or Code" Command="{Binding AttachFilesCommand}"/>
                                         <MenuItem Header="🖼️ Attach Image" Command="{Binding AttachImageCommand}"/>
                                         <MenuItem Header="🎙️ Attach Audio Clip" Command="{Binding AttachAudioCommand}"/>
                                         <Separator/>
-                                        <MenuItem Header="📝 Add Text / Code Context Snippet" Command="{Binding AddTextContextCommand}"/>
+                                        <MenuItem Header="📝 Add Text or Code Snippet" Command="{Binding AddTextContextCommand}"/>
                                     </ContextMenu>
                                 </Button.ContextMenu>
-                                <TextBlock Text="+" FontSize="22" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                <TextBlock Text="+" FontSize="22" FontWeight="SemiBold" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,-2,0,0" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                             </Button>
 
                             <ComboBox ItemsSource="{Binding AvailableRiskLevels}"
@@ -1136,11 +1178,11 @@
                             </Button>
                         </StackPanel>
 
-                        <Grid Grid.Column="1" AllowDrop="True" DragOver="InputTextBox_DragOver" Drop="InputTextBox_Drop">
+                        <Grid Grid.Column="1" AllowDrop="True" PreviewDragOver="InputTextBox_PreviewDragOver" Drop="InputTextBox_Drop">
                             <TextBox x:Name="InputTextBox" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                                      MinLines="1" MaxLines="6" TextWrapping="Wrap" AcceptsReturn="True"
                                      PreviewKeyDown="InputTextBox_PreviewKeyDown"
-                                     AllowDrop="True" DragOver="InputTextBox_DragOver" Drop="InputTextBox_Drop"
+                                     AllowDrop="True"
                                      Background="{DynamicResource InputBackgroundBrush}"
                                      Foreground="{DynamicResource TextPrimaryBrush}"
                                      BorderThickness="1" BorderBrush="{DynamicResource BorderMidBrush}"

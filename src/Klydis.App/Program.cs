@@ -171,6 +171,31 @@ public class Program
             {
                 try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Error syncing custom native engine: {customEx.Message}{Environment.NewLine}"); } catch {}
             }
+
+            // If no custom native engine exists yet, proactively download the latest llama.cpp
+            // release to ensure maximum model architecture compatibility. This is a one-time
+            // download (~50-100MB) that happens before the native library is loaded into memory.
+            // Subsequent startups skip this because the files already exist.
+            if (!Klydis.Core.Inference.NativeEngineManager.HasCustomNativeEngine())
+            {
+                try
+                {
+                    try { File.AppendAllText("llama_native.log", $"[STARTUP] No custom native engine found. Downloading latest llama.cpp release for maximum model compatibility...{Environment.NewLine}"); } catch {}
+                    bool downloaded = Klydis.Core.Inference.NativeEngineManager.DownloadLatestNativeEngineAsync().GetAwaiter().GetResult();
+                    if (downloaded)
+                    {
+                        try { File.AppendAllText("llama_native.log", $"[STARTUP] Latest native engine downloaded and deployed successfully.{Environment.NewLine}"); } catch {}
+                    }
+                    else
+                    {
+                        try { File.AppendAllText("llama_native.log", $"[STARTUP] Native engine download returned no files (no internet?). Using bundled engine.{Environment.NewLine}"); } catch {}
+                    }
+                }
+                catch (Exception dlEx)
+                {
+                    try { File.AppendAllText("llama_native.log", $"[STARTUP] Failed to download latest native engine: {dlEx.Message}. Using bundled engine.{Environment.NewLine}"); } catch {}
+                }
+            }
             
             // Configure LLamaSharp backend library preferences before anything else.
             // Prefer CUDA first, then Vulkan as fallback for non-NVIDIA GPUs.

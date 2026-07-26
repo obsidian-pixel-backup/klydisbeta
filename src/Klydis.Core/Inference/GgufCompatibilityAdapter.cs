@@ -18,20 +18,13 @@ public record GgufCompatibilityResult(
 
 /// <summary>
 /// Pre-flight inspector and compatibility adapter for GGUF model headers.
-/// Validates model architecture keys, hybrid block counts, and tensor layout expectations
+/// Reads model architecture metadata and reports diagnostic information
 /// before invoking native llama.cpp model loading.
+/// No architecture whitelist is used — any architecture is passed through to llama.cpp,
+/// which will report its own errors if the architecture is truly unsupported.
 /// </summary>
 public static class GgufCompatibilityAdapter
 {
-    private static readonly HashSet<string> SupportedArchitectures = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "llama", "qwen", "qwen2", "qwen2.5", "qwen3", "qwen35", "qwen3.5", "qwen36", "qwen3.6", "qwq",
-        "mistral", "mixtral", "gemma", "gemma2", "gemma3", "phi", "phi2", "phi3", "phi4",
-        "starcoder", "starcoder2", "command-r", "internlm", "internlm2", "deepseek", "deepseek2", "deepseek3", "deepseek3.5",
-        "mamba", "mamba2", "rwkv", "cohort", "stablelm", "nemotron", "granite", "smollm",
-        "chatglm", "dbrx", "exaone", "olmo", "decilm", "bert", "nomic-bert", "whisper", "glm", "mllama", "minicpm"
-    };
-
     /// <summary>
     /// Evaluates a GGUF file's header metadata for compatibility with the native inference runtime.
     /// </summary>

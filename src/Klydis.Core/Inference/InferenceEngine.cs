@@ -275,20 +275,90 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         var overrideDir = NativeEngineManager.CustomNativeDirectory;
                         string msg = loadEx.Message ?? string.Empty;
 
-                        if (msg.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) || 
-                            msg.Contains("blk.", StringComparison.OrdinalIgnoreCase))
+                        // Check if this is DEFINITELY NOT an architecture issue (e.g. file not found, permissions).
+                        // LLamaSharp wraps native errors with generic messages like "Failed to load model 'path'"
+                        // so we CANNOT rely on checking for "missing tensor" / "blk." in the exception message —
+                        // those details only appear in the native log callback, not the exception.
+                        bool isDefinitelyNotArchError =
+                            msg.Contains("No such file", StringComparison.OrdinalIgnoreCase) ||
+                            msg.Contains("file not found", StringComparison.OrdinalIgnoreCase) ||
+                            msg.Contains("does not exist", StringComparison.OrdinalIgnoreCase) ||
+                            msg.Contains("access denied", StringComparison.OrdinalIgnoreCase) ||
+                            msg.Contains("permission", StringComparison.OrdinalIgnoreCase);
+
+                        if (isDefinitelyNotArchError)
                         {
                             throw new InvalidOperationException(
-                                $"Failed to load model '{Path.GetFileName(modelPath)}': The GGUF file is incomplete, truncated, or missing tensors ({msg}).\n\n" +
-                                $"• The download may have been interrupted. Please delete this model file and re-download it.\n" +
-                                $"• If this model was split into multiple parts (e.g. 00001-of-00002.gguf), all parts must be downloaded.\n" +
-                                $"• To support new architecture tensor layouts, place an updated llama.dll build into '{overrideDir}' and restart.",
+                                $"Failed to load model '{Path.GetFileName(modelPath)}': {msg}",
                                 loadEx);
                         }
 
-                        throw new InvalidOperationException(
-                            $"Failed to load model '{Path.GetFileName(modelPath)}' natively. Architecture '{compat.Architecture}' tensor layout is incompatible with the active native llama.dll (Native error: {msg}). To support this model variant, place an updated llama.dll build into '{overrideDir}' and restart.",
-                            loadEx);
+                        // Also scan the native log tail for architecture/tokenizer error patterns
+                        // (these appear in the log callback but NOT in the exception message)
+                        string nativeLogTail = ReadNativeLogTail();
+                        bool nativeLogConfirmsArchError =
+                            nativeLogTail.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) ||
+                            nativeLogTail.Contains("unknown model", StringComparison.OrdinalIgnoreCase) ||
+                            nativeLogTail.Contains("unsupported model", StringComparison.OrdinalIgnoreCase) ||
+                            nativeLogTail.Contains("unknown pre-tokenizer", StringComparison.OrdinalIgnoreCase) ||
+                            nativeLogTail.Contains("unknown tokenizer", StringComparison.OrdinalIgnoreCase) ||
+                            nativeLogTail.Contains("error loading model vocabulary", StringComparison.OrdinalIgnoreCase);
+
+                        _logger.LogWarning(loadEx,
+                            "Native load failed for '{ModelFile}' (arch: {Arch}, nativeLogConfirmsArch: {Confirmed}). " +
+                            "Attempting auto-download of updated llama.cpp native engine...",
+                            Path.GetFileName(modelPath), compat.Architecture, nativeLogConfirmsArchError);
+
+                        // Phase 1: Download updated native DLLs from latest llama.cpp release
+                        bool downloaded = false;
+                        try
+                        {
+                            downloaded = await NativeEngineManager.DownloadLatestNativeEngineAsync(logger: _logger);
+                            if (downloaded)
+                            {
+                                _logger.LogInformation("Updated native engine downloaded successfully. Retrying model load...");
+                            }
+                            else
+                            {
+                                _logger.LogWarning("Native engine download returned no files. Retry may still fail.");
+                            }
+                        }
+                        catch (Exception dlEx)
+                        {
+                            _logger.LogWarning(dlEx, "Auto-download of updated native engine failed.");
+                        }
+
+                        // Phase 2: Retry the load. The native DLL is likely still locked in memory,
+                        // so this retry typically fails — but we try anyway in case the process
+                        // hadn't loaded the DLL yet (first model load of the session).
+                        try
+                        {
+                            _weights = LLamaWeights.LoadFromFile(parameters);
+                            _logger.LogInformation("Model loaded successfully on retry after native engine update.");
+                        }
+                        catch (Exception retryEx)
+                        {
+                            // Phase 3: Retry failed — the in-memory DLL is locked.
+                            // Auto-restart the application so the updated DLLs take effect.
+                            if (downloaded)
+                            {
+                                _logger.LogWarning(
+                                    "Retry failed (DLL locked in memory). Auto-restarting application to apply updated native engine...");
+                                UnloadModelInternal();
+                                _modelLock.Release();
+                                NativeEngineManager.RestartApplication(_logger);
+                                // RestartApplication calls Environment.Exit — code below is unreachable
+                            }
+
+                            string retryMsg = retryEx.Message ?? string.Empty;
+                            throw new InvalidOperationException(
+                                $"Failed to load model '{Path.GetFileName(modelPath)}' natively. " +
+                                $"Architecture '{compat.Architecture}' is not supported by the current native llama.dll.\n\n" +
+                                $"Native error: {msg}\n\n" +
+                                $"Could not auto-download an updated native engine. " +
+                                $"To support this model architecture, manually place an updated llama.dll build into '{overrideDir}' and restart Klydis.",
+                                retryEx);
+                        }
                     }
 
                     if (_weights == null)
@@ -357,19 +427,58 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     }
 
     /// <summary>
-    /// True for the "missing tensor" / "tensor layout is incompatible" errors this class
-    /// itself wraps a few lines above (see the inner LoadFromFile catch). These indicate
-    /// the GGUF's architecture isn't understood by the active native llama.dll, which will
-    /// fail identically on CPU - so the GPU-fallback retry below must not swallow them
-    /// (compat.RequiresUpdatedNativeBackend is currently always false, so without this
-    /// check the fallback's own unwrapped retry failure was masking the actionable
-    /// guidance already written into the wrapped message).
+    /// True for architecture-related native load errors.
+    /// Checks both the exception message AND the native log tail, because LLamaSharp
+    /// wraps native errors with generic messages — the real details ("missing tensor",
+    /// "unknown model") only appear in the native log callback.
     /// </summary>
     private static bool IsArchitectureIncompatibleError(Exception ex)
     {
         var msg = ex.Message ?? string.Empty;
-        return msg.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) ||
-               msg.Contains("tensor layout is incompatible", StringComparison.OrdinalIgnoreCase);
+
+        // Check exception message first
+        if (msg.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("tensor layout is incompatible", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("unknown model", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("unsupported model", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("not supported by the current native", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Also check native log tail for architecture/tokenizer error patterns
+        string logTail = ReadNativeLogTail();
+        return logTail.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) ||
+               logTail.Contains("unknown model", StringComparison.OrdinalIgnoreCase) ||
+               logTail.Contains("unsupported model", StringComparison.OrdinalIgnoreCase) ||
+               logTail.Contains("unknown pre-tokenizer", StringComparison.OrdinalIgnoreCase) ||
+               logTail.Contains("unknown tokenizer", StringComparison.OrdinalIgnoreCase) ||
+               logTail.Contains("error loading model vocabulary", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Reads the last ~4KB of the native log file to check for error patterns
+    /// that appear in the log callback but not in exception messages.
+    /// </summary>
+    private static string ReadNativeLogTail()
+    {
+        try
+        {
+            const string logPath = "llama_native.log";
+            if (!File.Exists(logPath)) return string.Empty;
+
+            using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (fs.Length == 0) return string.Empty;
+
+            long offset = Math.Max(0, fs.Length - 4096);
+            fs.Seek(offset, SeekOrigin.Begin);
+            using var reader = new StreamReader(fs);
+            return reader.ReadToEnd();
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     /// <summary>

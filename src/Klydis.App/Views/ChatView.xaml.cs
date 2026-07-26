@@ -333,8 +333,72 @@ public partial class ChatView : UserControl
         }
     }
 
+    private void AddContextButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (AddContextButton.ContextMenu != null)
+        {
+            AddContextButton.ContextMenu.PlacementTarget = AddContextButton;
+            AddContextButton.ContextMenu.IsOpen = true;
+        }
+    }
+
+    private void InputTextBox_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            e.Effects = DragDropEffects.Copy;
+            e.Handled = true;
+        }
+    }
+
+    private void InputTextBox_Drop(object sender, DragEventArgs e)
+    {
+        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        {
+            var files = (string[])e.Data.GetData(DataFormats.FileDrop);
+            if (files != null && DataContext is ChatViewModel vm)
+            {
+                foreach (var file in files)
+                {
+                    vm.AddAttachmentFromPath(file);
+                }
+            }
+            e.Handled = true;
+        }
+    }
+
     private void InputTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.V && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        {
+            if (Clipboard.ContainsImage())
+            {
+                var img = Clipboard.GetImage();
+                if (img != null && DataContext is ChatViewModel vm)
+                {
+                    vm.AddAttachmentFromImage(img);
+                    e.Handled = true;
+                    return;
+                }
+            }
+            else if (Clipboard.ContainsFileDropList())
+            {
+                var files = Clipboard.GetFileDropList();
+                if (files != null && files.Count > 0 && DataContext is ChatViewModel vm)
+                {
+                    foreach (var file in files)
+                    {
+                        if (file != null)
+                        {
+                            vm.AddAttachmentFromPath(file);
+                        }
+                    }
+                    e.Handled = true;
+                    return;
+                }
+            }
+        }
+
         if (e.Key == Key.Enter)
         {
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))

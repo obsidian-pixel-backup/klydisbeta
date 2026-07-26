@@ -24,7 +24,6 @@
             <converters:InverseBoolToVisConverter x:Key="InverseBoolToVisConverter" />
             <converters:BoolToVisConverter x:Key="BooleanToVisibilityConverter" />
             <converters:InverseBoolToVisConverter x:Key="InverseBooleanToVisibilityConverter" />
-            <converters:NullToVisConverter x:Key="NullToVisConverter" />
             
             <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
                 <Setter Property="Width" Value="7"/>

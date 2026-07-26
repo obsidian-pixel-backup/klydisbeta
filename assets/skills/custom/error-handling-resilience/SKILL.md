@@ -1,55 +1,94 @@
 ---
 name: error-handling-resilience
-description: Patterns for handling production errors and building resilient software — structured logging (JSON, correlation IDs), exception hierarchy design, Circuit Breaker pattern, Retry with exponential backoff & jitter, Fallbacks, and OpenTelemetry instrumentation. Use when designing error handling mechanisms, logging pipelines, or resilience policies.
+description: Designing resilient systems: custom error hierarchies, exponential backoff retries, circuit breaker patterns, dead letter queues, and graceful degradation.
 category: Development & Architecture
-author: Klydis Custom
-version: 1.0.0
+author: Klydis Team
+version: 2.0.0
 ---
 
-# Error Handling & System Resilience
+# Error Handling & Resilience Patterns
 
-Distributed systems fail. Resilient applications anticipate external service outages, network timeouts, and transient database errors without cascading failures.
+Resilient applications anticipate failures in network calls, databases, and third-party APIs by implementing proactive error handling, retries, and circuit breakers.
 
-## Resilience Patterns
+## Core Resilience Patterns
 
-### 1. Circuit Breaker
-Prevents application from bombarding a failing downstream service with requests:
+1. **Custom Error Taxonomy**: Categorize errors into operational errors (expected network timeouts) vs programmer bugs (null pointer, syntax error).
+2. **Exponential Backoff with Jitter**: Avoid hammering failing downstream services by introducing randomized backoff intervals.
+3. **Circuit Breaker**: Trip execution to fast-fail when downstream error rates exceed a safety threshold.
 
-- **Closed**: Normal operations. Requests pass through.
-- **Open**: Consecutive failure threshold exceeded. Immediately fails incoming calls without making network attempts.
-- **Half-Open**: Periodically allows trial requests to check if downstream service recovered.
+---
 
-### 2. Retry with Exponential Backoff + Jitter
-Never retry immediately in a tight loop. Add exponential delays with randomized jitter to prevent thundering herd problems:
+## Implementation Blueprints
 
-$$\text{delay} = \min(\text{max\_delay}, \text{base\_delay} \times 2^{\text{attempt}}) + \text{random\_jitter}$$
-
-Only retry transient error codes (`502`, `503`, `504`, network timeouts) — NEVER retry client errors (`400`, `401`, `403`, `404`).
-
-### 3. Structured Logging
-Log structured JSON objects with mandatory correlation IDs (`CorrelationId`, `TraceId`):
-
-```json
-{
-  "timestamp": "2026-07-25T13:40:00Z",
-  "level": "ERROR",
-  "message": "Failed to process payment for order",
-  "correlationId": "c9812a34-1102-4411-8812",
-  "orderId": "ORD-9912",
-  "exception": "PaymentGatewayTimeoutException: Gateway timeout after 5000ms"
+### Exponential Backoff with Jitter (TypeScript)
+```typescript
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  retries: number = 3,
+  delayMs: number = 500
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries <= 0) throw error;
+    // Calculate exponential delay with randomized jitter
+    const jitter = Math.random() * 200;
+    const nextDelay = delayMs * 2 + jitter;
+    console.warn(`Operation failed. Retrying in ${Math.round(nextDelay)}ms...`);
+    await new Promise((res) => setTimeout(res, nextDelay));
+    return retryWithBackoff(fn, retries - 1, nextDelay);
+  }
 }
 ```
 
-## Exception Handling Principles
+### Circuit Breaker Pattern Blueprint
+```typescript
+class CircuitBreaker {
+  private failures = 0;
+  private state: 'CLOSED' | 'OPEN' | 'HALF_OPEN' = 'CLOSED';
+  private nextAttempt = Date.now();
 
-- **Catch Specific Exceptions**: Avoid broad `catch (Exception ex)` blocks that swallow unexpected bugs.
-- **Fail Gracefully**: Provide meaningful user fallback UI or degraded responses rather than unhandled crash pages.
-- **Never Log Secrets**: Sanitize logs to prevent capturing passwords, auth tokens, or PII.
+  constructor(private threshold = 5, private resetTimeoutMs = 10000) {}
 
-## Checklist
+  async execute<T>(action: () => Promise<T>): Promise<T> {
+    if (this.state === 'OPEN') {
+      if (Date.now() > this.nextAttempt) {
+        this.state = 'HALF_OPEN';
+      } else {
+        throw new Error("CircuitBreaker is OPEN. Fast failing request.");
+      }
+    }
 
-- [ ] Correlation / Trace IDs propagated across all HTTP requests and log entries
-- [ ] Retries use exponential backoff with randomized jitter
-- [ ] Circuit Breakers wrap third-party API dependencies
-- [ ] Logs emitted in structured JSON format
-- [ ] Sensitive fields (passwords, tokens, SSNs) masked in logs
+    try {
+      const result = await action();
+      this.reset();
+      return result;
+    } catch (err) {
+      this.recordFailure();
+      throw err;
+    }
+  }
+
+  private recordFailure() {
+    this.failures++;
+    if (this.failures >= this.threshold) {
+      this.state = 'OPEN';
+      this.nextAttempt = Date.now() + this.resetTimeoutMs;
+    }
+  }
+
+  private reset() {
+    this.failures = 0;
+    this.state = 'CLOSED';
+  }
+}
+```
+
+---
+
+## Verification Checklist
+
+- [ ] Errors return standardized structured diagnostic JSON containing error codes.
+- [ ] Network retries use jitter to prevent synchronized retry storms.
+- [ ] Critical operations have fallback paths (graceful degradation).
+- [ ] Uncaught exceptions trigger alerts in monitoring / telemetry systems.
