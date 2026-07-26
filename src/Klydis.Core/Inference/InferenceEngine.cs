@@ -304,7 +304,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                     _executor = new InteractiveExecutor(_context);
                 }
-                catch (Exception gpuEx) when (offloadPlan.GpuLayers != 0 && !compat.RequiresUpdatedNativeBackend)
+                catch (Exception gpuEx) when (offloadPlan.GpuLayers != 0 && !compat.RequiresUpdatedNativeBackend && !IsArchitectureIncompatibleError(gpuEx))
                 {
                     _logger.LogWarning(gpuEx, "GPU model/context creation failed for {ModelPath}. Falling back to CPU execution.", modelPath);
                     UnloadModelInternal();
@@ -354,6 +354,22 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 ModelStateChanged?.Invoke(true, modelPath);
             }
         });
+    }
+
+    /// <summary>
+    /// True for the "missing tensor" / "tensor layout is incompatible" errors this class
+    /// itself wraps a few lines above (see the inner LoadFromFile catch). These indicate
+    /// the GGUF's architecture isn't understood by the active native llama.dll, which will
+    /// fail identically on CPU - so the GPU-fallback retry below must not swallow them
+    /// (compat.RequiresUpdatedNativeBackend is currently always false, so without this
+    /// check the fallback's own unwrapped retry failure was masking the actionable
+    /// guidance already written into the wrapped message).
+    /// </summary>
+    private static bool IsArchitectureIncompatibleError(Exception ex)
+    {
+        var msg = ex.Message ?? string.Empty;
+        return msg.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) ||
+               msg.Contains("tensor layout is incompatible", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

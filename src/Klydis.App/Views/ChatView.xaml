@@ -972,6 +972,18 @@
                                                             </Border>
                                                         </Button>
                                                         <TextBlock Text="{Binding Content}" MaxWidth="180" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}"/>
+                                                        <!-- Only meaningful while a turn is actively streaming - jumps this
+                                                             item to the front by cancelling the in-progress generation and
+                                                             sending it immediately, instead of waiting for the current
+                                                             turn to finish and the normal queue order to reach it. -->
+                                                        <Button Style="{DynamicResource GhostButton}"
+                                                                Command="{Binding DataContext.ForceSendQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                CommandParameter="{Binding}"
+                                                                Visibility="{Binding DataContext.IsGenerating, RelativeSource={RelativeSource AncestorType=UserControl}, Converter={StaticResource BoolToVisConverter}}"
+                                                                ToolTip="Interrupt current generation and send this now"
+                                                                Margin="6,0,0,0" Padding="2,0">
+                                                            <TextBlock Text="⚡" FontSize="11" Foreground="{DynamicResource WarningBrush}"/>
+                                                        </Button>
                                                         <Button Style="{DynamicResource GhostButton}"
                                                                 Command="{Binding BeginEditCommand}"
                                                                 ToolTip="Edit queued message"
