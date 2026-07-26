@@ -150,7 +150,9 @@ public class ChatEngine(
     ModelMessageQueue? messageQueue = null)
 {
     private readonly List<ChatMessage> _history = new();
-    private readonly List<(string ToolName, string ArgsHash)> _recentTools = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ChatMessage>> _sessionHistories = new();
+    private readonly List<(string ToolName, string ArgsHash, string PriorResult)> _recentTools = new();
+    private int _consecutiveBlockedToolCalls = 0;
     
     /// <summary>
     /// Calculates the rolling compression threshold as 75% of the model's total context size.
@@ -188,7 +190,9 @@ public class ChatEngine(
     {
         _history.Clear();
         _recentTools.Clear();
+        _consecutiveBlockedToolCalls = 0;
         CurrentSessionId = Guid.NewGuid().ToString();
+        _sessionHistories[CurrentSessionId] = _history;
     }
 
     /// <summary>
@@ -196,10 +200,15 @@ public class ChatEngine(
     /// </summary>
     public void LoadHistory(IEnumerable<ChatMessage> history, string sessionId)
     {
+        var targetId = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString() : sessionId;
+        var histList = history.ToList();
+        _sessionHistories[targetId] = histList;
+
         _history.Clear();
-        _history.AddRange(history);
         _recentTools.Clear();
-        CurrentSessionId = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString() : sessionId;
+        _consecutiveBlockedToolCalls = 0;
+        _history.AddRange(histList);
+        CurrentSessionId = targetId;
     }
 
     /// <summary>
@@ -213,9 +222,6 @@ public class ChatEngine(
     /// <summary>
     /// Streams a response for the user message, handling tool calls automatically.
     /// </summary>
-    /// <summary>
-    /// Streams a response for the user message, handling tool calls automatically.
-    /// </summary>
     public async IAsyncEnumerable<ChatStreamEvent> StreamResponseAsync(
         string userMessage, 
         [EnumeratorCancellation] CancellationToken ct,
@@ -224,10 +230,23 @@ public class ChatEngine(
         IsGenerating = true;
         _recentTools.Clear();
         
-        _history.Add(new ChatMessage(ChatRole.User, userMessage));
-        await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.User, userMessage, 0, null);
+        string generatingSessionId = CurrentSessionId;
+        if (!_sessionHistories.TryGetValue(generatingSessionId, out var activeHistory))
+        {
+            activeHistory = new List<ChatMessage>(_history);
+            _sessionHistories[generatingSessionId] = activeHistory;
+        }
+
+        var userMsgObj = new ChatMessage(ChatRole.User, userMessage);
+        activeHistory.Add(userMsgObj);
+        if (CurrentSessionId == generatingSessionId && !_history.Contains(userMsgObj))
+        {
+            _history.Add(userMsgObj);
+        }
+
+        await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
         
-        var enumerator = StreamResponseInternalAsync(ct, skillContext).GetAsyncEnumerator(ct);
+        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, ct, skillContext).GetAsyncEnumerator(ct);
         try
         {
             while (true)
@@ -271,6 +290,8 @@ public class ChatEngine(
     }
 
     private async IAsyncEnumerable<ChatStreamEvent> StreamResponseInternalAsync(
+        string generatingSessionId,
+        List<ChatMessage> activeHistory,
         [EnumeratorCancellation] CancellationToken ct,
         string? skillContext = null)
     {
@@ -290,16 +311,16 @@ public class ChatEngine(
             
             // Execute automated rolling compression when history tokens reach 75% of context window
             int rollingThreshold = GetRollingCompressionThreshold();
-            int estimatedHistoryTokens = _history.Sum(m => (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(m.Content) : contextOrchestrator.EstimateTokens(m.Content)) + 25);
+            int estimatedHistoryTokens = activeHistory.Sum(m => (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(m.Content) : contextOrchestrator.EstimateTokens(m.Content)) + 25);
             if (estimatedHistoryTokens >= rollingThreshold)
             {
                 int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 32768);
                 logger.LogInformation("Active history tokens ({Tokens}) reached rolling threshold ({Threshold}, 75% of {Ctx} context). Compressing older context into WorldState. Keeping {KeepRecent} recent tokens.",
                     estimatedHistoryTokens, rollingThreshold, (int)inferenceEngine.ContextSize, keepRecent);
-                await contextOrchestrator.PerformRollingCompressionAsync(_history, CurrentSessionId.ToString(), rollingThreshold, keepRecent);
+                await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, rollingThreshold, keepRecent);
             }
 
-            var session = await messageStore.GetSessionAsync(CurrentSessionId.ToString());
+            var session = await messageStore.GetSessionAsync(generatingSessionId);
         var worldStateHeader = (session != null && !string.IsNullOrWhiteSpace(session.WorldState))
             ? $"\n\nLong-term Memory / World State (summarized older context):\n{session.WorldState}"
             : "";
@@ -309,7 +330,7 @@ public class ChatEngine(
             toolExecutor.MessageQueue = MessageQueue;
         }
 
-        var pendingSteer = MessageQueue?.GetPendingSteer(CurrentSessionId.ToString());
+        var pendingSteer = MessageQueue?.GetPendingSteer(generatingSessionId);
         var queueNotice = (pendingSteer != null && pendingSteer.Count > 0)
             ? "\n\n[PENDING QUEUED STEERING MESSAGES AVAILABLE]\n" +
               "You have pending queued message(s) from the user with Mode='Steer':\n" +
@@ -369,16 +390,16 @@ public class ChatEngine(
         int currentTokens = sysPromptTokens;
         bool hasDroppedMessages = false;
 
-        ChatMessage? initialUserMsg = _history.Count > 0 ? _history[0] : null;
+        ChatMessage? initialUserMsg = activeHistory.Count > 0 ? activeHistory[0] : null;
         int initialUserTokens = initialUserMsg != null ? (inferenceEngine.GetTokenCount(initialUserMsg.Content) + 25) : 0;
         
-        // Reserve budget up front for the user's initial prompt goal (_history[0])
+        // Reserve budget up front for the user's initial prompt goal (activeHistory[0])
         currentTokens += initialUserTokens;
 
         // Iterate backwards from the most recent history message down to index 1 (skipping initial goal)
-        for (int i = _history.Count - 1; i >= 1; i--)
+        for (int i = activeHistory.Count - 1; i >= 1; i--)
         {
-            var msg = _history[i];
+            var msg = activeHistory[i];
             int msgTokens = inferenceEngine.GetTokenCount(msg.Content) + 25; // 25 tokens for template formatting overhead
             if (currentTokens + msgTokens <= targetBudget)
             {
@@ -392,7 +413,7 @@ public class ChatEngine(
             }
         }
 
-        // Always preserve the user's initial prompt goal (_history[0]) at index 0 of active messages
+        // Always preserve the user's initial prompt goal (activeHistory[0]) at index 0 of active messages
         if (initialUserMsg != null)
         {
             activeMessages.Insert(0, initialUserMsg);
@@ -405,7 +426,7 @@ public class ChatEngine(
             {
                 try
                 {
-                    await contextOrchestrator.ConsolidateWorldStateAsync(CurrentSessionId.ToString());
+                    await contextOrchestrator.ConsolidateWorldStateAsync(generatingSessionId);
                 }
                 catch (Exception ex)
                 {
@@ -614,41 +635,105 @@ public class ChatEngine(
                 cleanHistoryResponse = fullResponse;
             }
 
-            _history.Add(new ChatMessage(ChatRole.Assistant, cleanHistoryResponse));
-            await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Assistant, fullResponse, 0, null);
+            var assistantMsgObj = new ChatMessage(ChatRole.Assistant, cleanHistoryResponse);
+            activeHistory.Add(assistantMsgObj);
+            if (CurrentSessionId == generatingSessionId && !_history.Contains(assistantMsgObj))
+            {
+                _history.Add(assistantMsgObj);
+            }
+            await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, fullResponse, 0, null);
 
             // Parse for tool calls
             var toolCallRequests = ParseToolCalls(fullResponse);
             
             if (toolCallRequests.Count > 0)
             {
+                bool forceTurnTermination = false;
+
                 foreach (var req in toolCallRequests)
                 {
                     var argsHash = GetCanonicalArgsHash(req.Arguments);
-                    
-                    // Psycho loop detection with canonical argument hashing
-                    var recentMatches = _recentTools.Count(x => x.ToolName == req.Name && x.ArgsHash == argsHash);
-                    if (recentMatches >= 3)
+                    var matches = _recentTools.Where(x => x.ToolName == req.Name && x.ArgsHash == argsHash).ToList();
+                    var matchCount = matches.Count;
+
+                    // Differentiate thresholds for chunking/read tools vs state-modifying tools
+                    bool isReadTool = req.Name.Equals("read_file", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("view_file", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("list_directory", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("list_dir", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("grep_search", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("search_files", StringComparison.OrdinalIgnoreCase);
+
+                    int tier1Threshold = isReadTool ? 5 : 2;   // Warning on 6th call for read tools, 3rd for others
+                    int tier2Threshold = isReadTool ? 8 : 3;   // Hard block on 9th call for read tools, 4th for others
+                    int tier3Threshold = isReadTool ? 12 : 5;  // Override on 13th call for read tools, 6th for others
+
+                    if (matchCount >= tier1Threshold)
                     {
-                        logger.LogWarning("Psycho loop detected for tool {ToolName}. Halting duplicate call execution.", req.Name);
-                        var warningText = $"[System Warning: Tool '{req.Name}' with identical arguments was executed {recentMatches} times. Repeated execution aborted. Use prior results to proceed.]";
-                        _history.Add(new ChatMessage(ChatRole.Tool, warningText, req.Name));
-                        await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, warningText, 0, null);
-                        yield return new ChatStreamEvent(ChatStreamEventType.Error, warningText);
-                        break;
+                        _consecutiveBlockedToolCalls++;
+                        logger.LogWarning("Repeated tool call loop detected for {ToolName} (attempt {AttemptCount}).", req.Name, matchCount + 1);
+
+                        string guardrailMsg;
+                        var cachedResult = matches.LastOrDefault().PriorResult ?? "No prior result cached.";
+                        
+                        // Truncate cached result if excessively long to save context budget
+                        if (cachedResult.Length > 2000)
+                        {
+                            cachedResult = cachedResult.Substring(0, 2000) + "\n...[cached output truncated for length]...";
+                        }
+
+                        if (matchCount < tier2Threshold)
+                        {
+                            // Tier 1: Soft Warning + Cached Output Injection
+                            guardrailMsg = $"[System Warning: Duplicate tool call detected for '{req.Name}' (attempt {matchCount + 1}). Below is the cached result from your previous call. Use this cached data to complete your plan or adjust offset/line arguments to read the next section.\n\n--- CACHED TOOL RESULT ---\n{cachedResult}]";
+                        }
+                        else if (matchCount >= tier2Threshold && matchCount < tier3Threshold)
+                        {
+                            // Tier 2: Hard Block + Suggested Alternatives
+                            guardrailMsg = $"[System ERROR: BLOCKED — Tool '{req.Name}' with identical arguments was attempted {matchCount + 1} times. Execution has been blocked. You MUST NOT call this tool again with these exact parameters.\n\nSuggested Next Steps:\n1. If chunking a large file, update your StartLine/EndLine or ContentOffset parameters to read a DIFFERENT line range or section.\n2. Use the cached result provided in previous messages.\n3. Complete your turn and report findings to the user.\n\n--- CACHED TOOL RESULT ---\n{cachedResult}]";
+                        }
+                        else
+                        {
+                            // Tier 3: Turn Termination — Force loop exit & turn response
+                            guardrailMsg = $"[SYSTEM OVERRIDE: Persistent loop detected on '{req.Name}' after {matchCount + 1} attempts. Tool calling is SUSPENDED for this turn. You MUST now synthesize your final response to the user using your existing context.]";
+                            forceTurnTermination = true;
+                        }
+
+                        var guardrailMsgObj = new ChatMessage(ChatRole.Tool, guardrailMsg, req.Name);
+                        activeHistory.Add(guardrailMsgObj);
+                        if (CurrentSessionId == generatingSessionId) _history.Add(guardrailMsgObj);
+                        await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, guardrailMsg, 0, null);
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, guardrailMsg);
+
+                        if (forceTurnTermination || _consecutiveBlockedToolCalls >= (isReadTool ? 10 : 5))
+                        {
+                            logger.LogError("Consecutive tool loop blocks exceeded threshold. Terminating turn loop immediately.");
+                            break;
+                        }
+                        continue;
                     }
 
-                    _recentTools.Add((req.Name, argsHash));
-                    
+                    // Reset consecutive blocked counter on genuine non-duplicate execution
+                    _consecutiveBlockedToolCalls = 0;
+
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
                     
-                    var result = await toolExecutor.ExecuteToolAsync(req, CurrentSessionId.ToString(), ct);
-                    
+                    var result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, ct);
                     var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
-                    _history.Add(new ChatMessage(ChatRole.Tool, toolOutput, req.Name));
-                    await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, toolOutput, 0, null);
+                    
+                    _recentTools.Add((req.Name, argsHash, toolOutput));
+
+                    var toolOutputObj = new ChatMessage(ChatRole.Tool, toolOutput, req.Name);
+                    activeHistory.Add(toolOutputObj);
+                    if (CurrentSessionId == generatingSessionId) _history.Add(toolOutputObj);
+                    await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, toolOutput, 0, null);
                     
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolResult, toolOutput, new Dictionary<string, object> { ["Success"] = result.Success });
+                }
+
+                if (forceTurnTermination || _consecutiveBlockedToolCalls >= 5)
+                {
+                    break;
                 }
             }
             else if (Regex.IsMatch(fullResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
@@ -657,8 +742,10 @@ public class ChatEngine(
                 // Do not exit loop prematurely; provide feedback so the model can self-correct on the next iteration.
                 logger.LogWarning("Assistant emitted <tool_call> tag but JSON parsing failed.");
                 var parseErrorMsg = "[Tool Error: Failed to parse <tool_call> JSON. Please ensure arguments are valid JSON with 'name' and 'arguments'.]";
-                _history.Add(new ChatMessage(ChatRole.Tool, parseErrorMsg));
-                await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.Tool, parseErrorMsg, 0, null);
+                var parseErrMsgObj = new ChatMessage(ChatRole.Tool, parseErrorMsg);
+                activeHistory.Add(parseErrMsgObj);
+                if (CurrentSessionId == generatingSessionId) _history.Add(parseErrMsgObj);
+                await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, parseErrorMsg, 0, null);
                 yield return new ChatStreamEvent(ChatStreamEventType.Error, parseErrorMsg);
             }
             else
@@ -669,8 +756,10 @@ public class ChatEngine(
                 {
                     logger.LogInformation("Output generation cut off mid-sentence/section. Triggering auto-continuation iteration.");
                     var continuationInstruction = "[System Instruction: Your previous output was truncated mid-generation due to output token constraints. Continue immediately from the exact point of truncation without repeating any previously written text.]";
-                    _history.Add(new ChatMessage(ChatRole.User, continuationInstruction));
-                    await messageStore.AddMessageAsync(CurrentSessionId.ToString(), ChatRole.User, continuationInstruction, 0, null);
+                    var continuationMsgObj = new ChatMessage(ChatRole.User, continuationInstruction);
+                    activeHistory.Add(continuationMsgObj);
+                    if (CurrentSessionId == generatingSessionId) _history.Add(continuationMsgObj);
+                    await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, continuationInstruction, 0, null);
                 }
                 else
                 {
