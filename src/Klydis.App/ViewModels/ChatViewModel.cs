@@ -46,6 +46,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private bool _isProcessingQueue;
     private EventHandler? _queueChangedHandler;
 
+    /// <summary>
+    /// Signaled when the in-flight SendMessageForTextAsync call's finally block completes.
+    /// Lets ForceSendQueuedItem cancel the current generation and reliably wait for it to
+    /// actually unwind (Cancel() only requests cancellation; StreamResponseAsync stops at
+    /// its own pace) before starting the forced item, instead of racing a fixed delay.
+    /// </summary>
+    private TaskCompletionSource<bool>? _generationCompletionSource;
+
     [ObservableProperty]
     private string _inputText = string.Empty;
 
@@ -626,6 +634,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var localGeneratingSessionId = SelectedSession?.Id;
         _generatingSessionId = localGeneratingSessionId;
         _generationCts = new CancellationTokenSource();
+        _generationCompletionSource = new TaskCompletionSource<bool>();
 
         // Bubbles are created lazily and appended in the exact order events
         // arrive, so text, thinking and tool activity stay chronological even
@@ -1003,6 +1012,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             _generatingSessionId = null;
             _generationCts?.Dispose();
             _generationCts = null;
+            _generationCompletionSource?.TrySetResult(true);
+            _generationCompletionSource = null;
 
             // Auto-rename chat if it is the first interaction
             var responseText = fullAssistantText.ToString();
@@ -1130,6 +1141,37 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             _messageQueue?.Remove(item.Id);
         }
+    }
+
+    /// <summary>
+    /// Interrupts the in-progress generation (if any) and immediately sends this specific
+    /// queued item, rather than waiting for it to come up on its own once the current turn
+    /// finishes. Cancel() only requests cancellation, so this awaits
+    /// _generationCompletionSource to make sure the prior turn's finally block (which
+    /// tears down IsGenerating/_generationCts) has actually run before starting the next
+    /// one - otherwise two generations could overlap. Because the prior turn was
+    /// cancelled, its own finally block skips auto-advancing the queue, so there's no race
+    /// with the normal queue-processing path over which item goes next.
+    /// </summary>
+    [RelayCommand]
+    private async Task ForceSendQueuedItem(QueuedMessageViewModel? item)
+    {
+        if (item == null) return;
+
+        if (IsGenerating)
+        {
+            _generationCts?.Cancel();
+            DismissPendingApproval(false);
+            var pending = _generationCompletionSource?.Task;
+            if (pending != null)
+            {
+                await pending;
+            }
+        }
+
+        _messageQueue?.MarkStatus(item.Id, QueuedMessageStatus.Processing);
+        _messageQueue?.Remove(item.Id);
+        await SendMessageForTextAsync(item.Content);
     }
 
     /// <summary>
