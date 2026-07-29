@@ -1151,7 +1151,19 @@
                                         <MenuItem Header="📝 Add Text or Code Snippet" Command="{Binding AddTextContextCommand}"/>
                                     </ContextMenu>
                                 </Button.ContextMenu>
-                                <TextBlock Text="+" FontSize="22" FontWeight="SemiBold" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,-2,0,0" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                <!-- Was a plain text "+" glyph (font metrics don't center the
+                                     crossbar of "+" on the true vertical middle) then a Path
+                                     with Stroke+Stretch (Path.Stretch normalizes off the raw
+                                     geometry bounds, not the stroked/round-capped bounds, so a
+                                     2px stroke with round caps rendered visibly off-center at
+                                     this small a size - it read as a dagger, not a plus). Two
+                                     independently-centered filled Rectangles sidestep both
+                                     problems entirely: each bar is trivially centered by
+                                     alignment alone, no stroke/stretch math involved. -->
+                                <Canvas Width="18" Height="18" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <Rectangle Canvas.Left="7.75" Canvas.Top="1" Width="2.5" Height="16" RadiusX="1.25" RadiusY="1.25" Fill="{DynamicResource AccentPrimaryBrush}"/>
+                                    <Rectangle Canvas.Left="1" Canvas.Top="7.75" Width="16" Height="2.5" RadiusX="1.25" RadiusY="1.25" Fill="{DynamicResource AccentPrimaryBrush}"/>
+                                </Canvas>
                             </Button>
 
                             <ComboBox ItemsSource="{Binding AvailableRiskLevels}"
