@@ -69,13 +69,19 @@ public class ToolExecutor(
     Klydis.Core.Memory.ContextOrchestrator contextOrchestrator,
     ModelMessageQueue? messageQueue = null,
     Klydis.Core.Skills.SkillLibraryManager? skillLibraryManager = null,
-    StealthBrowserService? stealthBrowserService = null)
+    StealthBrowserService? stealthBrowserService = null,
+    Klydis.Core.RAG.VectorStore? vectorStore = null,
+    Klydis.Core.RAG.HybridRetriever? hybridRetriever = null,
+    Klydis.Core.RAG.DocumentIngestionEngine? ingestionEngine = null)
 {
     private static readonly HttpClient _httpClient = new HttpClient();
     private readonly StealthBrowserService? _stealthBrowserService = stealthBrowserService;
     
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public Klydis.Core.Skills.SkillLibraryManager? SkillLibraryManager { get; set; } = skillLibraryManager;
+    public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
+    public Klydis.Core.RAG.HybridRetriever? HybridRetriever { get; set; } = hybridRetriever;
+    public Klydis.Core.RAG.DocumentIngestionEngine? IngestionEngine { get; set; } = ingestionEngine;
 
     /// <summary>
     /// Gets or sets the current risk level mode.
@@ -99,9 +105,11 @@ public class ToolExecutor(
 
     private readonly IList<ToolDefinition> _tools = new List<ToolDefinition>
     {
-        new ToolDefinition("read_file", "Reads content from a file", new List<ToolParameter>
+        new ToolDefinition("read_file", "Reads content from a file. Optionally specify start_line and end_line for specific line ranges of large files.", new List<ToolParameter>
         {
-            new("path", "string", "Absolute path to the file", true)
+            new("path", "string", "Absolute path to the file", true),
+            new("start_line", "integer", "Optional starting line number (1-indexed)", false),
+            new("end_line", "integer", "Optional ending line number (1-indexed)", false)
         }, false),
         new ToolDefinition("write_file", "Writes content to a file", new List<ToolParameter>
         {
@@ -143,8 +151,8 @@ public class ToolExecutor(
             new("query", "string", "Search query", true)
         }, false),
         new ToolDefinition("summarize_context", "Compresses older messages into the world state to free up context window", new List<ToolParameter>(), false),
-        new ToolDefinition("check_message_queue", "Checks pending user messages waiting in the processing queue for the active session.", new List<ToolParameter>(), false),
-        new ToolDefinition("incorporate_queued_message", "Retrieves and incorporates a pending queued message by queue_id to steer the current reasoning or execution task.", new List<ToolParameter>
+        new ToolDefinition("check_message_queue", "Checks pending user messages waiting in the processing queue for the active session. Call this periodically during multi-step tasks to check for user context updates or steering instructions.", new List<ToolParameter>(), false),
+        new ToolDefinition("incorporate_queued_message", "Retrieves and incorporates a pending queued user message by queue_id to steer the current reasoning or execution task.", new List<ToolParameter>
         {
             new("queue_id", "string", "The ID (Guid string) of the queued message to incorporate", true)
         }, false),
@@ -187,6 +195,18 @@ public class ToolExecutor(
         new ToolDefinition("delete_skill", "Deletes a custom skill from the Brain Skill Library by ID.", new List<ToolParameter>
         {
             new("skill_id", "string", "The ID of the custom skill to delete", true)
+        }, false),
+        new ToolDefinition("search_rag", "Searches indexed project vector stores and document collections using hybrid (dense vector + sparse BM25) search. Returns matching text chunks with source file paths and relevance scores.", new List<ToolParameter>
+        {
+            new("query", "string", "Search query or keyword", true),
+            new("top_k", "integer", "Optional maximum number of results to return (default 5)", false),
+            new("collection_id", "string", "Optional collection ID filter", false)
+        }, false),
+        new ToolDefinition("list_rag_collections", "Lists all currently indexed workspace folders and project document collections in the RAG vector store.", new List<ToolParameter>(), false),
+        new ToolDefinition("index_folder_rag", "Indexes a local project folder or directory path into the RAG vector store so its contents can be searched via search_rag.", new List<ToolParameter>
+        {
+            new("folder_path", "string", "Absolute directory path of the project or folder to index", true),
+            new("collection_name", "string", "Optional custom collection name (defaults to folder name)", false)
         }, false)
     };
 
@@ -348,6 +368,9 @@ public class ToolExecutor(
                 "activate_skill" => await ActivateSkillAsync(request),
                 "learn_skill" => await LearnSkillAsync(request),
                 "delete_skill" => await DeleteSkillAsync(request),
+                "search_rag" => await SearchRagAsync(request, ct),
+                "list_rag_collections" => await ListRagCollectionsAsync(ct),
+                "index_folder_rag" => await IndexFolderRagAsync(request, ct),
                 _ => await ExecuteCustomToolAsync(request, ct)
             };
         }
@@ -368,6 +391,10 @@ public class ToolExecutor(
             return result;
 
         if (result.Output.Length <= MaxToolOutputChars)
+            return result;
+
+        // Prevent recursive offloading loops when reading an offloaded tool output file or when content is already an offload message
+        if (result.Output.StartsWith("[Tool Output Exceeded Context Budget]"))
             return result;
 
         try
@@ -461,6 +488,41 @@ public class ToolExecutor(
         var path = GetStringArg(request.Arguments, "path");
         if (string.IsNullOrEmpty(path)) return new ToolResult(request.Name, false, "", "Path is required");
         if (!File.Exists(path)) return new ToolResult(request.Name, false, "", "File not found");
+
+        int? startLine = null;
+        int? endLine = null;
+        if (request.Arguments != null && request.Arguments.TryGetValue("start_line", out var slObj))
+        {
+            var unwrapped = UnwrapJsonElement(slObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int sl) && sl > 0)
+                startLine = sl;
+        }
+        if (request.Arguments != null && request.Arguments.TryGetValue("end_line", out var elObj))
+        {
+            var unwrapped = UnwrapJsonElement(elObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int el) && el > 0)
+                endLine = el;
+        }
+
+        if (startLine.HasValue || endLine.HasValue || path.Contains("offload_") || path.Contains("tool_outputs"))
+        {
+            var lines = await File.ReadAllLinesAsync(path, ct);
+            int start = (startLine ?? 1) - 1;
+            if (start < 0) start = 0;
+            if (start >= lines.Length) return new ToolResult(request.Name, true, "", null);
+
+            int count = lines.Length - start;
+            if (endLine.HasValue)
+            {
+                int end = endLine.Value;
+                if (end < startLine.GetValueOrDefault(1)) end = startLine.GetValueOrDefault(1);
+                count = Math.Min(count, end - start + 1);
+            }
+
+            var slicedLines = lines.Skip(start).Take(count);
+            var slicedContent = string.Join("\n", slicedLines);
+            return new ToolResult(request.Name, true, slicedContent, null);
+        }
 
         var content = await File.ReadAllTextAsync(path, ct);
         return new ToolResult(request.Name, true, content, null);
@@ -717,7 +779,8 @@ public class ToolExecutor(
             // Tier 1: Stealth Browser Bing Search (or HttpClient Bing Search if stealth service unavailable)
             try
             {
-                var searchUrl = $"https://www.bing.com/search?q={Uri.EscapeDataString(query)}";
+                var bingEndpoint = Environment.GetEnvironmentVariable("BING_SEARCH_ENDPOINT") ?? "https://www.bing.com/search";
+                var searchUrl = $"{bingEndpoint}?q={Uri.EscapeDataString(query)}";
                 string? html = null;
 
                 if (_stealthBrowserService != null)
@@ -770,7 +833,7 @@ public class ToolExecutor(
             {
                 try
                 {
-                    var ddgUrl = $"https://lite.duckduckgo.com/lite/";
+                    var ddgUrl = Environment.GetEnvironmentVariable("DUCKDUCKGO_SEARCH_ENDPOINT") ?? "https://lite.duckduckgo.com/lite/";
                     var content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("q", query) });
                     var requestMsg = new HttpRequestMessage(HttpMethod.Post, ddgUrl) { Content = content };
                     requestMsg.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
@@ -809,7 +872,8 @@ public class ToolExecutor(
             {
                 try
                 {
-                    var wikiUrl = $"https://en.wikipedia.org/w/api.php?action=opensearch&search={Uri.EscapeDataString(query)}&limit={maxResults}&namespace=0&format=json";
+                    var wikiEndpoint = Environment.GetEnvironmentVariable("WIKIPEDIA_API_ENDPOINT") ?? "https://en.wikipedia.org/w/api.php";
+                    var wikiUrl = $"{wikiEndpoint}?action=opensearch&search={Uri.EscapeDataString(query)}&limit={maxResults}&namespace=0&format=json";
                     var requestMsg = new HttpRequestMessage(HttpMethod.Get, wikiUrl);
                     requestMsg.Headers.Add("User-Agent", "KlydisAssistant/1.0 (contact: info@klydis.local)");
                     
@@ -1021,6 +1085,7 @@ public class ToolExecutor(
             sb.AppendLine($"- Queue ID: {msg.Id} | Mode: {msg.Mode} | Status: {msg.Status} | Created: {msg.CreatedAt:HH:mm:ss}");
             sb.AppendLine($"  Content: \"{msg.Content}\"");
         }
+        sb.AppendLine("\nTo incorporate any of these messages into your active execution context, call tool 'incorporate_queued_message' with argument {\"queue_id\": \"<ID>\"}.");
 
         return Task.FromResult(new ToolResult("check_message_queue", true, sb.ToString().TrimEnd(), null));
     }
@@ -1325,7 +1390,6 @@ public class ToolExecutor(
 
         return new ToolResult(request.Name, true, $"Successfully learned and registered skill '{skill.Name}' (ID: `{skill.Id}`) in category '{skill.Category}'. File saved to custom skills library.", null);
     }
-
     private async Task<ToolResult> DeleteSkillAsync(ToolCallRequest request)
     {
         if (SkillLibraryManager == null)
@@ -1335,5 +1399,134 @@ public class ToolExecutor(
         await SkillLibraryManager.DeleteCustomSkillAsync(id);
 
         return new ToolResult(request.Name, true, $"Deleted custom skill '{id}' from Skill Library.", null);
+    }
+
+    private async Task<ToolResult> SearchRagAsync(ToolCallRequest request, CancellationToken ct)
+    {
+        if (HybridRetriever == null)
+        {
+            return new ToolResult(request.Name, false, string.Empty, "RAG HybridRetriever service is not configured.");
+        }
+
+        string query = GetStringArg(request.Arguments, "query") ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return new ToolResult(request.Name, false, string.Empty, "Search query is required.");
+        }
+
+        int topK = 5;
+        if (request.Arguments != null && request.Arguments.TryGetValue("top_k", out var tkObj))
+        {
+            var unwrapped = UnwrapJsonElement(tkObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int k) && k > 0)
+            {
+                topK = Math.Clamp(k, 1, 20);
+            }
+        }
+
+        string? collectionId = GetStringArg(request.Arguments, "collection_id");
+
+        try
+        {
+            var results = await HybridRetriever.SearchAsync(query, topK, collectionIdFilter: collectionId, cancellationToken: ct);
+            if (results.Count == 0)
+            {
+                return new ToolResult(request.Name, true, "No matching context chunks found in RAG index for query: " + query, null);
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"RAG Hybrid Search Results ({results.Count} matches for '{query}'):\n");
+
+            foreach (var res in results)
+            {
+                sb.AppendLine($"--- Source: {res.Chunk.FileTitle} | Path: {res.Chunk.SourcePath} | Collection: {res.Chunk.CollectionId} (RRF Score: {res.RrfScore:F3}) ---");
+                sb.AppendLine(res.Chunk.Content);
+                sb.AppendLine("--------------------------------------------------\n");
+            }
+
+            return new ToolResult(request.Name, true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error executing RAG search for query '{Query}'", query);
+            return new ToolResult(request.Name, false, string.Empty, ex.Message);
+        }
+    }
+
+    private async Task<ToolResult> ListRagCollectionsAsync(CancellationToken ct)
+    {
+        if (VectorStore == null)
+        {
+            return new ToolResult("list_rag_collections", false, string.Empty, "VectorStore service is not configured.");
+        }
+
+        try
+        {
+            await VectorStore.InitializeAsync();
+            var collections = await VectorStore.GetCollectionsAsync();
+            int totalChunks = VectorStore.GetTotalChunkCount();
+
+            if (collections.Count == 0)
+            {
+                return new ToolResult("list_rag_collections", true, "No project workspace folders have been indexed in the RAG vector store yet. Use tool 'index_folder_rag' to index a project folder.", null);
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"Indexed RAG Workspace Collections ({collections.Count} collections, {totalChunks} total vector chunks):\n");
+
+            foreach (var col in collections)
+            {
+                sb.AppendLine($"- Collection ID: `{col.Id}` | Name: \"{col.Name}\" | Path: {col.FolderPath} | Indexed: {col.CreatedAt:yyyy-MM-dd HH:mm}");
+            }
+
+            return new ToolResult("list_rag_collections", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error listing RAG collections");
+            return new ToolResult("list_rag_collections", false, string.Empty, ex.Message);
+        }
+    }
+
+    private async Task<ToolResult> IndexFolderRagAsync(ToolCallRequest request, CancellationToken ct)
+    {
+        if (VectorStore == null || IngestionEngine == null)
+        {
+            return new ToolResult(request.Name, false, string.Empty, "VectorStore or DocumentIngestionEngine service is not configured.");
+        }
+
+        string folderPath = GetStringArg(request.Arguments, "folder_path") ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath))
+        {
+            return new ToolResult(request.Name, false, string.Empty, $"Directory path does not exist or is invalid: '{folderPath}'");
+        }
+
+        string collectionName = GetStringArg(request.Arguments, "collection_name") ?? Path.GetFileName(folderPath);
+        if (string.IsNullOrWhiteSpace(collectionName)) collectionName = Path.GetFileName(folderPath);
+
+        try
+        {
+            await VectorStore.InitializeAsync();
+            var collection = await VectorStore.AddOrUpdateCollectionAsync(
+                name: collectionName,
+                folderPath: folderPath,
+                embeddingModel: "LLamaEmbedder-Local",
+                dimension: 384
+            );
+
+            int chunksCreated = await IngestionEngine.IndexDirectoryAsync(
+                collectionId: collection.Id,
+                directoryPath: folderPath,
+                cancellationToken: ct
+            );
+
+            string resultMsg = $"Successfully indexed folder '{folderPath}' into collection '{collectionName}' (Collection ID: `{collection.Id}`). Created {chunksCreated} vector chunks.";
+            return new ToolResult(request.Name, true, resultMsg, null);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error indexing folder '{FolderPath}' for RAG", folderPath);
+            return new ToolResult(request.Name, false, string.Empty, ex.Message);
+        }
     }
 }

@@ -62,7 +62,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// <summary>
     /// Gets or sets target KV cache quantization precision. Default is Q4_0.
     /// </summary>
-    public KvCacheQuantizationType TargetKvQuantization { get; set; } = KvCacheQuantizationType.Q4_0;
+    public KvCacheQuantizationType TargetKvQuantization { get; set; } = KvCacheQuantizationType.F16;
 
     /// <summary>
     /// Gets current KV cache memory estimate and architecture metrics.
@@ -100,9 +100,24 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public string Architecture { get; set; } = "llama"; // Default for now
 
     /// <summary>
+    /// Raw GGUF chat template string if present.
+    /// </summary>
+    public string? RawChatTemplate { get; private set; }
+
+    /// <summary>
+    /// Fine-tune name if present.
+    /// </summary>
+    public string? FineTuneName { get; private set; }
+
+    /// <summary>
     /// Gets a value indicating whether a model is currently loaded.
     /// </summary>
     public bool IsModelLoaded => _weights != null && _context != null;
+
+    /// <summary>
+    /// User-defined explicit context limit preference (0 = Auto smart hardware allocation up to model max, or custom limit up to 1M tokens).
+    /// </summary>
+    public uint UserContextLimit { get; set; } = 0;
 
     /// <summary>
     /// Gets the loaded context size budget.
@@ -145,22 +160,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
     private void SafeOffloadDisposal(params IDisposable?[] resources)
     {
-        var disposer = NativeResourceDisposer;
-        if (disposer != null)
+        var ordered = resources.Where(r => r != null)
+                               .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
+        foreach (var r in ordered)
         {
-            disposer.EnqueueForDisposal(resources);
-        }
-        else
-        {
-            Task.Run(() =>
-            {
-                var ordered = resources.Where(r => r != null)
-                                       .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
-                foreach (var r in ordered)
-                {
-                    try { r?.Dispose(); } catch { }
-                }
-            });
+            try { r?.Dispose(); } catch { }
         }
     }
 
@@ -171,6 +175,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     {
         if (SpeculativeDecodingService == null) return;
 
+        await _modelLock.WaitAsync();
         try
         {
             var res = await SpeculativeDecodingService.ResolveDraftModelAsync(targetModelPath, IsSpeculativeDecodingEnabled, SelectedDraftModelPath);
@@ -195,6 +200,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             SpeculativeStatusChanged?.Invoke(SpeculativeStatus);
             SpeculativeEngine.Unload();
         }
+        finally
+        {
+            _modelLock.Release();
+        }
     }
 
     /// <summary>
@@ -213,43 +222,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                 SpeculativeEngine.Unload();
                 UnloadModelInternal();
+                if (NativeResourceDisposer != null)
+                {
+                    await NativeResourceDisposer.DrainAsync();
+                }
 
                 // Only lock process CPU affinity mask for CPU-only execution (0 GPU layers)
                 if (offloadPlan.GpuLayers == 0)
                 {
                     Hardware.CpuAffinityHelper.ApplyPCoreAffinityToProcess();
-                }
-
-                // Configure model parameters for maximum GPU throughput
-                var parameters = new ModelParams(modelPath)
-                {
-                    ContextSize = (uint)offloadPlan.RecommendedContextSize,
-                    GpuLayerCount = offloadPlan.GpuLayers, // -1 = offload ALL layers including output head
-                    BatchSize = (uint)offloadPlan.RecommendedBatchSize,
-                    UBatchSize = (uint)offloadPlan.RecommendedBatchSize, // Align physical batch size with BatchSize
-                    FlashAttention = true,
-                    Threads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
-                    BatchThreads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
-                    // Enable Memory map to eliminate double-buffering in System RAM
-                    UseMemorymap = true,
-                    UseMemoryLock = false
-                };
-                
-                // Target KV cache precision set based on TargetKvQuantization configuration
-                var kvType = TargetKvQuantization switch
-                {
-                    KvCacheQuantizationType.F16 => LLama.Native.GGMLType.GGML_TYPE_F16,
-                    KvCacheQuantizationType.Q8_0 => LLama.Native.GGMLType.GGML_TYPE_Q8_0,
-                    KvCacheQuantizationType.Q4_1 => LLama.Native.GGMLType.GGML_TYPE_Q4_1,
-                    _ => LLama.Native.GGMLType.GGML_TYPE_Q4_0
-                };
-                parameters.TypeK = kvType;
-                parameters.TypeV = kvType;
-
-                var compat = GgufCompatibilityAdapter.Evaluate(modelPath);
-                if (compat.WarningMessage != null)
-                {
-                    _logger.LogWarning("GGUF Pre-flight Notice: {Message}", compat.WarningMessage);
                 }
 
                 var metadata = Models.GgufMetadataReader.Parse(modelPath);
@@ -261,6 +242,76 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         CurrentKvCacheEstimate.TotalVramMegabytes,
                         CurrentKvCacheEstimate.TotalVramGigabytes,
                         CurrentKvCacheEstimate.BytesPerToken);
+                }
+
+                // Target KV cache precision set based on TargetKvQuantization configuration
+                var kvType = TargetKvQuantization switch
+                {
+                    KvCacheQuantizationType.F16 => LLama.Native.GGMLType.GGML_TYPE_F16,
+                    KvCacheQuantizationType.Q8_0 => LLama.Native.GGMLType.GGML_TYPE_Q8_0,
+                    KvCacheQuantizationType.Q4_1 => LLama.Native.GGMLType.GGML_TYPE_Q4_1,
+                    _ => LLama.Native.GGMLType.GGML_TYPE_Q4_0
+                };
+
+                // Disable FlashAttention by default to prevent C++ GGML_ASSERT line 46 fatal errors on hybrid/non-F16 attention architectures
+                bool useFlashAttention = false;
+
+                // Detect hybrid SSM+Attention architectures that require drastically reduced context
+                // because their recurrent state buffers (d_state * d_model * n_ctx) consume far more
+                // VRAM per token than standard attention KV caches, causing native GGML_ABORT during
+                // compute graph reservation at large context sizes.
+                string archLower = (metadata?.Architecture ?? "").ToLowerInvariant();
+                bool isHybridSsm = archLower is "qwen35" or "mamba" or "rwkv" or "jamba";
+
+                // Minimum context size is 32k (32768 tokens), scaling up dynamically with available memory or user override up to 1M (+8192 for system prompt & tool schema)
+                uint targetContextSize = UserContextLimit > 0
+                    ? UserContextLimit + 8192
+                    : (uint)Math.Max(32768, offloadPlan.RecommendedContextSize);
+
+                if (isHybridSsm)
+                {
+                    _logger.LogInformation("Hybrid SSM architecture '{Arch}' detected. Context configured to {MaxCtx} tokens.", archLower, targetContextSize);
+                }
+
+                int totalModelLayers = (metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0) ? (int)metadata.BlockCount.Value : 32;
+                int targetGpuLayers = (offloadPlan.GpuLayers < 0 || offloadPlan.GpuLayers >= totalModelLayers) ? totalModelLayers : offloadPlan.GpuLayers;
+
+                if (isHybridSsm && targetGpuLayers >= totalModelLayers)
+                {
+                    targetGpuLayers = Math.Max(1, totalModelLayers - 1);
+                    _logger.LogInformation("Hybrid SSM architecture '{Arch}' detected. Offloading {GpuLayers}/{TotalLayers} layers to GPU to prevent CUDA SSM state assertion.", archLower, targetGpuLayers, totalModelLayers);
+                }
+
+                uint safeBatchSize = (uint)Math.Min(isHybridSsm ? 256 : 512, offloadPlan.RecommendedBatchSize);
+
+                // Configure model parameters for maximum GPU throughput
+                var parameters = new ModelParams(modelPath)
+                {
+                    ContextSize = targetContextSize,
+                    GpuLayerCount = targetGpuLayers, // Offload up to total layers to GPU
+                    BatchSize = safeBatchSize,
+                    UBatchSize = safeBatchSize, // Align physical batch size with BatchSize
+                    FlashAttention = useFlashAttention,
+                    // Use Unspecified pooling to let the model define its own pooling_type (-1/none for generative models)
+                    // instead of LLamaSharp's default Mean (0) which triggers "model default pooling_type is [-1], but [0] was specified"
+                    PoolingType = LLama.Native.LLamaPoolingType.Unspecified,
+                    Threads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
+                    BatchThreads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
+                    // Enable Memory map to eliminate double-buffering in System RAM
+                    UseMemorymap = true,
+                    UseMemoryLock = false
+                };
+                
+                if (TargetKvQuantization != KvCacheQuantizationType.F16)
+                {
+                    parameters.TypeK = kvType;
+                    parameters.TypeV = kvType;
+                }
+
+                var compat = GgufCompatibilityAdapter.Evaluate(modelPath);
+                if (compat.WarningMessage != null)
+                {
+                    _logger.LogWarning("GGUF Pre-flight Notice: {Message}", compat.WarningMessage);
                 }
 
                 _modelParams = parameters;
@@ -293,72 +344,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                 loadEx);
                         }
 
-                        // Also scan the native log tail for architecture/tokenizer error patterns
-                        // (these appear in the log callback but NOT in the exception message)
                         string nativeLogTail = ReadNativeLogTail();
-                        bool nativeLogConfirmsArchError =
-                            nativeLogTail.Contains("missing tensor", StringComparison.OrdinalIgnoreCase) ||
-                            nativeLogTail.Contains("unknown model", StringComparison.OrdinalIgnoreCase) ||
-                            nativeLogTail.Contains("unsupported model", StringComparison.OrdinalIgnoreCase) ||
-                            nativeLogTail.Contains("unknown pre-tokenizer", StringComparison.OrdinalIgnoreCase) ||
-                            nativeLogTail.Contains("unknown tokenizer", StringComparison.OrdinalIgnoreCase) ||
-                            nativeLogTail.Contains("error loading model vocabulary", StringComparison.OrdinalIgnoreCase);
+                        _logger.LogWarning(loadEx, "Native load failed for '{ModelFile}' (arch: {Arch}). Native log tail: {Tail}",
+                            Path.GetFileName(modelPath), compat.Architecture, nativeLogTail);
 
-                        _logger.LogWarning(loadEx,
-                            "Native load failed for '{ModelFile}' (arch: {Arch}, nativeLogConfirmsArch: {Confirmed}). " +
-                            "Attempting auto-download of updated llama.cpp native engine...",
-                            Path.GetFileName(modelPath), compat.Architecture, nativeLogConfirmsArchError);
-
-                        // Phase 1: Download updated native DLLs from latest llama.cpp release
-                        bool downloaded = false;
-                        try
-                        {
-                            downloaded = await NativeEngineManager.DownloadLatestNativeEngineAsync(logger: _logger);
-                            if (downloaded)
-                            {
-                                _logger.LogInformation("Updated native engine downloaded successfully. Retrying model load...");
-                            }
-                            else
-                            {
-                                _logger.LogWarning("Native engine download returned no files. Retry may still fail.");
-                            }
-                        }
-                        catch (Exception dlEx)
-                        {
-                            _logger.LogWarning(dlEx, "Auto-download of updated native engine failed.");
-                        }
-
-                        // Phase 2: Retry the load. The native DLL is likely still locked in memory,
-                        // so this retry typically fails — but we try anyway in case the process
-                        // hadn't loaded the DLL yet (first model load of the session).
-                        try
-                        {
-                            _weights = LLamaWeights.LoadFromFile(parameters);
-                            _logger.LogInformation("Model loaded successfully on retry after native engine update.");
-                        }
-                        catch (Exception retryEx)
-                        {
-                            // Phase 3: Retry failed — the in-memory DLL is locked.
-                            // Auto-restart the application so the updated DLLs take effect.
-                            if (downloaded)
-                            {
-                                _logger.LogWarning(
-                                    "Retry failed (DLL locked in memory). Auto-restarting application to apply updated native engine...");
-                                UnloadModelInternal();
-                                _modelLock.Release();
-                                NativeEngineManager.RestartApplication(_logger);
-                                // RestartApplication calls Environment.Exit — code below is unreachable
-                            }
-
-                            string retryMsg = retryEx.Message ?? string.Empty;
-                            throw new InvalidOperationException(
-                                $"Failed to load model '{Path.GetFileName(modelPath)}' natively. " +
-                                $"Architecture '{compat.Architecture}' is not supported by the current native llama.dll.\n\n" +
-                                $"Native error: {msg}\n\n" +
-                                $"Could not auto-download an updated native engine. " +
-                                $"To support this model architecture, manually place an updated llama.dll build into '{overrideDir}' and restart Klydis.",
-                                retryEx);
-                        }
+                        throw new InvalidOperationException(
+                            $"Failed to load model '{Path.GetFileName(modelPath)}' natively. " +
+                            $"Architecture '{compat.Architecture}' is not supported by the current native engine. " +
+                            $"Native error: {msg}", loadEx);
                     }
 
                     if (_weights == null)
@@ -404,6 +397,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 Architecture = !string.IsNullOrWhiteSpace(metadata?.Architecture)
                     ? metadata.Architecture
                     : System.IO.Path.GetFileNameWithoutExtension(modelPath);
+                RawChatTemplate = metadata?.RawChatTemplate;
+                FineTuneName = metadata?.FineTuneName;
                 _logger.LogInformation("Model loaded successfully with architecture '{Architecture}'.", Architecture);
                 success = true;
             }
@@ -537,6 +532,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             generationTask = Task.Run(async () =>
             {
                 bool completedNormally = false;
+                Exception? generationException = null;
                 try
                 {
                     var requestStopwatch = Stopwatch.StartNew();
@@ -649,7 +645,53 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error in background generation");
+                    if (ex.Message.Contains("native memory shifting", StringComparison.OrdinalIgnoreCase) ||
+                        ex.Message.Contains("context overflowed", StringComparison.OrdinalIgnoreCase) ||
+                        ex.Message.Contains("context window is full", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogWarning(ex, "Model context overflowed or does not support native memory shifting. Resetting context and retrying generation cleanly.");
+                        try
+                        {
+                            ResetContextInternal();
+                            string safePrompt = prompt;
+                            int maxAllowedTokens = (int)Math.Max(512, ContextSize - 1024);
+                            try
+                            {
+                                int currentTokenCount = GetTokenCount(prompt);
+                                if (currentTokenCount > maxAllowedTokens)
+                                {
+                                    _logger.LogWarning("Prompt token count ({Count}) exceeds safe limit ({Max}). Truncating prompt for clean retry.", currentTokenCount, maxAllowedTokens);
+                                    safePrompt = TruncatePromptToTokenLimit(prompt, maxAllowedTokens);
+                                }
+                            }
+                            catch { }
+
+                            var retryStream = _executor.InferAsync(safePrompt, inferenceParams, cancellationToken: generationToken);
+                            await foreach (var token in retryStream)
+                            {
+                                if (generationToken.IsCancellationRequested) break;
+                                await channel.Writer.WriteAsync(token, generationToken);
+                            }
+                            completedNormally = true;
+                            generationException = null;
+                        }
+                        catch (Exception retryEx)
+                        {
+                            _logger.LogError(retryEx, "Error during context reset retry");
+                            generationException = retryEx;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogError(ex, "Error in background generation");
+                        generationException = ex;
+                    }
+                    try
+                    {
+                        var logPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "chat_debug.log");
+                        System.IO.File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss.fff}] INFERENCE EXCEPTION: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}{Environment.NewLine}");
+                    }
+                    catch { }
                 }
                 finally
                 {
@@ -676,7 +718,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     {
                         ResetContextInternal();
                     }
-                    channel.Writer.Complete();
+                    channel.Writer.Complete(completedNormally ? null : generationException);
                 }
             }, CancellationToken.None);
 
@@ -727,11 +769,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
     public async IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, [EnumeratorCancellation] CancellationToken ct = default)
     {
+        int maxKeep = (int)(ContextSize / 2);
+        int safeTokensKeep = Math.Clamp(tokensKeep, 0, maxKeep);
+
         var inferenceParams = new InferenceParams 
         { 
             MaxTokens = -1,
-            TokensKeep = tokensKeep,
+            TokensKeep = safeTokensKeep,
             AntiPrompts = stopTokens.ToList(),
+            OverflowStrategy = LLama.Common.ContextOverflowStrategy.TruncateAndReprefill,
             SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
             {
                 Temperature = 0.7f,
@@ -762,6 +808,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         var inferenceParams = new InferenceParams 
         { 
             MaxTokens = maxTokens > 0 ? maxTokens : 256,
+            OverflowStrategy = LLama.Common.ContextOverflowStrategy.TruncateAndReprefill,
             SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
             {
                 Temperature = 0.7f,
@@ -930,6 +977,32 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     }
 
     /// <summary>
+    /// Truncates prompt from start so that the remaining text fits within targetTokenLimit tokens.
+    /// </summary>
+    private string TruncatePromptToTokenLimit(string prompt, int targetTokenLimit)
+    {
+        var context = _context;
+        if (context == null || string.IsNullOrEmpty(prompt)) return prompt;
+        try
+        {
+            var tokens = context.Tokenize(prompt, special: true);
+            if (tokens.Length <= targetTokenLimit) return prompt;
+
+            var slicedTokens = tokens.AsSpan(tokens.Length - targetTokenLimit).ToArray();
+            return context.DeTokenize(slicedTokens);
+        }
+        catch
+        {
+            int estCharLimit = targetTokenLimit * 3;
+            if (prompt.Length > estCharLimit)
+            {
+                return prompt.Substring(prompt.Length - estCharLimit);
+            }
+            return prompt;
+        }
+    }
+
+    /// <summary>
     /// Cancels any active token generation task and awaits background teardown.
     /// </summary>
     public async Task CancelActiveGenerationAsync()
@@ -1026,6 +1099,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         _weights = null;
 
         CurrentModelPath = null;
+        RawChatTemplate = null;
+        FineTuneName = null;
 
         if (ctx != null || weights != null)
         {

@@ -3,6 +3,7 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using Klydis.App.ViewModels;
@@ -16,6 +17,7 @@ namespace Klydis.App.Views;
 public partial class ChatView : UserControl
 {
     private ScrollViewer? _scrollViewer;
+    private bool _shouldAutoScrollToBottom = true;
 
     // Velocity-based (inertia) smooth scroll, driven by CompositionTarget.Rendering.
     // A real mouse wheel fires a burst of several notches within ~100-200ms; restarting
@@ -31,8 +33,16 @@ public partial class ChatView : UserControl
         InitializeComponent();
 
         DataContextChanged += OnDataContextChanged;
-        Loaded += (_, _) => InputTextBox.Focus();
+        Loaded += OnLoaded;
         PreviewMouseDown += ChatView_PreviewMouseDown;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        InputTextBox.Focus();
+        EnsureScrollViewerAttached();
+        _shouldAutoScrollToBottom = true;
+        ScrollToBottom(force: true);
     }
 
     private void ChatView_PreviewMouseDown(object sender, MouseButtonEventArgs e)
@@ -62,6 +72,7 @@ public partial class ChatView : UserControl
     {
         if (e.OldValue is ChatViewModel oldVm)
         {
+            oldVm.PropertyChanged -= Vm_PropertyChanged;
             oldVm.Messages.CollectionChanged -= Messages_CollectionChanged;
             foreach (var msg in oldVm.Messages)
             {
@@ -71,11 +82,23 @@ public partial class ChatView : UserControl
 
         if (e.NewValue is ChatViewModel newVm)
         {
+            newVm.PropertyChanged += Vm_PropertyChanged;
             newVm.Messages.CollectionChanged += Messages_CollectionChanged;
             foreach (var msg in newVm.Messages)
             {
                 msg.PropertyChanged += Message_PropertyChanged;
             }
+            _shouldAutoScrollToBottom = true;
+            ScrollToBottom(force: true);
+        }
+    }
+
+    private void Vm_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ChatViewModel.SelectedSession))
+        {
+            _shouldAutoScrollToBottom = true;
+            ScrollToBottom(force: true);
         }
     }
 
@@ -97,7 +120,12 @@ public partial class ChatView : UserControl
             }
         }
 
-        if (e.Action == NotifyCollectionChangedAction.Add)
+        if (e.Action == NotifyCollectionChangedAction.Reset)
+        {
+            _shouldAutoScrollToBottom = true;
+        }
+
+        if (e.Action == NotifyCollectionChangedAction.Add || e.Action == NotifyCollectionChangedAction.Reset)
         {
             ScrollToBottom(force: true);
         }
@@ -105,7 +133,7 @@ public partial class ChatView : UserControl
 
     private void Message_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        // Follow streaming content growth, but only while the user is already at the bottom.
+        // Follow streaming content growth, but only while auto-scroll is active or near bottom.
         if (e.PropertyName == nameof(ChatMessageViewModel.Content))
         {
             ScrollToBottom(force: false);
@@ -117,6 +145,16 @@ public partial class ChatView : UserControl
 
     private void ScrollToBottom(bool force)
     {
+        if (force)
+        {
+            _shouldAutoScrollToBottom = true;
+        }
+
+        if (!force && !_shouldAutoScrollToBottom)
+        {
+            return;
+        }
+
         if (!force && (DateTime.Now - _lastScrollTime).TotalMilliseconds < 50)
         {
             if (!_scrollPending)
@@ -135,21 +173,67 @@ public partial class ChatView : UserControl
         _lastScrollTime = DateTime.Now;
         Dispatcher.InvokeAsync(() =>
         {
-            _scrollViewer ??= FindScrollViewer(MessagesList);
+            EnsureScrollViewerAttached();
             if (_scrollViewer == null)
             {
                 return;
             }
 
-            bool nearBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset < 120;
-            if (force || nearBottom)
+            double distanceToBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset;
+            bool nearBottom = distanceToBottom < 120;
+
+            if (force || nearBottom || _shouldAutoScrollToBottom)
             {
-                // Stop any in-flight wheel momentum first, otherwise its next frame
-                // tick fires moments later and yanks the view back off the end.
                 StopScrollAnimation();
                 _scrollViewer.ScrollToEnd();
+
+                Dispatcher.InvokeAsync(() =>
+                {
+                    _scrollViewer?.ScrollToEnd();
+                }, System.Windows.Threading.DispatcherPriority.ContextIdle);
             }
-        }, System.Windows.Threading.DispatcherPriority.Background);
+        }, System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private void EnsureScrollViewerAttached()
+    {
+        if (_scrollViewer == null)
+        {
+            _scrollViewer = FindScrollViewer(MessagesList);
+            if (_scrollViewer != null)
+            {
+                _scrollViewer.ScrollChanged += ScrollViewer_ScrollChanged;
+            }
+        }
+    }
+
+    private void ScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (_scrollViewer == null) return;
+
+        if (_shouldAutoScrollToBottom && e.ExtentHeightChange > 0)
+        {
+            _scrollViewer.ScrollToEnd();
+        }
+
+        double distanceToBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset;
+
+        if (distanceToBottom <= 10)
+        {
+            _shouldAutoScrollToBottom = true;
+        }
+
+        if (ScrollToBottomButton != null)
+        {
+            bool showButton = _scrollViewer.ScrollableHeight > 0 && distanceToBottom > 120;
+            ScrollToBottomButton.Visibility = showButton ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private void ScrollToBottomButton_Click(object sender, RoutedEventArgs e)
+    {
+        _shouldAutoScrollToBottom = true;
+        ScrollToBottom(force: true);
     }
 
     private static ScrollViewer? FindScrollViewer(System.Windows.DependencyObject root)
@@ -173,7 +257,7 @@ public partial class ChatView : UserControl
 
     private ScrollViewer? FindNestedScrollViewer(DependencyObject? element)
     {
-        _scrollViewer ??= FindScrollViewer(MessagesList);
+        EnsureScrollViewerAttached();
         while (element != null && element != MessagesList)
         {
             if (element is ScrollViewer sv && sv != _scrollViewer)
@@ -189,7 +273,7 @@ public partial class ChatView : UserControl
 
     private void MessagesList_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        _scrollViewer ??= FindScrollViewer(MessagesList);
+        EnsureScrollViewerAttached();
         if (_scrollViewer == null)
         {
             return;
@@ -205,6 +289,12 @@ public partial class ChatView : UserControl
                 // Allow inner ScrollViewer (tool output, code block, thinking panel) to handle scrolling
                 return;
             }
+        }
+
+        if (e.Delta > 0)
+        {
+            // User scrolled UP
+            _shouldAutoScrollToBottom = false;
         }
 
         _scrollVelocity = Math.Clamp(_scrollVelocity - e.Delta * 6.0, -6000, 6000);
@@ -279,6 +369,15 @@ public partial class ChatView : UserControl
 
         Style Res(string key) => (Style)viewer.FindResource(key);
 
+        if (viewer.FindResource("TextPrimaryBrush") is Brush textBrush)
+        {
+            TextElement.SetForeground(viewer, textBrush);
+            if (viewer.Document != null)
+            {
+                viewer.Document.Foreground = textBrush;
+            }
+        }
+
         var engine = viewer.Engine;
         engine.TableStyle = Res("MdTableStyle");
         engine.TableHeaderStyle = Res("MdTableHeaderStyle");
@@ -309,6 +408,11 @@ public partial class ChatView : UserControl
         {
             viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, string.Empty);
             viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, content);
+        }
+
+        if (viewer.Document != null && viewer.FindResource("TextPrimaryBrush") is Brush finalBrush)
+        {
+            viewer.Document.Foreground = finalBrush;
         }
     }
 
@@ -404,6 +508,17 @@ public partial class ChatView : UserControl
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
             {
                 return;
+            }
+            else if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+            {
+                e.Handled = true;
+                if (DataContext is ChatViewModel vm)
+                {
+                    if (vm.ForceSendMessageCommand.CanExecute(null))
+                    {
+                        vm.ForceSendMessageCommand.Execute(null);
+                    }
+                }
             }
             else
             {

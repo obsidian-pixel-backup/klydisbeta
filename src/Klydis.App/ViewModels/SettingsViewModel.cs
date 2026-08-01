@@ -19,6 +19,7 @@ public enum SettingsCategory
 }
 
 public record DraftModelOption(string DisplayName, string FilePath);
+public record ContextSizeOption(string DisplayName, int Value);
 
 /// <summary>
 /// One tile in the Themes gallery. <see cref="Swatch"/> is a fixed preview color
@@ -51,6 +52,7 @@ public partial class SettingsViewModel : ObservableObject
     private readonly ThemeService _themeService;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
     private readonly ModelRegistry? _modelRegistry;
+    private readonly Klydis.Core.Chat.ChatEngine? _chatEngine;
 
     [ObservableProperty]
     private SettingsCategory _selectedCategory = SettingsCategory.Appearance;
@@ -74,11 +76,19 @@ public partial class SettingsViewModel : ObservableObject
     private string _selectedDraftModelPath = "auto";
 
     [ObservableProperty]
+    private string _selectedPersonality = "Default";
+
+    [ObservableProperty]
+    private int _selectedContextSize = 0;
+
+    [ObservableProperty]
     private string _speculativeStatusMessage = "Speculative decoding active.";
 
     public ObservableCollection<AccentSwatch> AccentSwatches { get; } = new();
     public ObservableCollection<BackgroundSwatch> BackgroundSwatches { get; } = new();
     public ObservableCollection<DraftModelOption> AvailableDraftModels { get; } = new();
+    public ObservableCollection<string> AvailablePersonalities { get; } = new();
+    public ObservableCollection<ContextSizeOption> AvailableContextSizes { get; } = new();
 
     public string AppVersion { get; }
     public string AppDescription { get; }
@@ -86,15 +96,25 @@ public partial class SettingsViewModel : ObservableObject
     public SettingsViewModel(
         ThemeService themeService, 
         Klydis.Core.Inference.InferenceEngine inferenceEngine,
-        ModelRegistry? modelRegistry = null)
+        ModelRegistry? modelRegistry = null,
+        Klydis.Core.Chat.ChatEngine? chatEngine = null)
     {
         _themeService = themeService;
         _inferenceEngine = inferenceEngine;
         _modelRegistry = modelRegistry;
+        _chatEngine = chatEngine;
 
         _selectedMode = themeService.CurrentMode;
         _selectedAccent = themeService.CurrentAccent;
         _selectedBackground = themeService.CurrentBackground;
+        _selectedPersonality = themeService.SelectedPersonality;
+        _selectedContextSize = themeService.UserContextLimit;
+        _inferenceEngine.UserContextLimit = (uint)_selectedContextSize;
+
+        if (_chatEngine != null)
+        {
+            _chatEngine.SelectedPersonality = _selectedPersonality;
+        }
 
         IsSpeculativeDecodingEnabled = themeService.IsSpeculativeDecodingEnabled;
         SpeculativeDraftCount = themeService.SpeculativeDraftCount;
@@ -103,6 +123,7 @@ public partial class SettingsViewModel : ObservableObject
         SpeculativeStatusMessage = inferenceEngine.SpeculativeStatus;
 
         RefreshAvailableDraftModels();
+        RefreshAvailablePersonalities();
 
         if (_modelRegistry != null)
         {
@@ -187,6 +208,31 @@ public partial class SettingsViewModel : ObservableObject
                 double sizeGb = m.FileSizeBytes / (1024.0 * 1024.0 * 1024.0);
                 AvailableDraftModels.Add(new DraftModelOption($"{m.DisplayName} ({sizeGb:F2} GB)", m.FilePath));
             }
+        }
+    }
+
+    private void RefreshAvailablePersonalities()
+    {
+        AvailablePersonalities.Clear();
+        var personalities = Klydis.Core.Chat.SystemPromptManager.GetAvailablePersonalities();
+        foreach (var p in personalities)
+        {
+            AvailablePersonalities.Add(p);
+        }
+
+        if (!AvailablePersonalities.Contains(SelectedPersonality) && AvailablePersonalities.Count > 0)
+        {
+            SelectedPersonality = AvailablePersonalities[0];
+        }
+    }
+
+    partial void OnSelectedPersonalityChanged(string value)
+    {
+        string pName = string.IsNullOrWhiteSpace(value) ? "Default" : value;
+        _themeService.SavePersonalitySetting(pName);
+        if (_chatEngine != null)
+        {
+            _chatEngine.SelectedPersonality = pName;
         }
     }
 
@@ -280,5 +326,25 @@ public partial class SettingsViewModel : ObservableObject
         _themeService.SaveSpeculativeSettings(IsSpeculativeDecodingEnabled, clamped, SelectedDraftModelPath);
         _inferenceEngine.SpeculativeDraftCount = clamped;
         _inferenceEngine.SpeculativeEngine.DraftCandidateCount = clamped;
+    }
+
+    private void PopulateContextSizeOptions()
+    {
+        AvailableContextSizes.Clear();
+        AvailableContextSizes.Add(new ContextSizeOption("Auto (Smart Hardware Allocation)", 0));
+        AvailableContextSizes.Add(new ContextSizeOption("8,192 tokens (8K)", 8192));
+        AvailableContextSizes.Add(new ContextSizeOption("16,384 tokens (16K)", 16384));
+        AvailableContextSizes.Add(new ContextSizeOption("32,768 tokens (32K)", 32768));
+        AvailableContextSizes.Add(new ContextSizeOption("65,536 tokens (64K)", 65536));
+        AvailableContextSizes.Add(new ContextSizeOption("131,072 tokens (128K)", 131072));
+        AvailableContextSizes.Add(new ContextSizeOption("262,144 tokens (256K)", 262144));
+        AvailableContextSizes.Add(new ContextSizeOption("524,288 tokens (512K)", 524288));
+        AvailableContextSizes.Add(new ContextSizeOption("1,048,576 tokens (1 Million)", 1048576));
+    }
+
+    partial void OnSelectedContextSizeChanged(int value)
+    {
+        _themeService.SaveContextSizeSetting(value);
+        _inferenceEngine.UserContextLimit = (uint)value;
     }
 }

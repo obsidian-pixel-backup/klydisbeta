@@ -95,6 +95,15 @@ public partial class HuggingFaceClient
     private const int MaxRetries = 3;
     private static readonly TimeSpan BaseDelay = TimeSpan.FromSeconds(2);
 
+    public static string BaseUrl
+    {
+        get
+        {
+            var envEndpoint = Environment.GetEnvironmentVariable("HF_ENDPOINT");
+            return !string.IsNullOrWhiteSpace(envEndpoint) ? envEndpoint.TrimEnd('/') : "https://huggingface.co";
+        }
+    }
+
     [GeneratedRegex(@"(?i)Q[0-8]_[A-Z0-9_]+")]
     private static partial Regex QuantTypeRegex();
 
@@ -138,7 +147,7 @@ public partial class HuggingFaceClient
     public async Task<List<HfModelInfo>> SearchModelsAsync(string query, int limit = 60, string sort = "downloads", CancellationToken ct = default)
     {
         var encodedQuery = string.IsNullOrWhiteSpace(query) ? "" : $"search={Uri.EscapeDataString(query)}&";
-        var url = $"https://huggingface.co/api/models?{encodedQuery}filter=gguf&sort={sort}&direction=-1&limit={limit}&expand[]=downloads&expand[]=likes&expand[]=tags&expand[]=pipeline_tag&expand[]=lastModified";
+        var url = $"{BaseUrl}/api/models?{encodedQuery}filter=gguf&sort={sort}&direction=-1&limit={limit}&expand[]=downloads&expand[]=likes&expand[]=tags&expand[]=pipeline_tag&expand[]=lastModified";
 
         _logger.LogInformation("Searching Hugging Face models with query: {Query}", query);
 
@@ -193,7 +202,7 @@ public partial class HuggingFaceClient
     /// <returns>A list of file information records.</returns>
     public async Task<List<HfFileInfo>> GetModelFilesAsync(string repoId, CancellationToken ct = default)
     {
-        var url = $"https://huggingface.co/api/models/{repoId}";
+        var url = $"{BaseUrl}/api/models/{repoId}";
         _logger.LogInformation("Fetching files for repository: {RepoId}", repoId);
 
         using var response = await SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Get, url), ct);
@@ -338,7 +347,7 @@ public partial class HuggingFaceClient
     /// <returns>The markdown text of the model card.</returns>
     public async Task<string> GetModelCardAsync(string repoId, CancellationToken ct = default)
     {
-        var url = $"https://huggingface.co/{repoId}/raw/main/README.md";
+        var url = $"{BaseUrl}/{repoId}/raw/main/README.md";
         _logger.LogInformation("Fetching model card for {RepoId}", repoId);
 
         try
@@ -372,7 +381,7 @@ public partial class HuggingFaceClient
         IProgress<DownloadProgress> progress, 
         CancellationToken ct = default)
     {
-        var url = $"https://huggingface.co/{repoId}/resolve/main/{filename}";
+        var url = $"{BaseUrl}/{repoId}/resolve/main/{filename}";
         
         var dir = Path.GetDirectoryName(destinationPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -484,7 +493,7 @@ public partial class HuggingFaceClient
 
     private async Task<long> GetFileSizeAsync(string repoId, string filename, CancellationToken ct)
     {
-        var url = $"https://huggingface.co/{repoId}/resolve/main/{filename}";
+        var url = $"{BaseUrl}/{repoId}/resolve/main/{filename}";
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Head, url);

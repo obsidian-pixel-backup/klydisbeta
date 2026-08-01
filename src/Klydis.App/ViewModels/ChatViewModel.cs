@@ -125,6 +125,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private readonly ToolExecutor _toolExecutor;
     private readonly ModelMessageQueue? _messageQueue;
     private readonly Klydis.Core.Skills.DynamicSkillSelector? _skillSelector;
+    private readonly SemaphoreSlim _modelLoadGate = new(1, 1);
 
     public ChatViewModel(
         ChatEngine chatEngine,
@@ -374,86 +375,99 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         if (string.IsNullOrEmpty(value)) return;
         
-        long seqId = Interlocked.Increment(ref _modelLoadSequenceId);
-
-        var oldCts = _modelLoadCts;
-        var newCts = new CancellationTokenSource();
-        var ct = newCts.Token;
-        _modelLoadCts = newCts;
-
-        try { oldCts?.Cancel(); } catch { }
-
-        _userExplicitlyUnloaded = false;
-
-        var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.DisplayName == value);
-        if (modelInfo != null)
+        await _modelLoadGate.WaitAsync();
+        try
         {
-            if (_inferenceEngine.IsModelLoaded && _inferenceEngine.CurrentModelPath == modelInfo.FilePath)
+            long seqId = Interlocked.Increment(ref _modelLoadSequenceId);
+
+            var oldCts = _modelLoadCts;
+            var newCts = new CancellationTokenSource();
+            var ct = newCts.Token;
+            _modelLoadCts = newCts;
+
+            try { oldCts?.Cancel(); } catch { }
+
+            _userExplicitlyUnloaded = false;
+
+            var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.DisplayName == value);
+            if (modelInfo != null)
             {
-                // Prevent infinite loop when WPF clears ComboBox ItemsSource
-                IsModelLoading = false;
-                IsModelReady = true;
-                return;
-            }
-
-            try
-            {
-                // Load state is app chrome, not conversation content: it is shown
-                // in the header model chip and status bar, never in the transcript.
-                IsModelLoading = true;
-                IsModelReady = false;
-
-                // Unload any existing model asynchronously to free VRAM and cancel ongoing generation
-                await _inferenceEngine.UnloadModelAsync(ct);
-                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
-                
-                // Set architecture for prompt templating
-                _inferenceEngine.Architecture = modelInfo.Architecture ?? "llama";
-
-                // Load new model using hardware-aware plan
-                var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
-                var systemInfo = await _systemProfiler.GetSystemInfoAsync();
-                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
-
-                var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
-                int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
-                long layerSizeBytes = modelInfo.FileSizeBytes / Math.Max(1, totalLayers);
-                int rawContextLength = (int)(metadata?.ContextLength ?? 4096);
-                int contextLength = Math.Clamp(rawContextLength, 2048, 131072);
-                
-                long kvCachePerLayerBytes = 2048;
-                if (metadata != null)
+                if (_inferenceEngine.IsModelLoaded && _inferenceEngine.CurrentModelPath == modelInfo.FilePath)
                 {
-                    var kvEst = Klydis.Core.Inference.KvCacheCalculator.Calculate(metadata, 1, Klydis.Core.Inference.KvCacheQuantizationType.Q4_0);
-                    kvCachePerLayerBytes = (long)Math.Max(512, kvEst.BytesPerToken / Math.Max(1, kvEst.NumLayers));
+                    // Prevent infinite loop when WPF clears ComboBox ItemsSource
+                    IsModelLoading = false;
+                    IsModelReady = true;
+                    return;
                 }
 
-                var plan = _offloadStrategy.CalculatePlan(
-                    totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
-                
-                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
-
-                await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
-                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
-
-                // Isolate speculative draft model attachment into background task so draft failures never break main model loading
-                _ = Task.Run(async () =>
+                try
                 {
-                    try
-                    {
-                        await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
-                    }
-                    catch (Exception draftEx)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"Speculative draft attachment failed: {draftEx}");
-                    }
-                });
+                    // Load state is app chrome, not conversation content: it is shown
+                    // in the header model chip and status bar, never in the transcript.
+                    IsModelLoading = true;
+                    IsModelReady = false;
 
-                if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+                    // Unload any existing model asynchronously to free VRAM and cancel ongoing generation
+                    await _inferenceEngine.UnloadModelAsync(ct);
+                    if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+                    
+                    // Set architecture for prompt templating
+                    _inferenceEngine.Architecture = modelInfo.Architecture ?? "llama";
 
-                if (System.Windows.Application.Current != null)
-                {
-                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    // Load new model using hardware-aware plan
+                    var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
+                    var systemInfo = await _systemProfiler.GetSystemInfoAsync();
+                    if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
+                    var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
+                    int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
+                    long layerSizeBytes = modelInfo.FileSizeBytes / Math.Max(1, totalLayers);
+                    int rawContextLength = (int)(metadata?.ContextLength ?? 4096);
+                    int contextLength = Math.Clamp(rawContextLength, 2048, 16384);
+                    
+                    long kvCachePerLayerBytes = 2048;
+                    if (metadata != null)
+                    {
+                        var kvEst = Klydis.Core.Inference.KvCacheCalculator.Calculate(metadata, 1, Klydis.Core.Inference.KvCacheQuantizationType.Q4_0);
+                        kvCachePerLayerBytes = (long)Math.Max(512, kvEst.BytesPerToken / Math.Max(1, kvEst.NumLayers));
+                    }
+
+                    var plan = _offloadStrategy.CalculatePlan(
+                        totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
+                    
+                    if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
+                    await _inferenceEngine.LoadModelAsync(modelInfo.FilePath, plan);
+                    if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
+                    // Isolate speculative draft model attachment into background task so draft failures never break main model loading
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
+                        }
+                        catch (Exception draftEx)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"Speculative draft attachment failed: {draftEx}");
+                        }
+                    });
+
+                    if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
+                    if (System.Windows.Application.Current != null)
+                    {
+                        await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                        {
+                            if (seqId == Volatile.Read(ref _modelLoadSequenceId))
+                            {
+                                IsModelLoading = false;
+                                IsModelReady = true;
+                                ProcessNextQueuedMessageIfAvailable();
+                            }
+                        });
+                    }
+                    else
                     {
                         if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                         {
@@ -461,54 +475,54 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             IsModelReady = true;
                             ProcessNextQueuedMessageIfAvailable();
                         }
-                    });
-                }
-                else
-                {
-                    if (seqId == Volatile.Read(ref _modelLoadSequenceId))
-                    {
-                        IsModelLoading = false;
-                        IsModelReady = true;
-                        ProcessNextQueuedMessageIfAvailable();
                     }
+
+                    // Remember the previously loaded model
+                    var updatedModel = modelInfo with { LastUsedAt = DateTime.UtcNow };
+                    await _registry.UpsertModelAsync(updatedModel);
                 }
-
-                // Remember the previously loaded model
-                var updatedModel = modelInfo with { LastUsedAt = DateTime.UtcNow };
-                await _registry.UpsertModelAsync(updatedModel);
-            }
-            catch (OperationCanceledException)
-            {
-                // Task canceled by a newer selection change
-            }
-            catch (Exception ex)
-            {
-                if (seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
-
-                string nativeLog = "";
-                try
+                catch (OperationCanceledException)
                 {
-                    if (System.IO.File.Exists("llama_native.log"))
+                    // Task canceled by a newer selection change
+                }
+                catch (Exception ex)
+                {
+                    if (seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
+
+                    string nativeLog = "";
+                    try
                     {
-                        using var fs = new System.IO.FileStream("llama_native.log", System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
-                        if (fs.Length > 0)
+                        if (System.IO.File.Exists("llama_native.log"))
                         {
-                            long offset = Math.Max(0, fs.Length - 4096);
-                            fs.Seek(offset, System.IO.SeekOrigin.Begin);
-                            using var reader = new System.IO.StreamReader(fs);
-                            var tailText = reader.ReadToEnd();
-                            var lines = tailText.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).TakeLast(10);
-                            nativeLog = "\n\nNative Log:\n" + string.Join("\n", lines);
+                            using var fs = new System.IO.FileStream("llama_native.log", System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+                            if (fs.Length > 0)
+                            {
+                                long offset = Math.Max(0, fs.Length - 4096);
+                                fs.Seek(offset, System.IO.SeekOrigin.Begin);
+                                using var reader = new System.IO.StreamReader(fs);
+                                var tailText = reader.ReadToEnd();
+                                var lines = tailText.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).TakeLast(10);
+                                nativeLog = "\n\nNative Log:\n" + string.Join("\n", lines);
+                            }
                         }
                     }
-                }
-                catch { }
+                    catch { }
 
-                System.Diagnostics.Debug.WriteLine($"Failed to load model: {ex}");
-                
-                if (System.Windows.Application.Current != null)
-                {
-                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    System.Diagnostics.Debug.WriteLine($"Failed to load model: {ex}");
+                    
+                    if (System.Windows.Application.Current != null)
+                    {
+                        await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                        {
+                            if (seqId == Volatile.Read(ref _modelLoadSequenceId))
+                            {
+                                IsModelLoading = false;
+                                IsModelReady = false;
+                                Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
+                            }
+                        });
+                    }
+                    else
                     {
                         if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                         {
@@ -516,35 +530,30 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             IsModelReady = false;
                             Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
                         }
-                    });
+                    }
                 }
-                else
+                finally
                 {
                     if (seqId == Volatile.Read(ref _modelLoadSequenceId))
                     {
-                        IsModelLoading = false;
-                        IsModelReady = false;
-                        Messages.Add(new ChatMessageViewModel { Role = "error", Content = $"Failed to load model: {ex.Message}{nativeLog}", Timestamp = DateTime.Now });
-                    }
-                }
-            }
-            finally
-            {
-                if (seqId == Volatile.Read(ref _modelLoadSequenceId))
-                {
-                    if (System.Windows.Application.Current != null)
-                    {
-                        await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                        if (System.Windows.Application.Current != null)
+                        {
+                            await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                            {
+                                IsModelLoading = false;
+                            });
+                        }
+                        else
                         {
                             IsModelLoading = false;
-                        });
-                    }
-                    else
-                    {
-                        IsModelLoading = false;
+                        }
                     }
                 }
             }
+        }
+        finally
+        {
+            _modelLoadGate.Release();
         }
     }
 
@@ -772,6 +781,34 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         var attachments = PendingAttachments.ToList();
         PendingAttachments.Clear();
+
+        await SendMessageForTextAsync(userMessage, attachments);
+    }
+
+    [RelayCommand(AllowConcurrentExecutions = true)]
+    private async Task ForceSendMessageAsync()
+    {
+        if (string.IsNullOrWhiteSpace(InputText) && PendingAttachments.Count == 0)
+            return;
+
+        var userMessage = InputText;
+        InputText = string.Empty;
+
+        var attachments = PendingAttachments.ToList();
+        PendingAttachments.Clear();
+
+        if (IsGenerating)
+        {
+            // Gracefully cancel active generation to interrupt active model loop
+            Cancel();
+            if (_chatEngine != null)
+            {
+                await _chatEngine.CancelActiveGenerationAsync();
+            }
+
+            // Small delay to allow active loop background task to finalize partial response history
+            await Task.Delay(200);
+        }
 
         await SendMessageForTextAsync(userMessage, attachments);
     }
@@ -1006,10 +1043,20 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                         case ChatStreamEventType.ThinkingToken:
                             OnUi(() =>
                             {
-                                if (thoughtMessage != null)
+                                if (thoughtMessage == null)
                                 {
-                                    thoughtMessage.Content += evt.Content;
+                                    CloseAssistantBubble();
+                                    thoughtMessage = new ChatMessageViewModel
+                                    {
+                                        Role = "thought",
+                                        Content = string.Empty,
+                                        IsStreaming = true,
+                                        IsThinkingExpanded = true,
+                                        Timestamp = DateTime.Now
+                                    };
+                                    AppendMessage(thoughtMessage);
                                 }
+                                thoughtMessage.Content += evt.Content;
                             });
                             break;
                         case ChatStreamEventType.ThinkingEnd:
@@ -1027,6 +1074,21 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                                         CloseThoughtBubble();
                                     }
                                 }
+                            });
+                            break;
+                        case ChatStreamEventType.MemorySummarizing:
+                            OnUi(() =>
+                            {
+                                CloseAssistantBubble();
+                                var memoryMsg = new ChatMessageViewModel
+                                {
+                                    Role = "thought",
+                                    Content = evt.Content,
+                                    IsThinkingExpanded = true,
+                                    IsStreaming = true,
+                                    Timestamp = DateTime.Now
+                                };
+                                AppendMessage(memoryMsg);
                             });
                             break;
                         case ChatStreamEventType.ToolCall:
@@ -1661,6 +1723,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (string.IsNullOrWhiteSpace(text)) return (string.Empty, text);
 
         var match = Regex.Match(text, @"<\|?(?:think|thought)\|?>(.*?)(?:</\|?(?:think|thought)\|?>|<\|/(?:think|thought)\|?>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        if (!match.Success)
+        {
+            match = Regex.Match(text, @"\[(?:THINK|THOUGHT)\](.*?)(?:\[/(?:THINK|THOUGHT)\]|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        }
         if (match.Success)
         {
             string thinking = match.Groups[1].Value.Trim();

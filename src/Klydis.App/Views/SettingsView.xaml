@@ -278,6 +278,30 @@
                         </Grid>
                     </Border>
 
+                    <!-- Model Personality: a card to select personality mode loaded from UserStyle_Modes.md -->
+                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="16,14" Margin="0,0,0,20">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="220"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8" Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center">
+                                <Path Data="M 8,2 A 4,4 0 1 1 8,10 A 4,4 0 0 1 8,2 Z M 2,15 C 2,11.5 5,11 8,11 C 11,11 14,11.5 14,15 Z"
+                                      Fill="{DynamicResource AccentPrimaryBrush}" Width="16" Height="16" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,12,0">
+                                <TextBlock Text="Model Personality &amp; User Style" FontSize="13.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <TextBlock Text="Set model tone &amp; personality loaded from UserStyle_Modes.md" FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}"/>
+                            </StackPanel>
+
+                            <ComboBox Grid.Column="2"
+                                      ItemsSource="{Binding AvailablePersonalities}"
+                                      SelectedItem="{Binding SelectedPersonality, Mode=TwoWay}"
+                                      VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
+
                     <!-- Backgrounds: a gallery of background color identities -->
                     <TextBlock Text="BACKGROUNDS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
                     <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
@@ -404,6 +428,26 @@
                 <StackPanel Visibility="{Binding SelectedCategory, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=Inference}">
                     <TextBlock Text="Inference &amp; Speed" FontSize="24" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
                     <TextBlock Text="Configure speculative decoding, draft model acceleration, and tokens-per-second tuning." FontSize="13" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,24"/>
+
+                    <TextBlock Text="CONTEXT &amp; MEMORY LIMITS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
+                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="260"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="Model Context Size Limit" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <TextBlock Text="Set maximum KV cache context limit up to 1 Million (1,048,576) tokens for long-context models." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,4,16,0"/>
+                            </StackPanel>
+                            <ComboBox Grid.Column="1"
+                                      ItemsSource="{Binding AvailableContextSizes}"
+                                      SelectedValue="{Binding SelectedContextSize, Mode=TwoWay}"
+                                      SelectedValuePath="Value"
+                                      DisplayMemberPath="DisplayName"
+                                      VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
 
                     <TextBlock Text="SPECULATIVE DECODING" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
                     <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">

@@ -379,7 +379,8 @@ public class ModelRegistry
                 InstalledAt: DateTime.UtcNow,
                 LastUsedAt: DateTime.UtcNow,
                 ChecksumSha256: null,
-                Role: null
+                Role: null,
+                RawChatTemplate: metadata?.RawChatTemplate
             );
 
             _models[id] = model;

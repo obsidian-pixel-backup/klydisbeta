@@ -30,7 +30,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            System.IO.File.WriteAllText(@"E:\DEVELOPER PROJECTS\klydisbeta\hard_log.txt", "INIT ERROR: " + ex.ToString());
+            System.IO.File.WriteAllText("hard_log.txt", "INIT ERROR: " + ex.ToString());
             Environment.Exit(1);
         }
     }
@@ -70,6 +70,12 @@ public partial class App : Application
             var messageStore = ServiceProvider.GetRequiredService<Klydis.Core.Memory.MessageStore>();
             await messageStore.InitializeAsync();
 
+            var vectorStore = ServiceProvider.GetRequiredService<Klydis.Core.RAG.VectorStore>();
+            await vectorStore.InitializeAsync();
+
+            var orchestrator = ServiceProvider.GetRequiredService<Klydis.Core.Memory.ContextOrchestrator>();
+            orchestrator.HybridRetriever = ServiceProvider.GetRequiredService<Klydis.Core.RAG.HybridRetriever>();
+
             var skillLibraryManager = ServiceProvider.GetRequiredService<Klydis.Core.Skills.SkillLibraryManager>();
             await skillLibraryManager.InitializeAsync();
         }
@@ -105,6 +111,7 @@ public partial class App : Application
         });
 
         // Core Services
+        services.AddSingleton<ThemeService>();
         services.AddSingleton<INativeResourceDisposer, NativeResourceDisposer>();
         services.AddSingleton<SpeculativeDecodingService>();
         services.AddSingleton<InferenceEngine>(sp =>
@@ -126,16 +133,50 @@ public partial class App : Application
         services.AddSingleton<ModelMessageQueue>();
         services.AddSingleton<Klydis.Core.Chat.CamoufoxManager>();
         services.AddSingleton<Klydis.Core.Chat.StealthBrowserService>();
-        services.AddSingleton<ChatEngine>();
-        services.AddSingleton<ToolExecutor>();
-        services.AddSingleton<PromptTemplateEngine>();
         services.AddSingleton<ModelPool>();
         services.AddSingleton<GpuProfiler>();
         services.AddSingleton<SystemProfiler>();
         services.AddSingleton<OffloadStrategy>();
         services.AddSingleton<Klydis.Core.Skills.SkillLibraryManager>();
         services.AddSingleton<Klydis.Core.Skills.DynamicSkillSelector>();
-        services.AddSingleton<ThemeService>();
+        // RAG Services
+        services.AddSingleton<Klydis.Core.RAG.IVectorEmbedder, Klydis.Core.RAG.LLamaVectorEmbedder>(sp =>
+            new Klydis.Core.RAG.LLamaVectorEmbedder(dimension: 384, logger: sp.GetService<ILogger<Klydis.Core.RAG.LLamaVectorEmbedder>>()));
+        services.AddSingleton<Klydis.Core.RAG.VectorStore>();
+        services.AddSingleton<Klydis.Core.RAG.DocumentIngestionEngine>();
+        services.AddSingleton<Klydis.Core.RAG.HybridRetriever>();
+
+        services.AddSingleton<ToolExecutor>(sp => new ToolExecutor(
+            sp.GetRequiredService<ILogger<ToolExecutor>>(),
+            sp.GetRequiredService<MessageStore>(),
+            sp.GetRequiredService<ContextOrchestrator>(),
+            sp.GetService<ModelMessageQueue>(),
+            sp.GetService<Klydis.Core.Skills.SkillLibraryManager>(),
+            sp.GetService<Klydis.Core.Chat.StealthBrowserService>(),
+            sp.GetService<Klydis.Core.RAG.VectorStore>(),
+            sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
+            sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>()
+        ));
+        services.AddSingleton<ChatEngine>(sp =>
+        {
+            var engine = new ChatEngine(
+                sp.GetRequiredService<Klydis.Core.Chat.IInferenceEngine>(),
+                sp.GetRequiredService<PromptTemplateEngine>(),
+                sp.GetRequiredService<ToolExecutor>(),
+                sp.GetRequiredService<MessageStore>(),
+                sp.GetRequiredService<ContextOrchestrator>(),
+                sp.GetRequiredService<ILogger<ChatEngine>>(),
+                sp.GetService<ModelMessageQueue>(),
+                sp.GetService<Klydis.Core.RAG.VectorStore>()
+            );
+            var themeService = sp.GetService<ThemeService>();
+            if (themeService != null)
+            {
+                engine.SelectedPersonality = themeService.SelectedPersonality;
+            }
+            return engine;
+        });
+        services.AddSingleton<PromptTemplateEngine>();
 
         // ViewModels
         services.AddTransient<MainViewModel>();
@@ -144,9 +185,11 @@ public partial class App : Application
         services.AddTransient<SkillLibraryViewModel>();
         services.AddTransient<SystemMonitorViewModel>();
         services.AddTransient<SettingsViewModel>();
+        services.AddTransient<RagViewModel>();
         
         // Views
         services.AddTransient<MainWindow>();
+        services.AddTransient<Klydis.App.Views.RagView>();
     }
 
     protected override async void OnExit(ExitEventArgs e)

@@ -24,6 +24,7 @@
             <converters:InverseBoolToVisConverter x:Key="InverseBoolToVisConverter" />
             <converters:BoolToVisConverter x:Key="BooleanToVisibilityConverter" />
             <converters:InverseBoolToVisConverter x:Key="InverseBooleanToVisibilityConverter" />
+            <converters:InverseBooleanConverter x:Key="InverseBooleanConverter" />
             
             <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
                 <Setter Property="Width" Value="7"/>
@@ -47,8 +48,14 @@
             <DataTemplate DataType="{x:Type viewmodels:ModelLibraryViewModel}">
                 <views:ModelLibraryView />
             </DataTemplate>
+            <DataTemplate DataType="{x:Type viewmodels:SkillLibraryViewModel}">
+                <views:SkillsView />
+            </DataTemplate>
             <DataTemplate DataType="{x:Type viewmodels:SystemMonitorViewModel}">
                 <views:SystemMonitorView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type viewmodels:RagViewModel}">
+                <views:RagView />
             </DataTemplate>
             <DataTemplate DataType="{x:Type viewmodels:SettingsViewModel}">
                 <views:SettingsView />

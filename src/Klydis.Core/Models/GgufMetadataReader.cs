@@ -16,7 +16,11 @@ public record GgufMetadata(
     long? HeadCount,
     long? HeadCountKv,
     long? VocabSize,
-    string? QuantizationType
+    string? QuantizationType,
+    string? RawChatTemplate = null,
+    string? FineTuneName = null,
+    string? ModelName = null,
+    string? PreTokenizer = null
 );
 
 /// <summary>
@@ -116,6 +120,11 @@ public static class GgufMetadataReader
             quantizationType = $"v{Convert.ToUInt32(qv)}";
         }
 
+        string? rawChatTemplate = rawKvs.TryGetValue("tokenizer.chat_template", out var ctVal) && ctVal is string ctStr ? ctStr : null;
+        string? fineTuneName = rawKvs.TryGetValue("general.finetune", out var ftValName) && ftValName is string ftStr ? ftStr : null;
+        string? modelName = rawKvs.TryGetValue("general.name", out var nameVal) && nameVal is string nStr ? nStr : null;
+        string? preTokenizer = rawKvs.TryGetValue("tokenizer.ggml.pre", out var preVal) && preVal is string preStr ? preStr : null;
+
         long? blockCount = GetLongValue(rawKvs, architecture, "block_count");
         long? contextLength = GetLongValue(rawKvs, architecture, "context_length");
         long? embeddingLength = GetLongValue(rawKvs, architecture, "embedding_length");
@@ -131,7 +140,11 @@ public static class GgufMetadataReader
             HeadCount: headCount,
             HeadCountKv: headCountKv,
             VocabSize: vocabSize,
-            QuantizationType: quantizationType
+            QuantizationType: quantizationType,
+            RawChatTemplate: rawChatTemplate,
+            FineTuneName: fineTuneName,
+            ModelName: modelName,
+            PreTokenizer: preTokenizer
         );
     }
 

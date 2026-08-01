@@ -73,9 +73,11 @@ namespace Klydis.Core.Memory
         }
 
         public ObsidianVaultManager? VaultManager { get; set; }
+        public Klydis.Core.RAG.HybridRetriever? HybridRetriever { get; set; }
+        public Klydis.Core.RAG.VectorStore? VectorStore { get; set; }
 
         /// <summary>
-        /// Assembles the final prompt string for the LLM inference using 3-tiered memory partitioning.
+        /// Assembles the final prompt string for the LLM inference using 3-tiered memory partitioning and RAG.
         /// </summary>
         public async Task<string> BuildPromptAsync(string sessionId, string lastUserMessage, int maxTokenBudget)
         {
@@ -107,7 +109,27 @@ namespace Klydis.Core.Memory
                 }
             }
 
-            int baseTokens = EstimateTokens(lastUserMessage) + sysPromptTokens + 100; // Extra budget for system prompt, world state, vault memory, and formatting overhead
+            // Retrieve Local Workspace Vector RAG context if available
+            string ragContextBlock = string.Empty;
+            if (HybridRetriever != null)
+            {
+                try
+                {
+                    var ragResults = await HybridRetriever.SearchAsync(lastUserMessage, topK: 3);
+                    if (ragResults.Count > 0)
+                    {
+                        var snippets = ragResults.Select(r => $"--- Document: {r.Chunk.FileTitle} (Score: {r.RrfScore:F3}) ---\n{r.Chunk.Content}");
+                        ragContextBlock = string.Join("\n\n", snippets);
+                        sysPromptTokens += EstimateTokens(ragContextBlock) + 40;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to retrieve RAG workspace context during prompt build.");
+                }
+            }
+
+            int baseTokens = EstimateTokens(lastUserMessage) + sysPromptTokens + 100; // Extra budget for system prompt, world state, memory, RAG, and formatting overhead
             var (activeWindow, _) = PartitionContext(messages, Math.Max(maxTokenBudget - baseTokens, 512));
 
             var promptBuilder = new StringBuilder();
@@ -125,6 +147,11 @@ namespace Klydis.Core.Memory
             if (!string.IsNullOrWhiteSpace(vaultMemoryBlock))
             {
                 promptBuilder.AppendLine($"<retrieved_memory_vault>\n{vaultMemoryBlock}\n</retrieved_memory_vault>\n");
+            }
+
+            if (!string.IsNullOrWhiteSpace(ragContextBlock))
+            {
+                promptBuilder.AppendLine($"<retrieved_workspace_context>\n{ragContextBlock}\n</retrieved_workspace_context>\n");
             }
 
             foreach (var msg in activeWindow)
@@ -224,6 +251,25 @@ namespace Klydis.Core.Memory
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
 
+            // RAGged Memory Indexing: Index summarized memory chunk into VectorStore for on-demand RAG retrieval
+            if (VectorStore != null && !string.IsNullOrWhiteSpace(summaryText))
+            {
+                try
+                {
+                    await VectorStore.InitializeAsync();
+                    var collection = await VectorStore.AddOrUpdateCollectionAsync($"SessionMemory_{sessionId}", sessionId, "LLamaEmbedder-Local", 384, "Session memory collection");
+                    var chunkRecord = new Klydis.Core.RAG.VectorChunkRecord(
+                        0, collection.Id, archivePath, $"Memory Chunk ({DateTime.UtcNow:yyyy-MM-dd HH:mm})", 0, summaryText, EstimateTokens(summaryText), new float[384], Guid.NewGuid().ToString("N"), DateTime.UtcNow
+                    );
+                    await VectorStore.UpsertChunksAsync(collection.Id, new List<Klydis.Core.RAG.VectorChunkRecord> { chunkRecord });
+                    _logger.LogInformation("Indexed memory summary chunk into RAG VectorStore collection '{ColId}'", collection.Id);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to index memory summary chunk into RAG VectorStore.");
+                }
+            }
+
             // Update in-memory history
             history.Clear();
             if (initialMsg != null)
@@ -271,6 +317,65 @@ namespace Klydis.Core.Memory
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
             await _store.MarkMessagesAsConsolidatedAsync(overflow.Select(m => m.Id));
+        }
+
+        /// <summary>
+        /// Partitions large input payloads into sub-chunks (<= 16k tokens), summarizes each chunk, and synthesizes a consolidated context summary for long-horizon tasks.
+        /// </summary>
+        public async Task<string> ChunkAndSummarizeLargeInputAsync(string rawInput, int maxChunkSizeTokens = 16384)
+        {
+            if (string.IsNullOrWhiteSpace(rawInput)) return string.Empty;
+
+            int totalTokens = EstimateTokens(rawInput);
+            if (totalTokens <= maxChunkSizeTokens) return rawInput;
+
+            _logger.LogInformation("Large input detected ({Tokens} tokens). Partitioning into sub-chunks of {MaxChunk} tokens for multi-pass summarization.", totalTokens, maxChunkSizeTokens);
+
+            var lines = rawInput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            var chunks = new List<string>();
+            var currentChunk = new StringBuilder();
+            int currentTokens = 0;
+
+            foreach (var line in lines)
+            {
+                int lineTokens = EstimateTokens(line) + 1;
+                if (currentTokens + lineTokens > maxChunkSizeTokens && currentChunk.Length > 0)
+                {
+                    chunks.Add(currentChunk.ToString());
+                    currentChunk.Clear();
+                    currentTokens = 0;
+                }
+                currentChunk.AppendLine(line);
+                currentTokens += lineTokens;
+            }
+            if (currentChunk.Length > 0)
+            {
+                chunks.Add(currentChunk.ToString());
+            }
+
+            _logger.LogInformation("Partitioned large input into {ChunkCount} sub-chunks.", chunks.Count);
+
+            var chunkSummaries = new List<string>();
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                var chunkText = chunks[i];
+                string summary;
+                if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
+                {
+                    var prompt = $"Please summarize the following text excerpt (Chunk {i + 1} of {chunks.Count}) focusing on key facts, technical requirements, and instructions:\n\n{chunkText}\n\nConcise Summary:";
+                    summary = await _inferenceEngine.GenerateTextAsync(prompt, isIsolated: true, maxTokens: 512);
+                }
+                else
+                {
+                    var excerptLines = chunkText.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries).Take(10);
+                    summary = string.Join("\n", excerptLines);
+                }
+
+                chunkSummaries.Add($"--- Chunk {i + 1}/{chunks.Count} Summary ---\n{summary.Trim()}");
+            }
+
+            var finalSummary = string.Join("\n\n", chunkSummaries);
+            return $"[Large Input Multi-Pass Summarized Context ({chunks.Count} chunks, original ~{totalTokens} tokens)]:\n\n{finalSummary}";
         }
 
         /// <summary>

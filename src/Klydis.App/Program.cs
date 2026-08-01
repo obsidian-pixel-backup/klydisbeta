@@ -10,9 +10,8 @@ public class Program
     [STAThread]
     public static void Main()
     {
-        // Enable high-speed GGML CUDA Tensor Core decoding kernels and universal FlashAttention
+        // Configure process environment
         Environment.SetEnvironmentVariable("GGML_CUDA_FORCE_CUBLAS", "1");
-        Environment.SetEnvironmentVariable("GGML_CUDA_FA_ALL_QUANTS", "1");
         Environment.SetEnvironmentVariable("GGML_CUDA_DMMV_F16", "1");
 
         // Force LLamaSharp to load the CUDA backend globally before ANY native calls are made.
@@ -21,17 +20,25 @@ public class Program
 
         try
         {
-            // Configure process PATH to include CUDA toolkit bin directories.
-            // The ggml-cuda.dll needs CUDA runtime DLLs (cublas64_XX.dll, cublasLt64_XX.dll, cudart64_XX.dll)
-            // which are located in the CUDA toolkit installation. We scan for all installed versions
-            // and add them to PATH so the DLL loader can find them.
-            var cudaBasePath = @"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA";
+            // Configure process PATH to include CUDA toolkit bin directories dynamically.
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+
+            var envCudaPath = Environment.GetEnvironmentVariable("CUDA_PATH");
+            var cudaBasePath = !string.IsNullOrWhiteSpace(envCudaPath) && Directory.Exists(envCudaPath) 
+                ? envCudaPath 
+                : Path.Combine(programFiles, "NVIDIA GPU Computing Toolkit", "CUDA");
+
             if (Directory.Exists(cudaBasePath))
             {
                 var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
                 var pathParts = pathEnv.Split(Path.PathSeparator).ToList();
                 
-                foreach (var versionDir in Directory.GetDirectories(cudaBasePath))
+                var searchDirs = Directory.Exists(Path.Combine(cudaBasePath, "bin")) 
+                    ? new[] { cudaBasePath } 
+                    : Directory.GetDirectories(cudaBasePath);
+
+                foreach (var versionDir in searchDirs)
                 {
                     // Check both bin/ and bin/x64/ — CUDA 13+ uses bin/x64/
                     var binX64 = Path.Combine(versionDir, "bin", "x64");
@@ -51,7 +58,7 @@ public class Program
             }
             
             // Also check NVIDIA G-Assist / NVIDIA App path for CUDA 12 runtime DLLs
-            var nvidiaGAssistPath = @"C:\ProgramData\NVIDIA Corporation\NVIDIA App\G-Assist";
+            var nvidiaGAssistPath = Path.Combine(programData, "NVIDIA Corporation", "NVIDIA App", "G-Assist");
             if (Directory.Exists(nvidiaGAssistPath))
             {
                 var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
@@ -74,7 +81,7 @@ public class Program
             }
             
             // Also check the legacy NVIDIA CEF path (older NVIDIA App installs)
-            var nvidiaCefPath = @"C:\Program Files\NVIDIA Corporation\NVIDIA app\CEF";
+            var nvidiaCefPath = Path.Combine(programFiles, "NVIDIA Corporation", "NVIDIA app", "CEF");
             if (Directory.Exists(nvidiaCefPath))
             {
                 var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
@@ -84,124 +91,64 @@ public class Program
                 }
             }
 
-            // Copy the active backend's DLLs directly to the application execution root folder.
-            // In llama.cpp (b1000+), dynamic backend libraries (like ggml-cuda.dll, ggml-cpu-*.dll)
-            // MUST reside in the same folder as llama.dll / the main executable to be loaded successfully.
+            // Sync updated native llama.dll binaries from %USERPROFILE%\.klydis\native\ if present.
             try
             {
-                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                var nativeDir = Path.Combine(baseDir, "runtimes", "win-x64", "native");
-                
-                // Determine CUDA support
-                var system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
-                bool isCudaSupported = File.Exists(Path.Combine(system32, "nvcuda.dll"));
-                
-                string sourceSubFolder = "avx2";
-                if (isCudaSupported)
-                {
-                    if (Directory.Exists(Path.Combine(nativeDir, "cuda13")))
-                        sourceSubFolder = "cuda13";
-                    else if (Directory.Exists(Path.Combine(nativeDir, "cuda12")))
-                        sourceSubFolder = "cuda12";
-                    else if (Directory.Exists(Path.Combine(nativeDir, "cuda11")))
-                        sourceSubFolder = "cuda11";
-                }
-                
-                var sourcePath = Path.Combine(nativeDir, sourceSubFolder);
-                
-                if (Directory.Exists(sourcePath))
-                {
-                    var sourceFiles = Directory.GetFiles(sourcePath);
-                    bool needsRootCopy = false;
-                    foreach (var srcFile in sourceFiles)
-                    {
-                        var fileName = Path.GetFileName(srcFile);
-                        var destFile = Path.Combine(baseDir, fileName);
-                        if (!File.Exists(destFile) || new FileInfo(destFile).Length != new FileInfo(srcFile).Length)
-                        {
-                            needsRootCopy = true;
-                            break;
-                        }
-                    }
+                Klydis.Core.Inference.NativeEngineManager.EnsureDirectoriesExist();
 
-                    if (needsRootCopy)
+                if (Klydis.Core.Inference.NativeEngineManager.HasCustomNativeEngine())
+                {
+                    int customCopied = Klydis.Core.Inference.NativeEngineManager.SyncCustomNativeEngine();
+                    try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Synced {customCopied} updated native DLLs from .klydis\\native\\ to root and runtime folders.{Environment.NewLine}"); } catch {}
+                }
+                else
+                {
+                    // Fallback to bundled runtimes if offline and no custom engine exists
+                    var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                    var nativeDir = Path.Combine(baseDir, "runtimes", "win-x64", "native");
+                    
+                    var system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
+                    bool isCudaSupported = File.Exists(Path.Combine(system32, "nvcuda.dll"));
+                    
+                    string sourceSubFolder = "avx2";
+                    if (isCudaSupported)
                     {
-                        try { File.AppendAllText("llama_native.log", $"[ROOT_COPY] Deploying self-contained backend from {sourceSubFolder} to app root...{Environment.NewLine}"); } catch {}
-                        int copiedCount = 0;
-                        foreach (var file in sourceFiles)
+                        if (Directory.Exists(Path.Combine(nativeDir, "cuda13")))
+                            sourceSubFolder = "cuda13";
+                        else if (Directory.Exists(Path.Combine(nativeDir, "cuda12")))
+                            sourceSubFolder = "cuda12";
+                        else if (Directory.Exists(Path.Combine(nativeDir, "cuda11")))
+                            sourceSubFolder = "cuda11";
+                    }
+                    
+                    var sourcePath = Path.Combine(nativeDir, sourceSubFolder);
+                    if (Directory.Exists(sourcePath))
+                    {
+                        foreach (var file in Directory.GetFiles(sourcePath))
                         {
                             var fileName = Path.GetFileName(file);
                             var destFile = Path.Combine(baseDir, fileName);
                             try
                             {
-                                File.Copy(file, destFile, true);
-                                copiedCount++;
+                                if (!File.Exists(destFile))
+                                {
+                                    File.Copy(file, destFile, true);
+                                }
                             }
-                            catch (Exception copyEx)
-                            {
-                                // If file is locked/in-use, ignore as it means it's already loaded and working
-                                try { File.AppendAllText("llama_native.log", $"[ROOT_COPY] Note: could not copy {fileName} ({copyEx.Message}){Environment.NewLine}"); } catch {}
-                            }
+                            catch { }
                         }
-                        try { File.AppendAllText("llama_native.log", $"[ROOT_COPY] Done. Copied {copiedCount} files to app root.{Environment.NewLine}"); } catch {}
-                    }
-                    else
-                    {
-                        try { File.AppendAllText("llama_native.log", $"[ROOT_COPY] Root files already complete. Skipping copy.{Environment.NewLine}"); } catch {}
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception nativeEx)
             {
-                try { File.AppendAllText("llama_native.log", $"[ROOT_COPY] FATAL: Failed root copy: {ex}{Environment.NewLine}"); } catch {}
-            }
-
-            // Sync any custom/updated native engine binaries from %USERPROFILE%\.klydis\native\ AFTER default runtime copy
-            // so that user-provided llama.dll or backend updates override default bundled runtimes.
-            try
-            {
-                Klydis.Core.Inference.NativeEngineManager.EnsureDirectoriesExist();
-                int customCopied = Klydis.Core.Inference.NativeEngineManager.SyncCustomNativeEngine();
-                if (customCopied > 0)
-                {
-                    try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Synced {customCopied} updated native DLLs from .klydis\\native\\ to root.{Environment.NewLine}"); } catch {}
-                }
-            }
-            catch (Exception customEx)
-            {
-                try { File.AppendAllText("llama_native.log", $"[CUSTOM_NATIVE] Error syncing custom native engine: {customEx.Message}{Environment.NewLine}"); } catch {}
-            }
-
-            // If no custom native engine exists yet, proactively download the latest llama.cpp
-            // release to ensure maximum model architecture compatibility. This is a one-time
-            // download (~50-100MB) that happens before the native library is loaded into memory.
-            // Subsequent startups skip this because the files already exist.
-            if (!Klydis.Core.Inference.NativeEngineManager.HasCustomNativeEngine())
-            {
-                try
-                {
-                    try { File.AppendAllText("llama_native.log", $"[STARTUP] No custom native engine found. Downloading latest llama.cpp release for maximum model compatibility...{Environment.NewLine}"); } catch {}
-                    bool downloaded = Klydis.Core.Inference.NativeEngineManager.DownloadLatestNativeEngineAsync().GetAwaiter().GetResult();
-                    if (downloaded)
-                    {
-                        try { File.AppendAllText("llama_native.log", $"[STARTUP] Latest native engine downloaded and deployed successfully.{Environment.NewLine}"); } catch {}
-                    }
-                    else
-                    {
-                        try { File.AppendAllText("llama_native.log", $"[STARTUP] Native engine download returned no files (no internet?). Using bundled engine.{Environment.NewLine}"); } catch {}
-                    }
-                }
-                catch (Exception dlEx)
-                {
-                    try { File.AppendAllText("llama_native.log", $"[STARTUP] Failed to download latest native engine: {dlEx.Message}. Using bundled engine.{Environment.NewLine}"); } catch {}
-                }
+                try { File.AppendAllText("llama_native.log", $"[NATIVE_SYNC] Error in native engine sync: {nativeEx.Message}{Environment.NewLine}"); } catch {}
             }
             
             // Configure LLamaSharp backend library preferences before anything else.
             // Prefer CUDA first, then Vulkan as fallback for non-NVIDIA GPUs.
             NativeLibraryConfig.All
                 .WithCuda()
-                .WithVulkan()
                 .WithLogCallback((level, message) => {
                     try
                     {

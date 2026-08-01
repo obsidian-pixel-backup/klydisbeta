@@ -101,6 +101,25 @@ public class SpeculativeDecodingService
         var gpuInfo = await _gpuProfiler.GetGpuInfoAsync();
         var systemInfo = await _systemProfiler.GetSystemInfoAsync();
 
+        var targetMetadata = GgufMetadataReader.Parse(targetModel.FilePath);
+        bool isHybridTarget = targetMetadata != null && (
+            string.Equals(targetMetadata.Architecture, "qwen35", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(targetMetadata.Architecture, "mamba", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(targetMetadata.Architecture, "rwkv", StringComparison.OrdinalIgnoreCase)
+        );
+
+        if (isHybridTarget)
+        {
+            _logger?.LogInformation("Speculative decoding using Zero-VRAM N-Gram lookup fallback for hybrid architecture target model {ModelName}.", targetModel.DisplayName);
+            return new SpeculativeResolutionResult(
+                IsEnabled: true,
+                DraftModelPath: null,
+                DraftModelDisplayName: "N-Gram Prompt Lookup",
+                IsDualStream: false,
+                StatusMessage: $"Enabled (Zero-VRAM N-Gram Fallback). Accelerating {targetModel.DisplayName} via prompt sequence lookup.",
+                DraftOffloadPlan: null);
+        }
+
         // A valid draft model MUST be strictly smaller than the target model
         // AND must be lightweight (<= 2.0 GB) so it doesn't steal VRAM from the main model.
         const long MaxDraftModelSizeBytes = 2L * 1024 * 1024 * 1024; // 2.0 GB
@@ -116,13 +135,14 @@ public class SpeculativeDecodingService
             if (manualCandidate != null &&
                 File.Exists(manualCandidate.FilePath) &&
                 !manualCandidate.FilePath.Equals(targetModelPath, StringComparison.OrdinalIgnoreCase) &&
-                manualCandidate.FileSizeBytes < targetModel.FileSizeBytes)
+                manualCandidate.FileSizeBytes < targetModel.FileSizeBytes &&
+                !IsUnsupportedPreTokenizer(manualCandidate.FilePath))
             {
                 selectedDraftModel = manualCandidate;
             }
             else
             {
-                _logger?.LogWarning("Manually selected draft model path '{SelectedPath}' is invalid or larger than target model. Falling back to auto selection.", selectedDraftModelPath);
+                _logger?.LogWarning("Manually selected draft model path '{SelectedPath}' is invalid, larger than target model, or uses an unsupported pre-tokenizer. Falling back to auto selection.", selectedDraftModelPath);
             }
         }
 
@@ -132,6 +152,7 @@ public class SpeculativeDecodingService
                 .Where(m => !m.FilePath.Equals(targetModelPath, StringComparison.OrdinalIgnoreCase))
                 .Where(m => m.FileSizeBytes < targetModel.FileSizeBytes)
                 .Where(m => m.FileSizeBytes <= MaxDraftModelSizeBytes)
+                .Where(m => !IsUnsupportedPreTokenizer(m.FilePath))
                 .OrderByDescending(m => Is4BitQuant(m.QuantizationType, m.FilePath))
                 .ThenBy(m => m.FileSizeBytes)
                 .ToList();
@@ -145,8 +166,6 @@ public class SpeculativeDecodingService
         // Case A: Valid lightweight draft model available
         if (selectedDraftModel != null)
         {
-            // Calculate target model VRAM cost at native context
-            var targetMetadata = GgufMetadataReader.Parse(targetModel.FilePath);
             int targetTotalLayers = targetMetadata?.BlockCount.HasValue == true && targetMetadata.BlockCount.Value > 0 
                 ? (int)targetMetadata.BlockCount.Value : 32;
             long targetLayerSizeBytes = targetModel.FileSizeBytes / targetTotalLayers;
@@ -236,5 +255,19 @@ public class SpeculativeDecodingService
                text.Contains("4_K", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("4_0", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("IQ4", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsUnsupportedPreTokenizer(string filePath)
+    {
+        try
+        {
+            var metadata = GgufMetadataReader.Parse(filePath);
+            if (metadata?.PreTokenizer != null && metadata.PreTokenizer.Equals("minicpm5", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        catch { }
+        return false;
     }
 }

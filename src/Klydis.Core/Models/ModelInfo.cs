@@ -42,5 +42,8 @@ public record ModelInfo(
     DateTime InstalledAt,
     DateTime LastUsedAt,
     string? ChecksumSha256,
-    string? Role = null
+    string? Role = null,
+    string? RawChatTemplate = null,
+    string? DetectedChatTemplate = null,
+    string? ChatTemplateOverride = null
 );

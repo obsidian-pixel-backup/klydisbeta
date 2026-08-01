@@ -1,5 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace Klydis.Core.Inference;
@@ -40,11 +45,12 @@ public static class NativeEngineManager
     }
 
     /// <summary>
-    /// Deploys custom native binaries from %USERPROFILE%\.klydis\native\ to the target application directory if available.
+    /// Deploys custom native binaries from %USERPROFILE%\.klydis\native\ to the target application directory
+    /// and all runtime subfolders if available.
     /// </summary>
     /// <param name="targetDirectory">Target directory (defaults to AppDomain BaseDirectory).</param>
     /// <param name="logger">Optional logger for telemetry.</param>
-    /// <returns>Number of native DLL files copied to the execution root.</returns>
+    /// <returns>Number of native DLL files copied.</returns>
     public static int SyncCustomNativeEngine(string? targetDirectory = null, ILogger? logger = null)
     {
         targetDirectory ??= AppDomain.CurrentDomain.BaseDirectory;
@@ -60,26 +66,40 @@ public static class NativeEngineManager
 
             logger?.LogInformation("Deploying custom in-process native engine from {CustomNativeDirectory} to {TargetDirectory}", CustomNativeDirectory, targetDirectory);
 
-            foreach (var file in Directory.GetFiles(CustomNativeDirectory, "*.*", SearchOption.TopDirectoryOnly))
+            var targets = new List<string> { targetDirectory };
+            var runtimeDir = Path.Combine(targetDirectory, "runtimes", "win-x64", "native");
+            if (Directory.Exists(runtimeDir))
             {
-                var fileName = Path.GetFileName(file);
-                var destPath = Path.Combine(targetDirectory, fileName);
-
-                try
+                targets.Add(runtimeDir);
+                foreach (var subDir in Directory.GetDirectories(runtimeDir))
                 {
-                    var srcInfo = new FileInfo(file);
-                    var destInfo = File.Exists(destPath) ? new FileInfo(destPath) : null;
-
-                    if (destInfo == null || destInfo.Length != srcInfo.Length || destInfo.LastWriteTimeUtc < srcInfo.LastWriteTimeUtc)
-                    {
-                        File.Copy(file, destPath, overwrite: true);
-                        copiedCount++;
-                        logger?.LogInformation("Copied custom native binary: {FileName}", fileName);
-                    }
+                    targets.Add(subDir);
                 }
-                catch (Exception ex)
+            }
+
+            foreach (var target in targets)
+            {
+                foreach (var file in Directory.GetFiles(CustomNativeDirectory, "*.*", SearchOption.TopDirectoryOnly))
                 {
-                    logger?.LogWarning(ex, "Could not overwrite native file {FileName} (file may already be loaded in memory)", fileName);
+                    var fileName = Path.GetFileName(file);
+                    var destPath = Path.Combine(target, fileName);
+
+                    try
+                    {
+                        var srcInfo = new FileInfo(file);
+                        var destInfo = File.Exists(destPath) ? new FileInfo(destPath) : null;
+
+                        if (destInfo == null || destInfo.Length != srcInfo.Length || destInfo.LastWriteTimeUtc < srcInfo.LastWriteTimeUtc)
+                        {
+                            File.Copy(file, destPath, overwrite: true);
+                            copiedCount++;
+                            logger?.LogInformation("Copied custom native binary: {FileName} to {Target}", fileName, target);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger?.LogWarning(ex, "Could not overwrite native file {FileName} in {Target} (file may already be loaded in memory)", fileName, target);
+                    }
                 }
             }
         }
@@ -110,57 +130,189 @@ public static class NativeEngineManager
     }
 
     /// <summary>
-    /// Downloads and extracts an updated native llama.dll build into %USERPROFILE%\.klydis\native\.
+    /// Resolves direct release asset download URLs dynamically from GitHub API or release redirects.
     /// </summary>
-    /// <param name="downloadUrl">Optional custom download URL for zip package containing llama.dll.</param>
-    /// <param name="logger">Optional logger for telemetry.</param>
-    /// <returns>True if downloaded and deployed successfully.</returns>
-    public static async System.Threading.Tasks.Task<bool> DownloadLatestNativeEngineAsync(string? downloadUrl = null, ILogger? logger = null)
+    private static async Task<List<string>> ResolveLatestReleaseDownloadUrlsAsync(HttpClient httpClient, ILogger? logger)
     {
-        EnsureDirectoriesExist();
-
-        downloadUrl ??= "https://github.com/ggerganov/llama.cpp/releases/latest/download/llama-bin-win-vulkan-x64.zip";
-
+        var urls = new List<string>();
         try
         {
-            logger?.LogInformation("Downloading updated native engine package from {Url}", downloadUrl);
-
-            using var httpClient = new System.Net.Http.HttpClient();
-            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Klydis/1.0");
-
-            var tempZipPath = Path.Combine(Path.GetTempPath(), $"llama_native_{Guid.NewGuid():N}.zip");
-            var zipBytes = await httpClient.GetByteArrayAsync(downloadUrl);
-            await File.WriteAllBytesAsync(tempZipPath, zipBytes);
-
-            var tempExtractDir = Path.Combine(Path.GetTempPath(), $"llama_extracted_{Guid.NewGuid():N}");
-            Directory.CreateDirectory(tempExtractDir);
-            System.IO.Compression.ZipFile.ExtractToDirectory(tempZipPath, tempExtractDir);
-
-            int copied = 0;
-            foreach (var file in Directory.GetFiles(tempExtractDir, "*.*", SearchOption.AllDirectories))
+        var customReposEnv = Environment.GetEnvironmentVariable("LLAMA_CPP_GITHUB_REPOS");
+        string[] repos = !string.IsNullOrWhiteSpace(customReposEnv)
+            ? customReposEnv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : new[]
             {
-                var ext = Path.GetExtension(file).ToLowerInvariant();
-                if (ext == ".dll" || ext == ".exe")
+                "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+                "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest"
+            };
+
+            foreach (var repoUrl in repos)
+            {
+                try
                 {
-                    var dest = Path.Combine(CustomNativeDirectory, Path.GetFileName(file));
-                    File.Copy(file, dest, overwrite: true);
-                    copied++;
+                    logger?.LogInformation("Querying GitHub release API at {Url}...", repoUrl);
+                    using var request = new HttpRequestMessage(HttpMethod.Get, repoUrl);
+                    
+                    var response = await httpClient.SendAsync(request);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        logger?.LogWarning("GitHub API returned HTTP {StatusCode} for {Url}", response.StatusCode, repoUrl);
+                        continue;
+                    }
+
+                    var jsonStr = await response.Content.ReadAsStringAsync();
+                    using var doc = JsonDocument.Parse(jsonStr);
+                    if (!doc.RootElement.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
+                    {
+                        continue;
+                    }
+
+                    List<(string name, string url)> candidates = new();
+                    foreach (var asset in assets.EnumerateArray())
+                    {
+                        if (asset.TryGetProperty("name", out var nameProp) && 
+                            asset.TryGetProperty("browser_download_url", out var urlProp))
+                        {
+                            var name = nameProp.GetString() ?? "";
+                            var url = urlProp.GetString() ?? "";
+                            if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
+                                name.Contains("win", StringComparison.OrdinalIgnoreCase) &&
+                                (name.Contains("x64", StringComparison.OrdinalIgnoreCase) || name.Contains("64", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                candidates.Add((name, url));
+                            }
+                        }
+                    }
+
+                    if (candidates.Count == 0) continue;
+
+                    var system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
+                    bool hasCuda = File.Exists(Path.Combine(system32, "nvcuda.dll"));
+
+                    // Include CUDA runtime helper zip if present
+                    var cudartAsset = candidates.FirstOrDefault(a => a.name.StartsWith("cudart", StringComparison.OrdinalIgnoreCase));
+                    if (!string.IsNullOrEmpty(cudartAsset.url))
+                    {
+                        urls.Add(cudartAsset.url);
+                    }
+
+                    if (hasCuda)
+                    {
+                        var cudaAsset = candidates.FirstOrDefault(a => a.name.Contains("cuda", StringComparison.OrdinalIgnoreCase) && !a.name.StartsWith("cudart", StringComparison.OrdinalIgnoreCase));
+                        if (!string.IsNullOrEmpty(cudaAsset.url))
+                        {
+                            logger?.LogInformation("Selected CUDA release asset: {Name}", cudaAsset.name);
+                            urls.Add(cudaAsset.url);
+                            return urls;
+                        }
+                    }
+
+                    var vulkanAsset = candidates.FirstOrDefault(a => a.name.Contains("vulkan", StringComparison.OrdinalIgnoreCase));
+                    if (!string.IsNullOrEmpty(vulkanAsset.url))
+                    {
+                        logger?.LogInformation("Selected Vulkan release asset: {Name}", vulkanAsset.name);
+                        urls.Add(vulkanAsset.url);
+                        return urls;
+                    }
+
+                    var cpuAsset = candidates.FirstOrDefault(a => a.name.Contains("cpu", StringComparison.OrdinalIgnoreCase) || a.name.Contains("avx2", StringComparison.OrdinalIgnoreCase));
+                    if (!string.IsNullOrEmpty(cpuAsset.url))
+                    {
+                        logger?.LogInformation("Selected CPU release asset: {Name}", cpuAsset.name);
+                        urls.Add(cpuAsset.url);
+                        return urls;
+                    }
+
+                    var fallbackAsset = candidates.First();
+                    logger?.LogInformation("Selected fallback release asset: {Name}", fallbackAsset.name);
+                    urls.Add(fallbackAsset.url);
+                    return urls;
                 }
-            }
-
-            try { File.Delete(tempZipPath); } catch { }
-            try { Directory.Delete(tempExtractDir, recursive: true); } catch { }
-
-            if (copied > 0)
-            {
-                SyncCustomNativeEngine(logger: logger);
-                logger?.LogInformation("Successfully deployed {Count} native binaries to {Dir}", copied, CustomNativeDirectory);
-                return true;
+                catch (Exception ex)
+                {
+                    logger?.LogWarning(ex, "Failed querying GitHub release endpoint {Url}", repoUrl);
+                }
             }
         }
         catch (Exception ex)
         {
-            logger?.LogError(ex, "Failed to download native engine update from {Url}", downloadUrl);
+            logger?.LogError(ex, "Failed to resolve latest release URL from GitHub API.");
+        }
+
+        return urls;
+    }
+
+    /// <summary>
+    /// Downloads and extracts updated native llama.dll binaries into %USERPROFILE%\.klydis\native\.
+    /// </summary>
+    /// <param name="downloadUrl">Optional custom download URL for zip package containing llama.dll.</param>
+    /// <param name="logger">Optional logger for telemetry.</param>
+    /// <returns>True if downloaded and deployed successfully.</returns>
+    public static async Task<bool> DownloadLatestNativeEngineAsync(string? downloadUrl = null, ILogger? logger = null)
+    {
+        EnsureDirectoriesExist();
+
+        using var httpClient = new HttpClient();
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("KlydisApp/1.0");
+
+        List<string> urlsToDownload = new();
+        downloadUrl ??= Environment.GetEnvironmentVariable("LLAMA_CPP_RELEASE_URL");
+        if (!string.IsNullOrWhiteSpace(downloadUrl))
+        {
+            urlsToDownload.Add(downloadUrl);
+        }
+        else
+        {
+            urlsToDownload = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger);
+        }
+
+        if (urlsToDownload.Count == 0)
+        {
+            logger?.LogError("Could not resolve any valid llama.cpp release download URLs.");
+            return false;
+        }
+
+        int totalExtracted = 0;
+
+        foreach (var url in urlsToDownload)
+        {
+            try
+            {
+                logger?.LogInformation("Downloading updated native engine package from {Url}...", url);
+
+                var tempZipPath = Path.Combine(Path.GetTempPath(), $"llama_native_{Guid.NewGuid():N}.zip");
+                var zipBytes = await httpClient.GetByteArrayAsync(url);
+                await File.WriteAllBytesAsync(tempZipPath, zipBytes);
+
+                var tempExtractDir = Path.Combine(Path.GetTempPath(), $"llama_extracted_{Guid.NewGuid():N}");
+                Directory.CreateDirectory(tempExtractDir);
+                System.IO.Compression.ZipFile.ExtractToDirectory(tempZipPath, tempExtractDir);
+
+                foreach (var file in Directory.GetFiles(tempExtractDir, "*.*", SearchOption.AllDirectories))
+                {
+                    var ext = Path.GetExtension(file).ToLowerInvariant();
+                    if (ext == ".dll" || ext == ".exe")
+                    {
+                        var dest = Path.Combine(CustomNativeDirectory, Path.GetFileName(file));
+                        File.Copy(file, dest, overwrite: true);
+                        totalExtracted++;
+                    }
+                }
+
+                try { File.Delete(tempZipPath); } catch { }
+                try { Directory.Delete(tempExtractDir, recursive: true); } catch { }
+            }
+            catch (Exception ex)
+            {
+                logger?.LogError(ex, "Failed downloading or extracting package from {Url}", url);
+            }
+        }
+
+        if (totalExtracted > 0)
+        {
+            int deployed = SyncCustomNativeEngine(logger: logger);
+            logger?.LogInformation("Successfully deployed {Count} updated native binaries to {Dir}", totalExtracted, CustomNativeDirectory);
+            return true;
         }
 
         return false;

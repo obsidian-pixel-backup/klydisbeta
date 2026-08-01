@@ -18,7 +18,8 @@ public class CamoufoxManager
     private readonly HttpClient _httpClient;
     private readonly string _camoufoxDir;
 
-    private const string GitHubReleaseUrl = "https://github.com/daijro/camoufox/releases/download/v0.6.1/camoufox-win64.zip";
+    private const string DefaultGitHubReleaseUrl = "https://github.com/daijro/camoufox/releases/download/v0.6.1/camoufox-win64.zip";
+    public static string ReleaseUrl => Environment.GetEnvironmentVariable("CAMOUFOX_RELEASE_URL") ?? DefaultGitHubReleaseUrl;
 
     public CamoufoxManager(ILogger<CamoufoxManager> logger, HttpClient httpClient)
     {
@@ -83,7 +84,7 @@ public class CamoufoxManager
         var zipPath = Path.Combine(_camoufoxDir, "camoufox-download.zip");
         try
         {
-            using var response = await _httpClient.GetAsync(GitHubReleaseUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            using var response = await _httpClient.GetAsync(ReleaseUrl, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Camoufox download request returned HTTP status {StatusCode}", response.StatusCode);

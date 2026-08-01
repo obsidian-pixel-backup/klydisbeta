@@ -97,6 +97,8 @@ public class ThemeService
                     IsSpeculativeDecodingEnabled = settings.IsSpeculativeDecodingEnabled;
                     SpeculativeDraftCount = settings.SpeculativeDraftCount > 0 ? Math.Clamp(settings.SpeculativeDraftCount, 4, 32) : 24;
                     SelectedDraftModelPath = string.IsNullOrWhiteSpace(settings.SelectedDraftModelPath) ? "auto" : settings.SelectedDraftModelPath;
+                    SelectedPersonality = string.IsNullOrWhiteSpace(settings.SelectedPersonality) ? "Default" : settings.SelectedPersonality;
+                    UserContextLimit = settings.UserContextLimit;
                 }
             }
         }
@@ -160,12 +162,26 @@ public class ThemeService
     public bool IsSpeculativeDecodingEnabled { get; private set; } = true;
     public int SpeculativeDraftCount { get; private set; } = 24;
     public string SelectedDraftModelPath { get; private set; } = "auto";
+    public string SelectedPersonality { get; private set; } = "Default";
+    public int UserContextLimit { get; private set; } = 0;
 
     public void SaveSpeculativeSettings(bool enabled, int draftCount, string selectedDraftModelPath = "auto")
     {
         IsSpeculativeDecodingEnabled = enabled;
         SpeculativeDraftCount = Math.Clamp(draftCount, 4, 32);
         SelectedDraftModelPath = string.IsNullOrWhiteSpace(selectedDraftModelPath) ? "auto" : selectedDraftModelPath;
+        PersistAllSettings();
+    }
+
+    public void SavePersonalitySetting(string personality)
+    {
+        SelectedPersonality = string.IsNullOrWhiteSpace(personality) ? "Default" : personality;
+        PersistAllSettings();
+    }
+
+    public void SaveContextSizeSetting(int contextSize)
+    {
+        UserContextLimit = contextSize;
         PersistAllSettings();
     }
 
@@ -180,7 +196,9 @@ public class ThemeService
                 Accent = CurrentAccent.ToString(),
                 IsSpeculativeDecodingEnabled = IsSpeculativeDecodingEnabled,
                 SpeculativeDraftCount = SpeculativeDraftCount,
-                SelectedDraftModelPath = SelectedDraftModelPath
+                SelectedDraftModelPath = SelectedDraftModelPath,
+                SelectedPersonality = SelectedPersonality,
+                UserContextLimit = UserContextLimit
             });
             File.WriteAllText(_settingsPath, json);
         }
@@ -209,5 +227,7 @@ public class ThemeService
         public bool IsSpeculativeDecodingEnabled { get; set; } = true;
         public int SpeculativeDraftCount { get; set; } = 24;
         public string SelectedDraftModelPath { get; set; } = "auto";
+        public string SelectedPersonality { get; set; } = "Default";
+        public int UserContextLimit { get; set; } = 0;
     }
 }

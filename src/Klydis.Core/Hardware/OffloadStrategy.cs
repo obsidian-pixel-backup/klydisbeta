@@ -128,7 +128,7 @@ public class OffloadStrategy
         double totalKvCacheMb = (totalLayers * kvCachePerLayerBytes * contextLength) / 1048576.0;
         double fullModelVramCostMb = (totalLayers * layerSizeMb) + totalKvCacheMb + nonLayerWeightsMb;
 
-        int recommendedContext = contextLength;
+        int recommendedContext = Math.Max(32768, contextLength);
         int targetGpuLayers;
 
         // Check if full model fits in net available VRAM (or usable VRAM headroom)
@@ -158,8 +158,7 @@ public class OffloadStrategy
             recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, contextLength);
         }
 
-        // Pass -1 when all layers fit to offload output head directly onto GPU
-        int gpuLayersParam = (targetGpuLayers == totalLayers) ? -1 : targetGpuLayers;
+        int gpuLayersParam = targetGpuLayers;
         int finalEstimatedVram = EstimateVramUsage(targetGpuLayers, layerSizeBytes, kvCachePerLayerBytes, recommendedContext);
 
         int recommendedBatchSize = 512;
@@ -185,12 +184,15 @@ public class OffloadStrategy
 
     private int CalculateSafeContextSize(double availableMemoryMb, long kvCachePerLayerBytes, int totalLayers, int requestedContext)
     {
-        // Safe context calculation for CPU-only fallback to avoid OOM
-        long memoryForKvCacheBytes = (long)(availableMemoryMb * 1024 * 1024 * 0.5); // Reserve half for OS and model weights
+        const int MIN_CONTEXT_SIZE = 32768; // Minimum context limit must be 32k, never smaller
+
+        long memoryForKvCacheBytes = (long)(availableMemoryMb * 1024 * 1024 * 0.5); // Reserve half for OS and weights
         long kvCacheSizePerTokenBytes = totalLayers * kvCachePerLayerBytes;
         if (kvCacheSizePerTokenBytes <= 0) kvCacheSizePerTokenBytes = 1;
 
-        int maxSafeContext = (int)(memoryForKvCacheBytes / kvCacheSizePerTokenBytes);
-        return Math.Min(maxSafeContext, requestedContext);
+        int maxMemoryContext = (int)(memoryForKvCacheBytes / kvCacheSizePerTokenBytes);
+        int targetContext = Math.Max(requestedContext, MIN_CONTEXT_SIZE);
+
+        return Math.Max(MIN_CONTEXT_SIZE, Math.Min(maxMemoryContext, Math.Max(targetContext, MIN_CONTEXT_SIZE)));
     }
 }

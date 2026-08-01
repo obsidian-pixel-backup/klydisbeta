@@ -83,22 +83,11 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
 
     private void SafeOffloadDisposal(params IDisposable?[] resources)
     {
-        var disposer = NativeResourceDisposer;
-        if (disposer != null)
+        var ordered = resources.Where(r => r != null)
+                               .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
+        foreach (var r in ordered)
         {
-            disposer.EnqueueForDisposal(resources);
-        }
-        else
-        {
-            Task.Run(() =>
-            {
-                var ordered = resources.Where(r => r != null)
-                                       .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
-                foreach (var r in ordered)
-                {
-                    try { r?.Dispose(); } catch { }
-                }
-            });
+            try { r?.Dispose(); } catch { }
         }
     }
 
@@ -111,23 +100,21 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
             {
                 UnloadInternal();
 
-                _logger?.LogInformation("Loading speculative draft model from {Path} with {Layers} GPU layers...", draftPath, offloadPlan.GpuLayers);
+                _logger?.LogInformation("Loading speculative draft model from {Path}...", draftPath);
 
                 var parameters = new ModelParams(draftPath)
                 {
-                    ContextSize = (uint)offloadPlan.RecommendedContextSize,
-                    GpuLayerCount = offloadPlan.GpuLayers,
-                    BatchSize = (uint)offloadPlan.RecommendedBatchSize,
-                    UBatchSize = (uint)offloadPlan.RecommendedBatchSize,
-                    FlashAttention = true,
+                    ContextSize = (uint)Math.Min(4096, offloadPlan.RecommendedContextSize),
+                    GpuLayerCount = 0, // Keep draft model on CPU to avoid GPU VRAM/context collisions with primary model
+                    BatchSize = 256,
+                    UBatchSize = 256,
+                    FlashAttention = false,
+                    PoolingType = LLama.Native.LLamaPoolingType.Unspecified,
                     Threads = Hardware.CpuAffinityHelper.GetPCoreCount(),
                     BatchThreads = Hardware.CpuAffinityHelper.GetPCoreCount(),
                     UseMemorymap = true,
                     UseMemoryLock = false
                 };
-
-                parameters.TypeK = GGMLType.GGML_TYPE_Q4_0;
-                parameters.TypeV = GGMLType.GGML_TYPE_Q4_0;
 
                 _draftModelParams = parameters;
                 _draftWeights = LLamaWeights.LoadFromFile(parameters);
@@ -136,6 +123,11 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
                 LoadedDraftPath = draftPath;
 
                 _logger?.LogInformation("Speculative draft model loaded successfully.");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to load speculative draft model '{DraftPath}'. Unloading draft model.", draftPath);
+                UnloadInternal();
             }
             finally
             {

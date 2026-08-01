@@ -47,9 +47,21 @@ public partial class ChatMessageViewModel : ObservableObject
 
     partial void OnContentChanged(string? oldValue, string newValue)
     {
-        if (!IsStreaming)
+        Action doUpdate = () =>
         {
             RenderedContent = FormatMarkdown(newValue);
+        };
+
+        if (!IsStreaming)
+        {
+            if (System.Windows.Application.Current?.Dispatcher != null && !System.Windows.Application.Current.Dispatcher.CheckAccess())
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(doUpdate);
+            }
+            else
+            {
+                doUpdate();
+            }
             return;
         }
 
@@ -57,7 +69,14 @@ public partial class ChatMessageViewModel : ObservableObject
         if ((now - _lastRenderUpdate).TotalMilliseconds >= 50)
         {
             _lastRenderUpdate = now;
-            RenderedContent = FormatMarkdown(newValue);
+            if (System.Windows.Application.Current?.Dispatcher != null && !System.Windows.Application.Current.Dispatcher.CheckAccess())
+            {
+                System.Windows.Application.Current.Dispatcher.InvokeAsync(doUpdate);
+            }
+            else
+            {
+                doUpdate();
+            }
         }
         else if (!_renderPending)
         {
@@ -69,7 +88,17 @@ public partial class ChatMessageViewModel : ObservableObject
                 if (IsStreaming)
                 {
                     _lastRenderUpdate = DateTime.Now;
-                    RenderedContent = FormatMarkdown(Content);
+                    var textToRender = Content;
+                    Action applyRender = () => RenderedContent = FormatMarkdown(textToRender);
+
+                    if (System.Windows.Application.Current?.Dispatcher != null)
+                    {
+                        await System.Windows.Application.Current.Dispatcher.InvokeAsync(applyRender, System.Windows.Threading.DispatcherPriority.Background);
+                    }
+                    else
+                    {
+                        applyRender();
+                    }
                 }
             };
 

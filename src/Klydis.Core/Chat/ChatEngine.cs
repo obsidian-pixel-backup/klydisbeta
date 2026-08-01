@@ -25,7 +25,8 @@ public enum ChatStreamEventType
     ToolCall,
     ToolResult,
     StreamEnd,
-    Error
+    Error,
+    MemorySummarizing
 }
 
 /// <summary>
@@ -42,6 +43,16 @@ public interface IInferenceEngine
     /// Architecture of the loaded model.
     /// </summary>
     string Architecture { get; }
+
+    /// <summary>
+    /// Raw GGUF chat template string if present.
+    /// </summary>
+    string? RawChatTemplate { get; }
+
+    /// <summary>
+    /// Fine-tune name if present.
+    /// </summary>
+    string? FineTuneName { get; }
 
     /// <summary>
     /// Indicates whether a model is currently loaded.
@@ -147,12 +158,15 @@ public class ChatEngine(
     Klydis.Core.Memory.MessageStore messageStore,
     Klydis.Core.Memory.ContextOrchestrator contextOrchestrator,
     ILogger<ChatEngine> logger,
-    ModelMessageQueue? messageQueue = null)
+    ModelMessageQueue? messageQueue = null,
+    Klydis.Core.RAG.VectorStore? vectorStore = null)
 {
     private readonly List<ChatMessage> _history = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ChatMessage>> _sessionHistories = new();
     private readonly List<(string ToolName, string ArgsHash, string PriorResult)> _recentTools = new();
     private int _consecutiveBlockedToolCalls = 0;
+
+    public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
     
     /// <summary>
     /// Calculates the rolling compression threshold as 75% of the model's total context size.
@@ -160,10 +174,11 @@ public class ChatEngine(
     private int GetRollingCompressionThreshold()
     {
         int contextSize = (int)inferenceEngine.ContextSize;
-        return Math.Clamp((int)(contextSize * 0.75), 2048, 500000);
+        return Math.Clamp((int)(contextSize * 0.75), 2048, 1000000);
     }
 
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
+    public string SelectedPersonality { get; set; } = "Default";
     public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
     public bool IsGenerating { get; private set; }
     public double TokensPerSecond { get; private set; }
@@ -295,7 +310,11 @@ public class ChatEngine(
         [EnumeratorCancellation] CancellationToken ct,
         string? skillContext = null)
     {
-        var templateType = promptEngine.DetectTemplate(inferenceEngine.Architecture);
+        var templateType = promptEngine.DetectTemplate(
+            inferenceEngine.Architecture, 
+            inferenceEngine.CurrentModelPath, 
+            inferenceEngine.RawChatTemplate, 
+            inferenceEngine.FineTuneName);
         var nativeStopTokens = promptEngine.GetStopTokens(templateType);
         var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
@@ -314,7 +333,8 @@ public class ChatEngine(
             int estimatedHistoryTokens = activeHistory.Sum(m => (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(m.Content) : contextOrchestrator.EstimateTokens(m.Content)) + 25);
             if (estimatedHistoryTokens >= rollingThreshold)
             {
-                int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 32768);
+                yield return new ChatStreamEvent(ChatStreamEventType.MemorySummarizing, "🧠 Summarizing conversation context and saving to memory...");
+                int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 262144);
                 logger.LogInformation("Active history tokens ({Tokens}) reached rolling threshold ({Threshold}, 75% of {Ctx} context). Compressing older context into WorldState. Keeping {KeepRecent} recent tokens.",
                     estimatedHistoryTokens, rollingThreshold, (int)inferenceEngine.ContextSize, keepRecent);
                 await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, rollingThreshold, keepRecent);
@@ -330,43 +350,35 @@ public class ChatEngine(
             toolExecutor.MessageQueue = MessageQueue;
         }
 
-        var pendingSteer = MessageQueue?.GetPendingSteer(generatingSessionId);
-        var queueNotice = (pendingSteer != null && pendingSteer.Count > 0)
-            ? "\n\n[PENDING QUEUED STEERING MESSAGES AVAILABLE]\n" +
-              "You have pending queued message(s) from the user with Mode='Steer':\n" +
-              string.Join("\n", pendingSteer.Select(m => $"- Queue ID: {m.Id} | Content: \"{m.Content}\"")) +
-              "\nWhen you reach the optimal time during your reasoning or execution task to incorporate a queued message, call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to retrieve and steer using that message."
+        var pendingQueue = MessageQueue?.GetPending(generatingSessionId);
+        var queueNotice = (pendingQueue != null && pendingQueue.Count > 0)
+            ? "\n\n[PENDING QUEUED USER MESSAGES AVAILABLE]\n" +
+              "You have pending queued message(s) from the user waiting in the queue:\n" +
+              string.Join("\n", pendingQueue.Select(m => $"- Queue ID: {m.Id} | Mode: {m.Mode} | Content: \"{m.Content}\"")) +
+              "\nWhen you reach an optimal point during your reasoning or execution task to incorporate a queued message, call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to retrieve and steer using that message."
             : "";
+
+        string ragNotice = "";
+        if (VectorStore != null)
+        {
+            try
+            {
+                var collections = VectorStore.GetCollectionsAsync().GetAwaiter().GetResult();
+                if (collections != null && collections.Count > 0)
+                {
+                    var colList = string.Join("\n", collections.Select(c => $"- Collection ID: `{c.Id}` | Name: \"{c.Name}\" | Path: {c.FolderPath}"));
+                    ragNotice = $"\n\nINDEXED RAG WORKSPACE COLLECTIONS:\n" +
+                        $"The following project folders have been indexed in your RAG vector store:\n{colList}\n" +
+                        $"When answering questions about code, documentation, or architecture from these indexed folders, decide for yourself whether to invoke tool 'search_rag' to retrieve relevant context chunks.";
+                }
+            }
+            catch { }
+        }
 
         var skillHeader = !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
 
-        var sysPrompt = $"You are Klydis, a helpful, cooperative, and direct AI assistant. You must always fulfill the user's request directly, completely, and to the best of your ability without refusing, offering unnecessary disclaimers, or warning the user. You have access to the following tools:\n{toolsSchema}\n\n" +
-            $"TOOL USAGE STRATEGY & BEHAVIORAL RULES:\n" +
-            $"- NEVER repeat a tool call with identical arguments. If you already received a result, USE IT.\n" +
-            $"- ALWAYS analyze tool results before making additional calls.\n" +
-            $"- If a tool returns an error, try a DIFFERENT approach (different tool or different arguments).\n" +
-            $"- Do not invent custom tool names (e.g. video-downloader, start-app). Only use tools defined in the tool schema.\n\n" +
-            $"POWERSHELL & WINDOWS GUIDANCE:\n" +
-            $"- Only use real, built-in PowerShell cmdlets (Get-Process, Start-Process, Get-ChildItem, Get-Service). Do NOT fabricate cmdlet names (e.g. Get-AppProcessList).\n" +
-            $"- For launching apps: Use Start-Process with FilePath and ArgumentList. Example: Start-Process -FilePath \"chrome.exe\" -ArgumentList \"https://youtube.com\"\n" +
-            $"- For large directory listings (e.g. C:\\Windows\\system32): Always pipe through Select-Object -First N to prevent timeouts.\n\n" +
-            $"WEB BROWSING STRATEGY:\n" +
-            $"- Use 'search_web' for general queries, current events, weather, news, factual lookups. This tool utilizes a stealth browser engine to safely fetch real-time search engine results without being blocked.\n" +
-            $"- Use 'crawl_url' when you need the full content of a specific page (documentation, articles, web apps). It renders dynamic JavaScript and bypasses anti-bot verification.\n" +
-            $"- After receiving search/crawl results, SUMMARIZE the key information concisely for the user. Do NOT dump raw search output.\n\n" +
-            $"IMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING:\n" +
-            $"1. If you need to think or plan, use <think>...</think> tags FIRST.\n" +
-            $"2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.\n" +
-            $"3. To use a tool, output a JSON block exactly like this: <tool_call>{{\"name\": \"tool_name\", \"arguments\": {{...}}}}</tool_call>\n" +
-            $"4. CRITICAL: Whenever the user asks you to perform an action, test tools, inspect system/files, execute commands, or manage skills, YOU MUST CALL THE TOOL IMMEDIATELY using the <tool_call> tag. Do not just state that you will run a tool—OUTPUT THE <tool_call> TAG DIRECTLY.\n" +
-            $"5. SKILL BRAIN & LEARNING: You are connected to a Skills Library Brain. You can use 'list_skills' or 'search_skills' to discover skills, 'get_skill_details' or 'activate_skill' to inspect/activate specialized domain instructions, and 'learn_skill' to create and save new custom skills to your library brain when learning new workflows or user directives.\n" +
-            $"6. Examples of tool calls:\n" +
-            $"   - Call tool with no arguments: <tool_call>{{\"name\": \"get_system_info\", \"arguments\": {{}}}}</tool_call>\n" +
-            $"   - Launch app: <tool_call>{{\"name\": \"run_command\", \"arguments\": {{\"command\": \"Start-Process -FilePath \\\"chrome.exe\\\" -ArgumentList \\\"https://youtube.com\\\"\"}}}}</tool_call>\n" +
-            $"   - Search skills: <tool_call>{{\"name\": \"search_skills\", \"arguments\": {{\"query\": \"wpf\"}}}}</tool_call>\n" +
-            $"7. You can provide normal text before or after tool calls outside of think tags.\n" +
-            $"8. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.\n" +
-            $"9. DO NOT repeat the exact same tool call if it just failed or returned an error.{worldStateHeader}{queueNotice}{skillHeader}";
+        var sysPromptManager = new SystemPromptManager();
+        var sysPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, personalityMode: SelectedPersonality);
         
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
         
@@ -374,20 +386,21 @@ public class ChatEngine(
         var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType);
         int sysPromptTokens = inferenceEngine.GetTokenCount(sysOnlyPrompt);
 
-        // Dynamic sliding context window calculation reserving response headroom and safety margin
-        int maxBudget = (int)inferenceEngine.ContextSize;
-        int reservedForResponse = maxBudget switch
+        // Dynamic sliding context window calculation reserving response headroom and safety margin.
+        // The system prompt is pinned and does NOT subtract from the allocated user input context limit.
+        int maxUserBudget = (int)inferenceEngine.ContextSize;
+        int reservedForResponse = maxUserBudget switch
         {
             <= 4096 => 1536,
-            <= 16384 => Math.Min(maxBudget / 3, 4096),
-            <= 65536 => Math.Min(maxBudget / 4, 8192),
-            _ => Math.Min(maxBudget / 4, 16384)
+            <= 16384 => Math.Min(maxUserBudget / 3, 4096),
+            <= 65536 => Math.Min(maxUserBudget / 4, 8192),
+            _ => Math.Min(maxUserBudget / 4, 16384)
         };
         int safetyMargin = 64;
-        int targetBudget = Math.Max(maxBudget - reservedForResponse - safetyMargin, 512);
+        int targetUserBudget = Math.Max(maxUserBudget - reservedForResponse - safetyMargin, 512);
 
         var activeMessages = new List<ChatMessage>();
-        int currentTokens = sysPromptTokens;
+        int currentTokens = 0; // System prompt is excluded from user history budget
         bool hasDroppedMessages = false;
 
         ChatMessage? initialUserMsg = activeHistory.Count > 0 ? activeHistory[0] : null;
@@ -401,7 +414,7 @@ public class ChatEngine(
         {
             var msg = activeHistory[i];
             int msgTokens = inferenceEngine.GetTokenCount(msg.Content) + 25; // 25 tokens for template formatting overhead
-            if (currentTokens + msgTokens <= targetBudget)
+            if (currentTokens + msgTokens <= targetUserBudget)
             {
                 activeMessages.Insert(0, msg);
                 currentTokens += msgTokens;
@@ -440,9 +453,10 @@ public class ChatEngine(
 
         var prompt = promptEngine.ApplyTemplate(messages, templateType);
         int finalPromptTokens = inferenceEngine.GetTokenCount(prompt);
+        int maxAllowedPromptTokens = targetUserBudget + sysPromptTokens;
 
-        // Safety truncation loop: If template tokens exceed targetBudget, prune intermediate active messages (preserving history[0])
-        while (finalPromptTokens > targetBudget && activeMessages.Count > 1)
+        // Safety truncation loop: If template tokens exceed maxAllowedPromptTokens, prune intermediate active messages (preserving history[0])
+        while (finalPromptTokens > maxAllowedPromptTokens && activeMessages.Count > 1)
         {
             // Remove message at index 1 (after initial user prompt) to protect _history[0]
             activeMessages.RemoveAt(1);
@@ -458,9 +472,19 @@ public class ChatEngine(
         bool isToolCall = false;
         string unyieldedText = string.Empty;
 
+        logger.LogWarning("[DIAG] StreamResponseInternalAsync: finalPromptTokens={FinalPromptTokens}, targetUserBudget={TargetUserBudget}, contextSize={ContextSize}, activeMessages.Count={ActiveMsgCount}, prompt.Length={PromptLen}",
+            finalPromptTokens, targetUserBudget, (int)inferenceEngine.ContextSize, activeMessages.Count, prompt.Length);
+        logger.LogWarning("[DIAG] Prompt (first 500 chars): {PromptStart}", prompt.Length > 500 ? prompt.Substring(prompt.Length - 500) : prompt);
+
+        int _tokenStreamCount = 0;
         // Stream tokens
         await foreach (var token in inferenceEngine.StreamTokensAsync(prompt, stopTokens, sysPromptTokens, ct))
         {
+            _tokenStreamCount++;
+            if (_tokenStreamCount <= 3)
+            {
+                logger.LogWarning("[DIAG] Token #{Num}: '{Token}'", _tokenStreamCount, token);
+            }
             fullResponseBuilder.Append(token);
             unyieldedText += token;
 
@@ -471,8 +495,37 @@ public class ChatEngine(
                 
                 if (!isToolCall)
                 {
-                    int thinkIndex = !isThinking ? unyieldedText.IndexOf("<think>", StringComparison.Ordinal) : -1;
-                    int thinkEndIndex = isThinking ? unyieldedText.IndexOf("</think>", StringComparison.Ordinal) : -1;
+                    int thinkIndex = -1;
+                    int thinkTagLen = 0;
+                    if (!isThinking)
+                    {
+                        string[] thinkStartTags = new[] { "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]" };
+                        foreach (var tag in thinkStartTags)
+                        {
+                            int idx = unyieldedText.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
+                            if (idx >= 0 && (thinkIndex < 0 || idx < thinkIndex))
+                            {
+                                thinkIndex = idx;
+                                thinkTagLen = tag.Length;
+                            }
+                        }
+                    }
+
+                    int thinkEndIndex = -1;
+                    int thinkEndTagLen = 0;
+                    if (isThinking)
+                    {
+                        string[] thinkEndTags = new[] { "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>", "[/THINK]", "[/THOUGHT]" };
+                        foreach (var tag in thinkEndTags)
+                        {
+                            int idx = unyieldedText.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
+                            if (idx >= 0 && (thinkEndIndex < 0 || idx < thinkEndIndex))
+                            {
+                                thinkEndIndex = idx;
+                                thinkEndTagLen = tag.Length;
+                            }
+                        }
+                    }
                     
                     int toolIndex = unyieldedText.IndexOf("<tool_call>", StringComparison.Ordinal);
                     int altToolIndex = unyieldedText.IndexOf("<|tool_call|>", StringComparison.Ordinal);
@@ -497,7 +550,7 @@ public class ChatEngine(
                         
                         isThinking = true;
                         yield return new ChatStreamEvent(ChatStreamEventType.ThinkingStart, "");
-                        unyieldedText = unyieldedText.Substring(thinkIndex + 7);
+                        unyieldedText = unyieldedText.Substring(thinkIndex + thinkTagLen);
                         processedAny = true;
                     }
                     else if (earliest == thinkEndIndex)
@@ -508,7 +561,7 @@ public class ChatEngine(
                         
                         isThinking = false;
                         yield return new ChatStreamEvent(ChatStreamEventType.ThinkingEnd, "");
-                        unyieldedText = unyieldedText.Substring(thinkEndIndex + 8);
+                        unyieldedText = unyieldedText.Substring(thinkEndIndex + thinkEndTagLen);
                         processedAny = true;
                     }
                     else if (earliest == toolIndex)
@@ -559,8 +612,9 @@ public class ChatEngine(
                     continue;
                 }
 
-                string[] tagsToCheck = isThinking ? new[] { "</think>", "<tool_call>", "<|tool_call|>" } : 
-                                       new[] { "<think>", "<tool_call>", "<|tool_call|>" };
+                string[] tagsToCheck = isThinking ? 
+                    new[] { "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>", "[/THINK]", "[/THOUGHT]", "<tool_call>", "<|tool_call|>" } : 
+                    new[] { "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]", "<tool_call>", "<|tool_call|>" };
                                        
                 bool endsWithPartial = false;
                 int maxPartialLen = 0;
@@ -570,7 +624,7 @@ public class ChatEngine(
                     for (int len = 1; len < tag.Length; len++)
                     {
                         var prefix = tag.Substring(0, len);
-                        if (unyieldedText.EndsWith(prefix, StringComparison.Ordinal))
+                        if (unyieldedText.EndsWith(prefix, StringComparison.OrdinalIgnoreCase))
                         {
                             endsWithPartial = true;
                             if (len > maxPartialLen)
@@ -621,15 +675,16 @@ public class ChatEngine(
             unyieldedText = string.Empty;
         }
 
+        logger.LogWarning("[DIAG] Token streaming complete. Total tokens received: {Count}, fullResponse.Length={Len}", _tokenStreamCount, fullResponseBuilder.Length);
+
             var fullResponse = fullResponseBuilder.ToString();
+            logger.LogWarning("[DIAG] fullResponse (first 200 chars): {Resp}", fullResponse.Length > 200 ? fullResponse.Substring(0, 200) : fullResponse);
 
             // Strip raw thinking tags so history stored in context does not poison future turns
-            var cleanHistoryResponse = Regex.Replace(fullResponse, @"<think>.*?(?:</think>|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
-            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"</?think>", "", RegexOptions.IgnoreCase).Trim();
-            if (string.IsNullOrWhiteSpace(cleanHistoryResponse))
-            {
-                cleanHistoryResponse = Regex.Replace(fullResponse, @"</?think>", "", RegexOptions.IgnoreCase).Trim();
-            }
+            var cleanHistoryResponse = Regex.Replace(fullResponse, @"<\|?(?:think|thought)\|?>.*?(?:</\|?(?:think|thought)\|?>|<\|/(?:think|thought)\|?>|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"\[(?:THINK|THOUGHT)\].*?(?:\[/(?:THINK|THOUGHT)\]|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"</?\|?(?:think|thought)\|?>", "", RegexOptions.IgnoreCase).Trim();
+            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"\[/?(?:THINK|THOUGHT)\]", "", RegexOptions.IgnoreCase).Trim();
             if (string.IsNullOrWhiteSpace(cleanHistoryResponse))
             {
                 cleanHistoryResponse = fullResponse;
@@ -721,6 +776,13 @@ public class ChatEngine(
                     var result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, ct);
                     var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
                     
+                    var currentPendingQueue = MessageQueue?.GetPending(generatingSessionId);
+                    if (currentPendingQueue != null && currentPendingQueue.Count > 0)
+                    {
+                        var queueSummaries = string.Join("; ", currentPendingQueue.Select(m => $"[ID: {m.Id}, Mode: {m.Mode}]: \"{m.Content}\""));
+                        toolOutput += $"\n\n[SYSTEM NOTIFICATION: You have {currentPendingQueue.Count} pending queued message(s) waiting: {queueSummaries}. Call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to inspect and incorporate them into your workflow.]";
+                    }
+
                     _recentTools.Add((req.Name, argsHash, toolOutput));
 
                     var toolOutputObj = new ChatMessage(ChatRole.Tool, toolOutput, req.Name);
@@ -1115,7 +1177,11 @@ public class ChatEngine(
             var sysPrompt = "You are an AI that generates a concise 2-4 word title for a conversation based on the user's first message and the assistant's reply. Do not use quotes, punctuation, or thinking tags. Output ONLY the title.";
             var userPrompt = $"User: {userMessage}\nAssistant: {assistantResponse}\n\nTitle:";
 
-            var templateType = promptEngine.DetectTemplate(inferenceEngine.Architecture);
+            var templateType = promptEngine.DetectTemplate(
+                inferenceEngine.Architecture, 
+                inferenceEngine.CurrentModelPath, 
+                inferenceEngine.RawChatTemplate, 
+                inferenceEngine.FineTuneName);
             var messages = new List<ChatMessage> 
             { 
                 new(ChatRole.System, sysPrompt),

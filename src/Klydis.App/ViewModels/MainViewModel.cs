@@ -10,6 +10,7 @@ public enum ActivePanel
     Models,
     Skills,
     Monitor,
+    Rag,
     Settings
 }
 
@@ -39,6 +40,7 @@ public partial class MainViewModel : ObservableObject
     public SkillLibraryViewModel SkillLibraryViewModel { get; }
     public SystemMonitorViewModel SystemMonitorViewModel { get; }
     public SettingsViewModel SettingsViewModel { get; }
+    public RagViewModel RagViewModel { get; }
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
  
     public MainViewModel(
@@ -47,6 +49,7 @@ public partial class MainViewModel : ObservableObject
         SkillLibraryViewModel skillLibraryViewModel,
         SystemMonitorViewModel systemMonitorViewModel,
         SettingsViewModel settingsViewModel,
+        RagViewModel ragViewModel,
         Klydis.Core.Inference.InferenceEngine inferenceEngine)
     {
         ChatViewModel = chatViewModel;
@@ -54,6 +57,7 @@ public partial class MainViewModel : ObservableObject
         SkillLibraryViewModel = skillLibraryViewModel;
         SystemMonitorViewModel = systemMonitorViewModel;
         SettingsViewModel = settingsViewModel;
+        RagViewModel = ragViewModel;
         _inferenceEngine = inferenceEngine;
 
         _inferenceEngine.ModelStateChanged += (isLoaded, path) =>
@@ -84,6 +88,7 @@ public partial class MainViewModel : ObservableObject
                 ActivePanel.Models => ModelLibraryViewModel,
                 ActivePanel.Skills => SkillLibraryViewModel,
                 ActivePanel.Monitor => SystemMonitorViewModel,
+                ActivePanel.Rag => RagViewModel,
                 ActivePanel.Settings => SettingsViewModel,
                 _ => ChatViewModel
             };

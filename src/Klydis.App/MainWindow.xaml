@@ -29,6 +29,9 @@
         <DataTemplate DataType="{x:Type viewmodels:SkillLibraryViewModel}">
             <views:SkillsView />
         </DataTemplate>
+        <DataTemplate DataType="{x:Type viewmodels:RagViewModel}">
+            <views:RagView />
+        </DataTemplate>
         <!-- TitleBarButtonStyle/CloseButtonStyle now live in ThemeStyles.xaml (shared
              with TextContextWindow's custom chrome) - resolved via the app-wide merged
              dictionary, so no local copy is needed here. -->
@@ -110,8 +113,15 @@
                     </StackPanel>
                     <RadioButton Style="{DynamicResource ActivityTabStyle}" GroupName="ActivityBar" 
                                  IsChecked="{Binding ActivePanel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Monitor}"
-                                 Command="{Binding NavigateCommand}" CommandParameter="Monitor">
+                                 Command="{Binding NavigateCommand}" CommandParameter="Monitor"
+                                 ToolTip="System &amp; Hardware Monitor">
                         <Path Data="M 2,14 L 14,14 M 4,14 L 4,8 M 8,14 L 8,4 M 12,14 L 12,10" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}" StrokeThickness="1.5"/>
+                    </RadioButton>
+                    <RadioButton Style="{DynamicResource ActivityTabStyle}" GroupName="ActivityBar" 
+                                 IsChecked="{Binding ActivePanel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Rag}"
+                                 Command="{Binding NavigateCommand}" CommandParameter="Rag"
+                                 ToolTip="Local Vector RAG &amp; Workspace Indexer">
+                        <Path Data="M 4 2 L 16 2 C 17 2 18 3 18 4 L 18 16 C 18 17 17 18 16 18 L 4 18 C 3 18 2 17 2 16 L 2 4 C 2 3 3 2 4 2 Z M 6 6 L 14 6 M 6 10 L 14 10 M 6 14 L 10 14" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}" StrokeThickness="1.5" Fill="Transparent"/>
                     </RadioButton>
                 </StackPanel>
 

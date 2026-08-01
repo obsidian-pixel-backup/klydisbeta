@@ -43,24 +43,18 @@
                                         </Border>
                                         <ControlTemplate.Triggers>
                                             <Trigger Property="IsChecked" Value="True">
-                                                <Trigger.EnterActions>
-                                                    <BeginStoryboard>
-                                                        <Storyboard>
-                                                            <DoubleAnimation Storyboard.TargetName="Arrow" Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" To="0" Duration="0:0:0.25">
-                                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                                            </DoubleAnimation>
-                                                        </Storyboard>
-                                                    </BeginStoryboard>
-                                                </Trigger.EnterActions>
-                                                <Trigger.ExitActions>
-                                                    <BeginStoryboard>
-                                                        <Storyboard>
-                                                            <DoubleAnimation Storyboard.TargetName="Arrow" Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" To="-90" Duration="0:0:0.25">
-                                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                                            </DoubleAnimation>
-                                                        </Storyboard>
-                                                    </BeginStoryboard>
-                                                </Trigger.ExitActions>
+                                                <Setter TargetName="Arrow" Property="UIElement.RenderTransform">
+                                                    <Setter.Value>
+                                                        <RotateTransform Angle="0"/>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Trigger>
+                                            <Trigger Property="IsChecked" Value="False">
+                                                <Setter TargetName="Arrow" Property="UIElement.RenderTransform">
+                                                    <Setter.Value>
+                                                        <RotateTransform Angle="-90"/>
+                                                    </Setter.Value>
+                                                </Setter>
                                             </Trigger>
                                             <Trigger Property="IsMouseOver" Value="True">
                                                 <Setter TargetName="Arrow" Property="Opacity" Value="0.8"/>
@@ -71,7 +65,7 @@
                                 <ContentPresenter Content="{TemplateBinding Header}"/>
                             </ToggleButton>
 
-                            <Border x:Name="ExpandSite" Grid.Row="1" Opacity="0">
+                            <Border x:Name="ExpandSite" Grid.Row="1" Opacity="0" Visibility="Collapsed">
                                 <Border.LayoutTransform>
                                     <ScaleTransform ScaleY="0" />
                                 </Border.LayoutTransform>
@@ -86,36 +80,32 @@
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsExpanded" Value="True">
-                                <Trigger.EnterActions>
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(FrameworkElement.LayoutTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.3">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.3">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="0" Duration="0:0:0.3">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </Trigger.EnterActions>
-                                <Trigger.ExitActions>
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(FrameworkElement.LayoutTransform).(ScaleTransform.ScaleY)" To="0" Duration="0:0:0.2">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseIn"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.2">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseIn"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                            <DoubleAnimation Storyboard.TargetName="ExpandSite" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="-10" Duration="0:0:0.2">
-                                                <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseIn"/></DoubleAnimation.EasingFunction>
-                                            </DoubleAnimation>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </Trigger.ExitActions>
+                                <Setter TargetName="ExpandSite" Property="Opacity" Value="1"/>
+                                <Setter TargetName="ExpandSite" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="ExpandSite" Property="FrameworkElement.LayoutTransform">
+                                    <Setter.Value>
+                                        <ScaleTransform ScaleY="1"/>
+                                    </Setter.Value>
+                                </Setter>
+                                <Setter TargetName="ExpandSite" Property="UIElement.RenderTransform">
+                                    <Setter.Value>
+                                        <TranslateTransform Y="0"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
+                            <Trigger Property="IsExpanded" Value="False">
+                                <Setter TargetName="ExpandSite" Property="Opacity" Value="0"/>
+                                <Setter TargetName="ExpandSite" Property="Visibility" Value="Collapsed"/>
+                                <Setter TargetName="ExpandSite" Property="FrameworkElement.LayoutTransform">
+                                    <Setter.Value>
+                                        <ScaleTransform ScaleY="0"/>
+                                    </Setter.Value>
+                                </Setter>
+                                <Setter TargetName="ExpandSite" Property="UIElement.RenderTransform">
+                                    <Setter.Value>
+                                        <TranslateTransform Y="-10"/>
+                                    </Setter.Value>
+                                </Setter>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -869,8 +859,12 @@
                                 </StackPanel>
 
                                 <!-- Assistant Message -->
-                                <Border Padding="14,6" HorizontalAlignment="Left" Margin="0,1,100,1"
-                                        Background="{DynamicResource PanelBackgroundBrush}" BorderThickness="0"
+                                <Border Padding="14,8" HorizontalAlignment="Left" Margin="0,2,100,2"
+                                        Background="{DynamicResource AssistantBubbleBackgroundBrush}"
+                                        BorderBrush="{DynamicResource AssistantBubbleBorderBrush}"
+                                        BorderThickness="1" CornerRadius="12"
+                                        TextElement.Foreground="{DynamicResource TextPrimaryBrush}"
+                                        TextElement.FontSize="15"
                                         Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=assistant}">
                                     <DockPanel LastChildFill="True">
                                         <Button DockPanel.Dock="Right" Command="{Binding CopyToClipboardCommand}"
@@ -891,7 +885,9 @@
                                             </Grid>
                                         </Button>
                                         <StackPanel>
-                                            <mdxam:MarkdownScrollViewer Markdown="{Binding RenderedContent}" Foreground="{DynamicResource TextPrimaryBrush}"
+                                            <mdxam:MarkdownScrollViewer Markdown="{Binding RenderedContent}"
+                                                                        Foreground="{DynamicResource TextPrimaryBrush}"
+                                                                        TextElement.Foreground="{DynamicResource TextPrimaryBrush}"
                                                                         HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled" Margin="0" Padding="0" FontSize="15"
                                                                         Loaded="MarkdownViewer_Loaded"/>
                                             <Rectangle Width="8" Height="14" Fill="{DynamicResource AccentPrimaryBrush}" HorizontalAlignment="Left" Margin="0,2,0,0"
@@ -1165,7 +1161,6 @@
                                     <Rectangle Canvas.Left="1" Canvas.Top="7.75" Width="16" Height="2.5" RadiusX="1.25" RadiusY="1.25" Fill="{DynamicResource AccentPrimaryBrush}"/>
                                 </Canvas>
                             </Button>
-
                             <ComboBox ItemsSource="{Binding AvailableRiskLevels}"
                                       SelectedItem="{Binding SelectedRiskLevel}"
                                       Width="90"
@@ -1198,10 +1193,11 @@
                                      Background="{DynamicResource InputBackgroundBrush}"
                                      Foreground="{DynamicResource TextPrimaryBrush}"
                                      BorderThickness="1" BorderBrush="{DynamicResource BorderMidBrush}"
-                                     Padding="12,10" VerticalContentAlignment="Center"
+                                     Padding="12,10,12,10" VerticalContentAlignment="Center"
                                      VerticalScrollBarVisibility="Auto" FontSize="15"/>
+
                             <!-- State-aware placeholder -->
-                            <TextBlock IsHitTestVisible="False" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="15"
+                            <TextBlock IsHitTestVisible="False" Margin="42,0,0,0" VerticalAlignment="Center" FontSize="15"
                                        Foreground="{DynamicResource TextMutedBrush}">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock">
@@ -1253,6 +1249,11 @@
                             </Button>
                             <Button Style="{DynamicResource PrimaryButton}" Command="{Binding SendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource InverseBoolToVisConverter}}" Width="40" Height="40" Background="{DynamicResource AccentPrimaryBrush}" BorderThickness="0" Padding="0" ToolTip="Send (Enter)">
                                 <Path Data="M 2,8 L 13,8 M 8,3 L 13,8 L 8,13" Stroke="{DynamicResource TextInverse}" StrokeThickness="2" Width="15" Height="14" Stretch="Uniform" StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                            </Button>
+                            <Button Style="{DynamicResource SecondaryButton}" Command="{Binding ForceSendMessageCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" Height="40" Padding="8,0" Margin="0,0,6,0" ToolTip="Interrupt active generation and force send message (Ctrl+Enter)">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="⚡ Interrupt" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource WarningBrush}"/>
+                                </StackPanel>
                             </Button>
                             <Button Style="{DynamicResource PrimaryButton}" Command="{Binding CancelCommand}" Visibility="{Binding IsGenerating, Converter={StaticResource BoolToVisConverter}}" Width="40" Height="40" Background="{DynamicResource ErrorBubbleBackgroundBrush}" BorderThickness="0" Padding="0" ToolTip="Stop generating">
                                 <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ErrorBrush}"/>
@@ -1444,6 +1445,72 @@
                                 Content="OK" Width="100" Height="36"/>
                     </StackPanel>
                 </Border>
+
+                <!-- Scroll To Bottom Floating Button -->
+                <Button x:Name="ScrollToBottomButton"
+                        Click="ScrollToBottomButton_Click"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,16"
+                        Width="38" Height="38"
+                        Cursor="Hand"
+                        ToolTip="Scroll to bottom"
+                        Visibility="Collapsed"
+                        Panel.ZIndex="5">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Grid>
+                                <Border x:Name="BtnBorder"
+                                        Background="{DynamicResource SurfaceElevatedBrush}"
+                                        BorderBrush="{DynamicResource BorderMidBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="19"
+                                        RenderTransformOrigin="0.5,0.5">
+                                    <Border.RenderTransform>
+                                        <ScaleTransform ScaleX="1" ScaleY="1"/>
+                                    </Border.RenderTransform>
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="12" ShadowDepth="3" Direction="270" Color="#000000" Opacity="0.35"/>
+                                    </Border.Effect>
+                                    <Path x:Name="BtnIcon"
+                                          Data="M 12,4 L 12,15 M 6,10 L 12,16 L 18,10 M 5,19 L 19,19"
+                                          Stroke="{DynamicResource TextPrimaryBrush}"
+                                          StrokeThickness="2"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Width="16" Height="16"
+                                          Stretch="Uniform"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"/>
+                                </Border>
+                            </Grid>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="BtnBorder" Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                    <Setter TargetName="BtnBorder" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                    <Setter TargetName="BtnIcon" Property="Stroke" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                </Trigger>
+                                <EventTrigger RoutedEvent="PreviewMouseDown">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.92" Duration="0:0:0.08"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.92" Duration="0:0:0.08"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                                <EventTrigger RoutedEvent="PreviewMouseUp">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.08"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.08"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
             </Grid>
         </Grid>
     </Grid>
