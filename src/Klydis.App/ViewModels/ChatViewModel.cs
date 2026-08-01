@@ -433,7 +433,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     }
 
                     var plan = _offloadStrategy.CalculatePlan(
-                        totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
+                        totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
                     
                     if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
@@ -980,13 +980,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     }
                 }
 
-                int _throttleCounter = 0;
                 await foreach (var evt in _chatEngine.StreamResponseAsync(promptMessagePayload, _generationCts.Token, skillContext))
                 {
-                    if (++_throttleCounter % 10 == 0)
-                    {
-                        await Task.Delay(1); // Yield UI thread to process queued Dispatcher messages
-                    }
 
                     switch (evt.Type)
                     {
@@ -1703,12 +1698,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private static string CleanTitle(string title)
     {
-        if (string.IsNullOrWhiteSpace(title)) return "New Chat";
-        title = Regex.Replace(title, @"<think>.*?(?:</think>|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
-        title = Regex.Replace(title, @"</?think>", "", RegexOptions.IgnoreCase).Trim();
-        title = Regex.Replace(title, @"[#*_`~]+", "").Trim();
-        title = Regex.Replace(title, @"\s+", " ").Trim();
-        return string.IsNullOrWhiteSpace(title) ? "New Chat" : title;
+        return TitleSanitizer.SanitizeTitle(title);
     }
 
     private static string StripToolCallBlocks(string text)

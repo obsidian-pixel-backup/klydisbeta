@@ -106,39 +106,38 @@
 
                 <Border>
                     <Border.InputBindings>
-                        <MouseBinding MouseAction="LeftClick" Command="{Binding NavigateSettingsCommand}" CommandParameter="Inference"/>
+                        <MouseBinding MouseAction="LeftClick" Command="{Binding NavigateSettingsCommand}" CommandParameter="ModelSettings"/>
                     </Border.InputBindings>
                     <Border.Style>
                         <Style TargetType="Border" BasedOn="{StaticResource SettingsNavItemStyle}">
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding SelectedCategory}" Value="Inference">
+                                <DataTrigger Binding="{Binding SelectedCategory}" Value="ModelSettings">
                                     <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
                                 </DataTrigger>
                             </Style.Triggers>
                         </Style>
                     </Border.Style>
                     <StackPanel Orientation="Horizontal">
-                        <Path Data="M 13,3 L 13,6 M 13,10 L 13,13 M 3,13 L 6,13 M 10,13 L 13,13 M 1,8 L 15,8"
-                              StrokeThickness="1.5"
+                        <Path Data="M 8,2 A 4,4 0 1 1 8,10 A 4,4 0 0 1 8,2 Z M 2,15 C 2,11.5 5,11 8,11 C 11,11 14,11.5 14,15 Z"
                               Width="14" Height="14" Stretch="Uniform" Margin="0,0,10,0">
                             <Path.Style>
                                 <Style TargetType="Path">
-                                    <Setter Property="Stroke" Value="{DynamicResource TextSecondaryBrush}"/>
+                                    <Setter Property="Fill" Value="{DynamicResource TextSecondaryBrush}"/>
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding SelectedCategory}" Value="Inference">
-                                            <Setter Property="Stroke" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                        <DataTrigger Binding="{Binding SelectedCategory}" Value="ModelSettings">
+                                            <Setter Property="Fill" Value="{DynamicResource AccentPrimaryBrush}"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
                             </Path.Style>
                         </Path>
-                        <TextBlock Text="Inference &amp; Speed" FontSize="13" VerticalAlignment="Center">
+                        <TextBlock Text="Model Settings" FontSize="13" VerticalAlignment="Center">
                             <TextBlock.Style>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
                                     <Setter Property="FontWeight" Value="Normal"/>
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding SelectedCategory}" Value="Inference">
+                                        <DataTrigger Binding="{Binding SelectedCategory}" Value="ModelSettings">
                                             <Setter Property="Foreground" Value="{DynamicResource AccentPrimaryBrush}"/>
                                             <Setter Property="FontWeight" Value="SemiBold"/>
                                         </DataTrigger>
@@ -148,6 +147,7 @@
                         </TextBlock>
                     </StackPanel>
                 </Border>
+
 
                 <Border>
                     <Border.InputBindings>
@@ -278,30 +278,6 @@
                         </Grid>
                     </Border>
 
-                    <!-- Model Personality: a card to select personality mode loaded from UserStyle_Modes.md -->
-                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="16,14" Margin="0,0,0,20">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="220"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8" Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center">
-                                <Path Data="M 8,2 A 4,4 0 1 1 8,10 A 4,4 0 0 1 8,2 Z M 2,15 C 2,11.5 5,11 8,11 C 11,11 14,11.5 14,15 Z"
-                                      Fill="{DynamicResource AccentPrimaryBrush}" Width="16" Height="16" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Border>
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,12,0">
-                                <TextBlock Text="Model Personality &amp; User Style" FontSize="13.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                <TextBlock Text="Set model tone &amp; personality loaded from UserStyle_Modes.md" FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}"/>
-                            </StackPanel>
-
-                            <ComboBox Grid.Column="2"
-                                      ItemsSource="{Binding AvailablePersonalities}"
-                                      SelectedItem="{Binding SelectedPersonality, Mode=TwoWay}"
-                                      VerticalAlignment="Center"/>
-                        </Grid>
-                    </Border>
-
                     <!-- Backgrounds: a gallery of background color identities -->
                     <TextBlock Text="BACKGROUNDS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
                     <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
@@ -424,32 +400,138 @@
                     </Border>
                 </StackPanel>
 
-                <!-- Inference & Speed section -->
-                <StackPanel Visibility="{Binding SelectedCategory, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=Inference}">
-                    <TextBlock Text="Inference &amp; Speed" FontSize="24" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                    <TextBlock Text="Configure speculative decoding, draft model acceleration, and tokens-per-second tuning." FontSize="13" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,24"/>
+                <!-- Model Settings section -->
+                <StackPanel Visibility="{Binding SelectedCategory, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=ModelSettings}">
+                    <TextBlock Text="Model Settings" FontSize="24" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                    <TextBlock Text="Configure output personality styles and model generation directives." FontSize="13" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,24"/>
 
-                    <TextBlock Text="CONTEXT &amp; MEMORY LIMITS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
-                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="260"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0">
-                                <TextBlock Text="Model Context Size Limit" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                <TextBlock Text="Set maximum KV cache context limit up to 1 Million (1,048,576) tokens for long-context models." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,4,16,0"/>
-                            </StackPanel>
-                            <ComboBox Grid.Column="1"
-                                      ItemsSource="{Binding AvailableContextSizes}"
-                                      SelectedValue="{Binding SelectedContextSize, Mode=TwoWay}"
-                                      SelectedValuePath="Value"
-                                      DisplayMemberPath="DisplayName"
-                                      VerticalAlignment="Center"/>
-                        </Grid>
+                    <!-- Model Personality: a card to select personality mode loaded from user style.md / UserStyle_Modes.md -->
+                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="16,14" Margin="0,0,0,20">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8" Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center">
+                                    <Path Data="M 8,2 A 4,4 0 1 1 8,10 A 4,4 0 0 1 8,2 Z M 2,15 C 2,11.5 5,11 8,11 C 11,11 14,11.5 14,15 Z"
+                                          Fill="{DynamicResource AccentPrimaryBrush}" Width="16" Height="16" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,12,0">
+                                    <TextBlock Text="Model Personality &amp; User Style" FontSize="13.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    <TextBlock Text="Set model output tone &amp; personality loaded from user style.md" FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <ComboBox ItemsSource="{Binding AvailablePersonalities}"
+                                              SelectedItem="{Binding SelectedPersonality, Mode=TwoWay}"
+                                              Width="180"
+                                              VerticalAlignment="Center"
+                                              Margin="0,0,8,0"/>
+                                    <Button Content="Reload"
+                                            Command="{Binding RefreshPersonalitiesCommand}"
+                                            ToolTip="Reload user style modes from disk"
+                                            Padding="10,5"
+                                            FontSize="11.5"
+                                            Background="{DynamicResource SurfaceHoverBrush}"
+                                            Foreground="{DynamicResource TextPrimaryBrush}"
+                                            BorderBrush="{DynamicResource BorderBrush}"
+                                            BorderThickness="1"
+                                            VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Active Personality Directives Preview -->
+                            <Border Margin="0,12,0,0" Padding="12,10" Background="{DynamicResource SurfaceHoverBrush}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                                <StackPanel>
+                                    <TextBlock Text="ACTIVE PERSONALITY DIRECTIVES PREVIEW" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                    <ScrollViewer MaxHeight="120" VerticalScrollBarVisibility="Auto">
+                                        <TextBlock Text="{Binding SelectedPersonalityDescription}" 
+                                                   FontSize="11.5" 
+                                                   FontFamily="Consolas, Segoe UI, sans-serif" 
+                                                   Foreground="{DynamicResource TextSecondaryBrush}" 
+                                                   TextWrapping="Wrap" 
+                                                   LineHeight="17"/>
+                                    </ScrollViewer>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
                     </Border>
 
-                    <TextBlock Text="SPECULATIVE DECODING" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
+                    <!-- Model Context Window Limit Slider card -->
+                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="18,16" Margin="0,0,0,20">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8" Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center">
+                                    <Path Data="M 2,4 L 14,4 M 2,8 L 14,8 M 2,12 L 14,12 M 6,2 L 6,6 M 10,6 L 10,10 M 4,10 L 4,14"
+                                          Stroke="{DynamicResource AccentPrimaryBrush}" StrokeThickness="1.5" Width="16" Height="16" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,12,0">
+                                    <TextBlock Text="Model Context Window Limit" FontSize="13.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    <TextBlock Text="Configure maximum token context limit for LLM generation (1K to 1 Million tokens or Auto)." FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}"/>
+                                </StackPanel>
+                                <Border Grid.Column="2" Background="{DynamicResource AccentSoftBrush}" CornerRadius="6" Padding="10,4" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding SelectedContextSizeFormatted}" FontSize="12" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                </Border>
+                            </Grid>
+
+                            <!-- Slider control snapping to discrete token buckets (0=Auto, 1K, 2K, 4K, 8K, 16K, 32K, 64K, 128K, 256K, 512K, 1M) -->
+                            <Slider Minimum="0"
+                                    Maximum="11"
+                                    SmallChange="1"
+                                    LargeChange="1"
+                                    TickFrequency="1"
+                                    TickPlacement="BottomRight"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding ContextSliderIndex, Mode=TwoWay}"
+                                    Margin="0,6,0,4"/>
+
+                            <!-- Bucket labels below slider mathematically aligned to 11 slider ticks -->
+                            <Grid Margin="0,4,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Tick 0: Auto -->
+                                <TextBlock Grid.Column="0" Text="Auto" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Left"/>
+                                <!-- Tick 1: 1K -->
+                                <TextBlock Grid.Column="0" Grid.ColumnSpan="2" Text="1K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-7,0"/>
+                                <!-- Tick 3: 4K -->
+                                <TextBlock Grid.Column="2" Grid.ColumnSpan="2" Text="4K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-7,0"/>
+                                <!-- Tick 5: 16K -->
+                                <TextBlock Grid.Column="4" Grid.ColumnSpan="2" Text="16K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-10,0"/>
+                                <!-- Tick 6: 32K -->
+                                <TextBlock Grid.Column="5" Grid.ColumnSpan="2" Text="32K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-10,0"/>
+                                <!-- Tick 7: 64K -->
+                                <TextBlock Grid.Column="6" Grid.ColumnSpan="2" Text="64K" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" HorizontalAlignment="Right" Margin="0,0,-10,0"/>
+                                <!-- Tick 9: 256K -->
+                                <TextBlock Grid.Column="8" Grid.ColumnSpan="2" Text="256K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-13,0"/>
+                                <!-- Tick 10: 512K -->
+                                <TextBlock Grid.Column="9" Grid.ColumnSpan="2" Text="512K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-13,0"/>
+                                <!-- Tick 11: 1M -->
+                                <TextBlock Grid.Column="10" Text="1M" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" HorizontalAlignment="Right"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Speculative Decoding & Acceleration card -->
+                    <TextBlock Text="SPECULATIVE DECODING &amp; ACCELERATION" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
                     <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
                         <StackPanel>
                             <Grid Margin="0,0,0,16">

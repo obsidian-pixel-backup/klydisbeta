@@ -62,7 +62,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// <summary>
     /// Gets or sets target KV cache quantization precision. Default is Q4_0.
     /// </summary>
-    public KvCacheQuantizationType TargetKvQuantization { get; set; } = KvCacheQuantizationType.F16;
+    public KvCacheQuantizationType TargetKvQuantization { get; set; } = KvCacheQuantizationType.Q4_0;
 
     /// <summary>
     /// Gets current KV cache memory estimate and architecture metrics.
@@ -154,6 +154,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// <param name="nativeResourceDisposer">Optional background native resource disposer.</param>
     public InferenceEngine(ILogger<InferenceEngine> logger, INativeResourceDisposer? nativeResourceDisposer = null)
     {
+        NativeEngineManager.EnsureNativeLibraryConfigured();
         _logger = logger;
         NativeResourceDisposer = nativeResourceDisposer;
     }
@@ -253,20 +254,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     _ => LLama.Native.GGMLType.GGML_TYPE_Q4_0
                 };
 
-                // Disable FlashAttention by default to prevent C++ GGML_ASSERT line 46 fatal errors on hybrid/non-F16 attention architectures
-                bool useFlashAttention = false;
-
-                // Detect hybrid SSM+Attention architectures that require drastically reduced context
-                // because their recurrent state buffers (d_state * d_model * n_ctx) consume far more
-                // VRAM per token than standard attention KV caches, causing native GGML_ABORT during
-                // compute graph reservation at large context sizes.
                 string archLower = (metadata?.Architecture ?? "").ToLowerInvariant();
                 bool isHybridSsm = archLower is "qwen35" or "mamba" or "rwkv" or "jamba";
 
-                // Minimum context size is 32k (32768 tokens), scaling up dynamically with available memory or user override up to 1M (+8192 for system prompt & tool schema)
+                // Enable FlashAttention universally on GPU for all non-SSM transformer architectures to accelerate prompt prefill and generation
+                bool useFlashAttention = !isHybridSsm && offloadPlan.GpuLayers > 0;
+
+                // Context size scales dynamically with user limit or recommended offload plan context (min 2048)
                 uint targetContextSize = UserContextLimit > 0
                     ? UserContextLimit + 8192
-                    : (uint)Math.Max(32768, offloadPlan.RecommendedContextSize);
+                    : (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
 
                 if (isHybridSsm)
                 {
@@ -274,35 +271,32 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
 
                 int totalModelLayers = (metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0) ? (int)metadata.BlockCount.Value : 32;
-                int targetGpuLayers = (offloadPlan.GpuLayers < 0 || offloadPlan.GpuLayers >= totalModelLayers) ? totalModelLayers : offloadPlan.GpuLayers;
+                // Set GpuLayerCount to 999 for full GPU offload when offloadPlan targets full GPU offload (GpuLayers >= totalModelLayers or FullGpu strategy) to offload all transformer blocks + non-layer tensors to CUDA0
+                int targetGpuLayers = (offloadPlan.GpuLayers < 0 || offloadPlan.GpuLayers >= totalModelLayers || offloadPlan.StrategyUsed == Hardware.OffloadStrategyType.FullGpu) ? 999 : offloadPlan.GpuLayers;
 
-                if (isHybridSsm && targetGpuLayers >= totalModelLayers)
-                {
-                    targetGpuLayers = Math.Max(1, totalModelLayers - 1);
-                    _logger.LogInformation("Hybrid SSM architecture '{Arch}' detected. Offloading {GpuLayers}/{TotalLayers} layers to GPU to prevent CUDA SSM state assertion.", archLower, targetGpuLayers, totalModelLayers);
-                }
-
-                uint safeBatchSize = (uint)Math.Min(isHybridSsm ? 256 : 512, offloadPlan.RecommendedBatchSize);
+                uint safeBatchSize = isHybridSsm ? 256u : (uint)Math.Max(2048, offloadPlan.RecommendedBatchSize);
+                // For 100% GPU offload, reduce CPU worker threads to 2 to eliminate llama.cpp spin-wait loops that pin host CPU to 100%.
+                int optimalThreads = (targetGpuLayers >= totalModelLayers || targetGpuLayers == 999) ? 2 : Math.Clamp(Environment.ProcessorCount, 4, 16);
 
                 // Configure model parameters for maximum GPU throughput
                 var parameters = new ModelParams(modelPath)
                 {
                     ContextSize = targetContextSize,
-                    GpuLayerCount = targetGpuLayers, // Offload up to total layers to GPU
+                    GpuLayerCount = targetGpuLayers, // Offload 100% of layers to GPU (GpuLayerCount = 999)
                     BatchSize = safeBatchSize,
-                    UBatchSize = safeBatchSize, // Align physical batch size with BatchSize
+                    UBatchSize = isHybridSsm ? 256u : safeBatchSize, // Physical micro-batch size synchronized with BatchSize (2048u)
                     FlashAttention = useFlashAttention,
                     // Use Unspecified pooling to let the model define its own pooling_type (-1/none for generative models)
                     // instead of LLamaSharp's default Mean (0) which triggers "model default pooling_type is [-1], but [0] was specified"
                     PoolingType = LLama.Native.LLamaPoolingType.Unspecified,
-                    Threads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
-                    BatchThreads = Math.Clamp(Environment.ProcessorCount / 2, 4, 8),
+                    Threads = optimalThreads,
+                    BatchThreads = optimalThreads,
                     // Enable Memory map to eliminate double-buffering in System RAM
                     UseMemorymap = true,
                     UseMemoryLock = false
                 };
                 
-                if (TargetKvQuantization != KvCacheQuantizationType.F16)
+                if (!isHybridSsm)
                 {
                     parameters.TypeK = kvType;
                     parameters.TypeV = kvType;
@@ -374,7 +368,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                     // Fallback to CPU-only execution with conservative context
                     parameters.GpuLayerCount = 0;
-                    parameters.ContextSize = (uint)Math.Min(4096, offloadPlan.RecommendedContextSize);
+                    parameters.ContextSize = (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
 
                     _weights = LLamaWeights.LoadFromFile(parameters);
                     if (_weights == null)
@@ -502,7 +496,22 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         CancellationToken generationToken = linkedCts.Token;
 
         Task? generationTask = null;
-        await _modelLock.WaitAsync(ct);
+        try
+        {
+            await _modelLock.WaitAsync(ct);
+        }
+        catch
+        {
+            lock (_generationCtsLock)
+            {
+                if (_activeGenerationCts == linkedCts)
+                {
+                    _activeGenerationCts = null;
+                }
+            }
+            try { linkedCts.Dispose(); } catch (ObjectDisposedException) { }
+            throw;
+        }
         try
         {
             if (!IsModelLoaded || _executor == null || _context == null)
@@ -515,6 +524,34 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             }
 
             _logger.LogDebug("Starting token generation.");
+
+            Channel<Action>? eventChannel = null;
+            Task? eventDispatcherTask = null;
+
+            if (triggerEvents)
+            {
+                eventChannel = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions
+                {
+                    SingleReader = true,
+                    SingleWriter = true
+                });
+
+                var reader = eventChannel.Reader;
+                eventDispatcherTask = Task.Run(async () =>
+                {
+                    await foreach (var action in reader.ReadAllAsync())
+                    {
+                        try
+                        {
+                            action();
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.LogError(ex, "Error executing TokenGenerated event callback.");
+                        }
+                    }
+                });
+            }
 
             var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
             {
@@ -532,6 +569,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             generationTask = Task.Run(async () =>
             {
                 bool completedNormally = false;
+                bool isFirstToken = true;
                 Exception? generationException = null;
                 try
                 {
@@ -539,33 +577,59 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     var genStopwatch = new Stopwatch();
                     double ttftMs = 0;
                     int tokenCount = 0;
-                    bool isFirstToken = true;
                     string textToEvaluate = prompt;
 
                     if (isIsolated)
                     {
-                        _logger.LogDebug("Executing isolated inference task. Context tracking will reset after execution.");
-                        if (string.IsNullOrEmpty(savedLastEvaluatedPrompt))
-                        {
-                            ResetContextInternal();
-                        }
+                        _logger.LogDebug("Executing isolated inference task. Context tracking will reset cleanly after execution.");
+                        ResetContextInternal();
                         textToEvaluate = prompt;
                     }
                     else
                     {
-                        // HYBRID EXECUTOR LOGIC: Fast-path for appended conversation turns, full reset for new chats
-                        if (!string.IsNullOrEmpty(_lastEvaluatedPrompt) && prompt.StartsWith(_lastEvaluatedPrompt, StringComparison.Ordinal))
+                        int commonPrefixLength = GetSafePrefixBoundary(_lastEvaluatedPrompt, prompt);
+                        if (commonPrefixLength > 0)
                         {
-                            textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
-                            _logger.LogDebug("Fast-path inference triggered. Initial delta length: {DeltaLength} chars.", textToEvaluate.Length);
+                            string commonPrefix = _lastEvaluatedPrompt.Substring(0, commonPrefixLength);
+                            if (commonPrefixLength == _lastEvaluatedPrompt.Length)
+                            {
+                                textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
+                                _logger.LogDebug("KV Cache Prefix hit (Exact). Reusing full evaluated KV context ({PrefixLength} chars).", commonPrefixLength);
+                                textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
+                            }
+                            else
+                            {
+                                int prefixTokenCount = 0;
+                                try { prefixTokenCount = GetTokenCount(commonPrefix); } catch { }
 
-                            // Strip leading turn-ending stop tokens (and trailing newlines/spaces) to prevent AntiPrompts
-                            // from matching at token 0 of prompt pre-fill.
-                            textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
+                                if (prefixTokenCount > 0 && _context != null && _context.NativeHandle != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
+                                {
+                                    try
+                                    {
+                                        _context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, (LLamaPos)prefixTokenCount, (LLamaPos)(-1));
+                                        _executor = new InteractiveExecutor(_context);
+                                        _lastEvaluatedPrompt = commonPrefix;
+                                        textToEvaluate = prompt.Substring(commonPrefixLength);
+                                        textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
+                                        _logger.LogDebug("KV Cache Prefix hit (Partial). Rewound sequence to {Tokens} tokens via MemorySequenceRemove. Evaluating delta ({DeltaLength} chars).", prefixTokenCount, textToEvaluate.Length);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logger.LogWarning(ex, "Failed partial KV sequence removal; resetting context cleanly.");
+                                        ResetContextInternal();
+                                        textToEvaluate = prompt;
+                                    }
+                                }
+                                else
+                                {
+                                    ResetContextInternal();
+                                    textToEvaluate = prompt;
+                                }
+                            }
                         }
                         else
                         {
-                            _logger.LogDebug("Re-evaluating full conversation context.");
+                            _logger.LogDebug("No common KV prefix found. Resetting context.");
                             ResetContextInternal();
                             textToEvaluate = prompt;
                         }
@@ -595,9 +659,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         generatedContent.Append(token);
                         
                         float tokensPerSecond = tokenCount > 0 ? (float)(tokenCount / genStopwatch.Elapsed.TotalSeconds) : 0;
-                        if (triggerEvents)
+                        if (triggerEvents && TokenGenerated != null && eventChannel != null)
                         {
-                            TokenGenerated?.Invoke(token, tokensPerSecond);
+                            var handlers = TokenGenerated;
+                            string currentToken = token;
+                            float currentTps = tokensPerSecond;
+                            eventChannel.Writer.TryWrite(() => handlers.Invoke(currentToken, currentTps));
                         }
                         
                         await channel.Writer.WriteAsync(token, generationToken);
@@ -645,35 +712,39 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
                 catch (Exception ex)
                 {
-                    if (ex.Message.Contains("native memory shifting", StringComparison.OrdinalIgnoreCase) ||
+                    bool isContextOverflowError = 
+                        ex.Message.Contains("native memory shifting", StringComparison.OrdinalIgnoreCase) ||
                         ex.Message.Contains("context overflowed", StringComparison.OrdinalIgnoreCase) ||
-                        ex.Message.Contains("context window is full", StringComparison.OrdinalIgnoreCase))
+                        ex.Message.Contains("context window is full", StringComparison.OrdinalIgnoreCase) ||
+                        (ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && (ex.Message.Contains("full", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("limit", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("shift", StringComparison.OrdinalIgnoreCase))) ||
+                        ex.GetType().Name.Contains("Context", StringComparison.OrdinalIgnoreCase) ||
+                        ex.GetType().Name.Contains("LLama", StringComparison.OrdinalIgnoreCase);
+
+                    if (isContextOverflowError)
                     {
                         _logger.LogWarning(ex, "Model context overflowed or does not support native memory shifting. Resetting context and retrying generation cleanly.");
                         try
                         {
                             ResetContextInternal();
                             string safePrompt = prompt;
-                            int maxAllowedTokens = (int)Math.Max(512, ContextSize - 1024);
-                            try
-                            {
-                                int currentTokenCount = GetTokenCount(prompt);
-                                if (currentTokenCount > maxAllowedTokens)
-                                {
-                                    _logger.LogWarning("Prompt token count ({Count}) exceeds safe limit ({Max}). Truncating prompt for clean retry.", currentTokenCount, maxAllowedTokens);
-                                    safePrompt = TruncatePromptToTokenLimit(prompt, maxAllowedTokens);
-                                }
-                            }
-                            catch { }
 
-                            var retryStream = _executor.InferAsync(safePrompt, inferenceParams, cancellationToken: generationToken);
-                            await foreach (var token in retryStream)
+                            if (isFirstToken && _executor != null)
                             {
-                                if (generationToken.IsCancellationRequested) break;
-                                await channel.Writer.WriteAsync(token, generationToken);
+                                var retryStream = _executor.InferAsync(safePrompt, inferenceParams, cancellationToken: generationToken);
+                                await foreach (var token in retryStream)
+                                {
+                                    if (generationToken.IsCancellationRequested) break;
+                                    await channel.Writer.WriteAsync(token, generationToken);
+                                }
+                                completedNormally = true;
+                                generationException = null;
                             }
-                            completedNormally = true;
-                            generationException = null;
+                            else
+                            {
+                                _logger.LogWarning("Context limit reached after tokens were emitted; completing channel cleanly.");
+                                completedNormally = true;
+                                generationException = null;
+                            }
                         }
                         catch (Exception retryEx)
                         {
@@ -697,22 +768,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 {
                     if (isIsolated)
                     {
-                        if (!string.IsNullOrEmpty(savedLastEvaluatedPrompt) && _context != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid && savedTokenCount > 0)
-                        {
-                            try
-                            {
-                                _context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, (LLamaPos)savedTokenCount, (LLamaPos)(-1));
-                                _lastEvaluatedPrompt = savedLastEvaluatedPrompt;
-                            }
-                            catch
-                            {
-                                ResetContextInternal();
-                            }
-                        }
-                        else
-                        {
-                            ResetContextInternal();
-                        }
+                        ResetContextInternal();
                     }
                     else if (!completedNormally)
                     {
@@ -741,9 +797,23 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 // Otherwise, a canceled request might leave the background task running,
                 // and a subsequent request could dispose the context while it is still in use!
                 try { await generationTask.ConfigureAwait(false); } catch { }
-                if (triggerEvents)
+                if (triggerEvents && eventChannel != null && eventDispatcherTask != null)
                 {
-                    TokenGenerated?.Invoke(string.Empty, 0f);
+                    if (TokenGenerated != null)
+                    {
+                        var handlers = TokenGenerated;
+                        eventChannel.Writer.TryWrite(() => handlers.Invoke(string.Empty, 0f));
+                    }
+
+                    eventChannel.Writer.Complete();
+                    try
+                    {
+                        await eventDispatcherTask.ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogError(ex, "Error awaiting token event dispatcher task completion.");
+                    }
                 }
             }
 
@@ -846,6 +916,21 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         lock (_contextResetLock)
         {
             _lastEvaluatedPrompt = string.Empty;
+            if (_context != null && _context.NativeHandle != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
+            {
+                try
+                {
+                    _context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, 0, -1);
+                    _executor = new InteractiveExecutor(_context);
+                    _logger?.LogDebug("Fast KV cache sequence clear (MemorySequenceRemove) completed in ResetContextInternal.");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "Fast KV cache clearing failed; falling back to context recreation.");
+                }
+            }
+
             if (_weights != null && _modelParams != null)
             {
                 var oldContext = _context;
@@ -889,6 +974,27 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
             }
         }
+    }
+
+    internal static int GetSafePrefixBoundary(string s1, string s2)
+    {
+        if (string.IsNullOrEmpty(s1) || string.IsNullOrEmpty(s2)) return 0;
+        int minLen = Math.Min(s1.Length, s2.Length);
+        int matchLen = 0;
+        while (matchLen < minLen && s1[matchLen] == s2[matchLen])
+        {
+            matchLen++;
+        }
+
+        if (matchLen == s1.Length) return matchLen; // s1 is exact prefix of s2
+
+        // Look back for nearest newline or section tag boundary (e.g., '\n' or '>')
+        int safeBoundary = matchLen;
+        while (safeBoundary > 0 && s1[safeBoundary - 1] != '\n' && s1[safeBoundary - 1] != '>')
+        {
+            safeBoundary--;
+        }
+        return safeBoundary > 0 ? safeBoundary : matchLen;
     }
 
     private static readonly string[] TurnEndingStopTokens = new[]
@@ -989,7 +1095,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             if (tokens.Length <= targetTokenLimit) return prompt;
 
             var slicedTokens = tokens.AsSpan(tokens.Length - targetTokenLimit).ToArray();
-            return context.DeTokenize(slicedTokens);
+            var decoder = new LLama.StreamingTokenDecoder(context);
+            foreach (var token in slicedTokens)
+            {
+                decoder.Add(token);
+            }
+            return decoder.Read();
         }
         catch
         {

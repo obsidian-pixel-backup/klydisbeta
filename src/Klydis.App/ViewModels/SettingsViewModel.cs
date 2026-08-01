@@ -14,12 +14,13 @@ namespace Klydis.App.ViewModels;
 public enum SettingsCategory
 {
     Appearance,
-    Inference,
+    ModelSettings,
     About
 }
 
 public record DraftModelOption(string DisplayName, string FilePath);
 public record ContextSizeOption(string DisplayName, int Value);
+public record ContextSizeBucket(int Value, string Label, string ShortLabel);
 
 /// <summary>
 /// One tile in the Themes gallery. <see cref="Swatch"/> is a fixed preview color
@@ -79,7 +80,32 @@ public partial class SettingsViewModel : ObservableObject
     private string _selectedPersonality = "Default";
 
     [ObservableProperty]
+    private string _selectedPersonalityDescription = "Standard model output style without personality overrides.";
+
+    public static readonly ContextSizeBucket[] ContextBuckets = new[]
+    {
+        new ContextSizeBucket(0, "Auto (Smart Hardware Allocation)", "Auto"),
+        new ContextSizeBucket(1024, "1,024 tokens (1K)", "1K"),
+        new ContextSizeBucket(2048, "2,048 tokens (2K)", "2K"),
+        new ContextSizeBucket(4096, "4,096 tokens (4K)", "4K"),
+        new ContextSizeBucket(8192, "8,192 tokens (8K)", "8K"),
+        new ContextSizeBucket(16384, "16,384 tokens (16K)", "16K"),
+        new ContextSizeBucket(32768, "32,768 tokens (32K)", "32K"),
+        new ContextSizeBucket(65536, "65,536 tokens (64K)", "64K"),
+        new ContextSizeBucket(131072, "131,072 tokens (128K)", "128K"),
+        new ContextSizeBucket(262144, "262,144 tokens (256K)", "256K"),
+        new ContextSizeBucket(524288, "524,288 tokens (512K)", "512K"),
+        new ContextSizeBucket(1000000, "1,000,000 tokens (1 Million)", "1M")
+    };
+
+    [ObservableProperty]
     private int _selectedContextSize = 0;
+
+    [ObservableProperty]
+    private int _contextSliderIndex = 0;
+
+    [ObservableProperty]
+    private string _selectedContextSizeFormatted = "Auto (Smart Hardware Allocation)";
 
     [ObservableProperty]
     private string _speculativeStatusMessage = "Speculative decoding active.";
@@ -110,6 +136,20 @@ public partial class SettingsViewModel : ObservableObject
         _selectedPersonality = themeService.SelectedPersonality;
         _selectedContextSize = themeService.UserContextLimit;
         _inferenceEngine.UserContextLimit = (uint)_selectedContextSize;
+
+        int closestIdx = 0;
+        int minDiff = int.MaxValue;
+        for (int i = 0; i < ContextBuckets.Length; i++)
+        {
+            int diff = Math.Abs(ContextBuckets[i].Value - _selectedContextSize);
+            if (diff < minDiff)
+            {
+                minDiff = diff;
+                closestIdx = i;
+            }
+        }
+        _contextSliderIndex = closestIdx;
+        _selectedContextSizeFormatted = ContextBuckets[closestIdx].Label;
 
         if (_chatEngine != null)
         {
@@ -211,6 +251,12 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
+    [RelayCommand]
+    public void RefreshPersonalities()
+    {
+        RefreshAvailablePersonalities();
+    }
+
     private void RefreshAvailablePersonalities()
     {
         AvailablePersonalities.Clear();
@@ -224,6 +270,10 @@ public partial class SettingsViewModel : ObservableObject
         {
             SelectedPersonality = AvailablePersonalities[0];
         }
+        else
+        {
+            UpdatePersonalityDescription(SelectedPersonality);
+        }
     }
 
     partial void OnSelectedPersonalityChanged(string value)
@@ -234,6 +284,21 @@ public partial class SettingsViewModel : ObservableObject
         {
             _chatEngine.SelectedPersonality = pName;
         }
+        UpdatePersonalityDescription(pName);
+    }
+
+    private void UpdatePersonalityDescription(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Equals("Default", StringComparison.OrdinalIgnoreCase))
+        {
+            SelectedPersonalityDescription = "Standard model output style without personality overrides.";
+            return;
+        }
+
+        var prompt = Klydis.Core.Chat.SystemPromptManager.GetPersonalityPrompt(name);
+        SelectedPersonalityDescription = !string.IsNullOrWhiteSpace(prompt)
+            ? prompt
+            : $"Custom prompt directives for {name}.";
     }
 
     [RelayCommand]
@@ -346,5 +411,15 @@ public partial class SettingsViewModel : ObservableObject
     {
         _themeService.SaveContextSizeSetting(value);
         _inferenceEngine.UserContextLimit = (uint)value;
+    }
+
+    partial void OnContextSliderIndexChanged(int value)
+    {
+        int clampedIdx = Math.Clamp(value, 0, ContextBuckets.Length - 1);
+        var bucket = ContextBuckets[clampedIdx];
+        SelectedContextSize = bucket.Value;
+        SelectedContextSizeFormatted = bucket.Label;
+        _themeService.SaveContextSizeSetting(bucket.Value);
+        _inferenceEngine.UserContextLimit = (uint)bucket.Value;
     }
 }

@@ -435,48 +435,47 @@ public partial class HuggingFaceClient
         }
 
         using var contentStream = await response.Content.ReadAsStreamAsync(ct);
-        var fileStream = new FileStream(tempFilePath, canResume ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
-
-        var buffer = new byte[81920];
         long totalDownloaded = existingBytes;
-        int bytesRead;
-        var sw = Stopwatch.StartNew();
-        long lastReportedBytes = totalDownloaded;
-        var lastReportTime = sw.Elapsed;
-
-        while ((bytesRead = await contentStream.ReadAsync(buffer, ct)) > 0)
+        await using (var fileStream = new FileStream(tempFilePath, canResume ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
         {
-            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
-            totalDownloaded += bytesRead;
+            var buffer = new byte[81920];
+            int bytesRead;
+            var sw = Stopwatch.StartNew();
+            long lastReportedBytes = totalDownloaded;
+            var lastReportTime = sw.Elapsed;
 
-            var timeSinceLastReport = sw.Elapsed - lastReportTime;
-            if (timeSinceLastReport.TotalMilliseconds >= 500)
+            while ((bytesRead = await contentStream.ReadAsync(buffer, ct)) > 0)
             {
-                var bytesSinceLastReport = totalDownloaded - lastReportedBytes;
-                var speed = bytesSinceLastReport / timeSinceLastReport.TotalSeconds;
-                
-                double remainingSeconds = 0;
-                if (speed > 0 && totalBytes > 0)
+                await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
+                totalDownloaded += bytesRead;
+
+                var timeSinceLastReport = sw.Elapsed - lastReportTime;
+                if (timeSinceLastReport.TotalMilliseconds >= 500)
                 {
-                    remainingSeconds = (totalBytes - totalDownloaded) / speed;
+                    var bytesSinceLastReport = totalDownloaded - lastReportedBytes;
+                    var speed = bytesSinceLastReport / timeSinceLastReport.TotalSeconds;
+                    
+                    double remainingSeconds = 0;
+                    if (speed > 0 && totalBytes > 0)
+                    {
+                        remainingSeconds = (totalBytes - totalDownloaded) / speed;
+                    }
+
+                    double percent = totalBytes > 0 ? (double)totalDownloaded / totalBytes * 100 : 0;
+
+                    progress?.Report(new DownloadProgress(
+                        totalDownloaded,
+                        totalBytes,
+                        speed,
+                        remainingSeconds,
+                        percent
+                    ));
+
+                    lastReportedBytes = totalDownloaded;
+                    lastReportTime = sw.Elapsed;
                 }
-
-                double percent = totalBytes > 0 ? (double)totalDownloaded / totalBytes * 100 : 0;
-
-                progress?.Report(new DownloadProgress(
-                    totalDownloaded,
-                    totalBytes,
-                    speed,
-                    remainingSeconds,
-                    percent
-                ));
-
-                lastReportedBytes = totalDownloaded;
-                lastReportTime = sw.Elapsed;
             }
         }
-
-        fileStream.Dispose();
         
         if (totalBytes > 0 && totalDownloaded < totalBytes)
         {

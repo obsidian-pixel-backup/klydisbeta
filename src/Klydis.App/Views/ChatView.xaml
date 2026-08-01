@@ -568,6 +568,7 @@
                 <ListBox x:Name="MessagesList" ItemsSource="{Binding Messages}"
                           Background="Transparent" BorderThickness="0"
                           ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                          ScrollViewer.ScrollChanged="ScrollViewer_ScrollChanged"
                           VirtualizingPanel.IsVirtualizing="True"
                           VirtualizingPanel.ScrollUnit="Pixel"
                           PreviewMouseWheel="MessagesList_PreviewMouseWheel"
@@ -1484,6 +1485,19 @@
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center"/>
                                 </Border>
+
+                                <!-- Unread Notification Badge Dot -->
+                                <Ellipse x:Name="UnreadBadge"
+                                         Width="10" Height="10"
+                                         Fill="{DynamicResource AccentPrimaryBrush}"
+                                         HorizontalAlignment="Right"
+                                         VerticalAlignment="Top"
+                                         Margin="0,0,0,0"
+                                         Visibility="Collapsed">
+                                    <Ellipse.Effect>
+                                        <DropShadowEffect BlurRadius="6" ShadowDepth="0" Color="#007ACC" Opacity="0.85"/>
+                                    </Ellipse.Effect>
+                                </Ellipse>
                             </Grid>
                             <ControlTemplate.Triggers>
                                 <Trigger Property="IsMouseOver" Value="True">

@@ -170,7 +170,15 @@ public sealed class ModelPool : IDisposable, IAsyncDisposable
             
             var engineLogger = _loggerFactory.CreateLogger<InferenceEngine>();
             var engine = new InferenceEngine(engineLogger, _nativeResourceDisposer);
-            await engine.LoadModelAsync(modelFilePath, offloadPlan);
+            try
+            {
+                await engine.LoadModelAsync(modelFilePath, offloadPlan);
+            }
+            catch
+            {
+                await engine.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
 
             var newModelInfo = new LoadedModelInfo(engine, modelId);
             _loadedModels[modelId] = newModelInfo;

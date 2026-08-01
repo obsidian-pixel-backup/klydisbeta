@@ -633,6 +633,11 @@ public class ToolExecutor(
             var stdout = await stdoutTask;
             var stderr = await stderrTask;
 
+            if (!string.IsNullOrEmpty(stderr) && stderr.Contains("CLIXML", StringComparison.OrdinalIgnoreCase))
+            {
+                stderr = System.Text.RegularExpressions.Regex.Replace(stderr, @"#<\s*CLIXML[\s\S]*?</Objs>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+            }
+
             var output = stdout;
             if (!string.IsNullOrEmpty(stderr))
             {

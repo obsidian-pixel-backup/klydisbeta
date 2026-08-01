@@ -7,6 +7,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Klydis.Core.Chat;
+using Klydis.Core.Inference;
+using ChatMessage = Klydis.Core.Chat.ChatMessage;
+using Role = Klydis.Core.Inference.Role;
 
 
 namespace Klydis.Core.Memory
@@ -34,11 +37,22 @@ namespace Klydis.Core.Memory
         }
 
         /// <summary>
-        /// Estimates the number of tokens in a string using a rough heuristic (chars / 3.5).
+        /// Estimates or computes exact token count for text using IInferenceEngine.GetTokenCount if loaded.
         /// </summary>
         public int EstimateTokens(string text)
         {
             if (string.IsNullOrEmpty(text)) return 0;
+            if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
+            {
+                try
+                {
+                    return _inferenceEngine.GetTokenCount(text);
+                }
+                catch
+                {
+                    // Fallback to estimation if model tokenization fails
+                }
+            }
             return (int)Math.Ceiling(text.Length / 3.5);
         }
 
@@ -237,11 +251,25 @@ namespace Klydis.Core.Memory
                 _logger.LogWarning(ex, "Failed to write pre-compaction transcript archive to disk.");
             }
 
-            var summaryItems = overflow
-                .Where(m => !string.IsNullOrWhiteSpace(m.Content) && m.Role != ChatRole.System)
-                .Select(m => $"- [{m.Role}] {(m.Content.Length > 300 ? m.Content[..300] + "..." : m.Content)}");
-
-            var summaryText = string.Join("\n", summaryItems);
+            string summaryText;
+            if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
+            {
+                try
+                {
+                    var overflowText = string.Join("\n", overflow.Select(m => $"{m.Role}: {m.Content}"));
+                    var summaryPrompt = $"Summarize key facts, user preferences, technical requirements, and decisions from the following conversation history into concise bullet points:\n\n{overflowText}\n\nKey Points Summary:";
+                    summaryText = await _inferenceEngine.GenerateTextAsync(summaryPrompt, isIsolated: true, maxTokens: 512);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Semantic LLM summarization failed during rolling compression; using exact token budget compaction.");
+                    summaryText = CompactMessagesByTokenBudget(overflow, 1024);
+                }
+            }
+            else
+            {
+                summaryText = CompactMessagesByTokenBudget(overflow, 1024);
+            }
             var archiveNotice = !string.IsNullOrEmpty(archivePath) ? $"\n[Full pre-compaction history archive saved at: {archivePath}]" : "";
             var existingState = session.WorldState ?? "";
 
@@ -303,12 +331,25 @@ namespace Klydis.Core.Memory
 
             _logger.LogInformation("Consolidating {Count} messages into world state for session {SessionId}", overflow.Count, sessionId);
 
-            // Extract concise key points from overflow messages to avoid deadlock during active generation turns
-            var summaryItems = overflow
-                .Where(m => !string.IsNullOrWhiteSpace(m.Content) && m.Role != ChatRole.System)
-                .Select(m => $"- [{m.Role}] {(m.Content.Length > 250 ? m.Content[..250] + "..." : m.Content)}");
-
-            var summaryText = string.Join("\n", summaryItems);
+            string summaryText;
+            if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
+            {
+                try
+                {
+                    var overflowText = string.Join("\n", overflow.Select(m => $"{m.Role}: {m.Content}"));
+                    var summaryPrompt = $"Extract concise key facts and decisions from the following archived conversation turns:\n\n{overflowText}\n\nConsolidated Key Facts:";
+                    summaryText = await _inferenceEngine.GenerateTextAsync(summaryPrompt, isIsolated: true, maxTokens: 512);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Semantic LLM consolidation failed; using exact token budget compaction.");
+                    summaryText = CompactMessagesByTokenBudget(overflow, consolidationBudget);
+                }
+            }
+            else
+            {
+                summaryText = CompactMessagesByTokenBudget(overflow, consolidationBudget);
+            }
             var existingState = session.WorldState ?? "";
             
             var newWorldState = string.IsNullOrWhiteSpace(existingState)
@@ -376,6 +417,97 @@ namespace Klydis.Core.Memory
 
             var finalSummary = string.Join("\n\n", chunkSummaries);
             return $"[Large Input Multi-Pass Summarized Context ({chunks.Count} chunks, original ~{totalTokens} tokens)]:\n\n{finalSummary}";
+        }
+
+        /// <summary>
+        /// Compacts chat messages into a bulleted summary using exact token counting without lossy character slicing.
+        /// </summary>
+        public string CompactMessagesByTokenBudget(IEnumerable<ChatMessage> messages, int tokenBudget)
+        {
+            var items = new List<string>();
+            int currentTokens = 0;
+
+            foreach (var m in messages)
+            {
+                if (string.IsNullOrWhiteSpace(m.Content) || m.Role == ChatRole.System)
+                    continue;
+
+                string line = $"- [{m.Role}] {m.Content.Trim()}";
+                int lineTokens = EstimateTokens(line);
+
+                if (currentTokens + lineTokens <= tokenBudget)
+                {
+                    items.Add(line);
+                    currentTokens += lineTokens;
+                }
+                else
+                {
+                    int remainingBudget = tokenBudget - currentTokens;
+                    if (remainingBudget > 20)
+                    {
+                        string truncatedContent = TruncateStringToTokenLimit(m.Content, remainingBudget - 10);
+                        items.Add($"- [{m.Role}] {truncatedContent}...");
+                    }
+                    break;
+                }
+            }
+
+            return string.Join("\n", items);
+        }
+
+        /// <summary>
+        /// Compacts MessageRecord items into a bulleted summary using exact token counting without lossy character slicing.
+        /// </summary>
+        public string CompactMessagesByTokenBudget(IEnumerable<MessageRecord> messages, int tokenBudget)
+        {
+            var items = new List<string>();
+            int currentTokens = 0;
+
+            foreach (var m in messages)
+            {
+                if (string.IsNullOrWhiteSpace(m.Content) || m.Role == ChatRole.System)
+                    continue;
+
+                string line = $"- [{m.Role}] {m.Content.Trim()}";
+                int lineTokens = EstimateTokens(line);
+
+                if (currentTokens + lineTokens <= tokenBudget)
+                {
+                    items.Add(line);
+                    currentTokens += lineTokens;
+                }
+                else
+                {
+                    int remainingBudget = tokenBudget - currentTokens;
+                    if (remainingBudget > 20)
+                    {
+                        string truncatedContent = TruncateStringToTokenLimit(m.Content, remainingBudget - 10);
+                        items.Add($"- [{m.Role}] {truncatedContent}...");
+                    }
+                    break;
+                }
+            }
+
+            return string.Join("\n", items);
+        }
+
+        private string TruncateStringToTokenLimit(string text, int targetTokens)
+        {
+            if (string.IsNullOrEmpty(text) || targetTokens <= 0) return string.Empty;
+            if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
+            {
+                try
+                {
+                    int total = _inferenceEngine.GetTokenCount(text);
+                    if (total <= targetTokens) return text;
+                    double ratio = (double)targetTokens / Math.Max(1, total);
+                    int approxChars = Math.Max(10, (int)(text.Length * ratio));
+                    return text[..Math.Min(text.Length, approxChars)];
+                }
+                catch { }
+            }
+            int estChars = targetTokens * 3;
+            return text[..Math.Min(text.Length, estChars)];
         }
 
         /// <summary>

@@ -98,7 +98,7 @@ public class ThemeService
                     SpeculativeDraftCount = settings.SpeculativeDraftCount > 0 ? Math.Clamp(settings.SpeculativeDraftCount, 4, 32) : 24;
                     SelectedDraftModelPath = string.IsNullOrWhiteSpace(settings.SelectedDraftModelPath) ? "auto" : settings.SelectedDraftModelPath;
                     SelectedPersonality = string.IsNullOrWhiteSpace(settings.SelectedPersonality) ? "Default" : settings.SelectedPersonality;
-                    UserContextLimit = settings.UserContextLimit;
+                    UserContextLimit = settings.UserContextLimit > 0 ? settings.UserContextLimit : 65536;
                 }
             }
         }
@@ -163,7 +163,7 @@ public class ThemeService
     public int SpeculativeDraftCount { get; private set; } = 24;
     public string SelectedDraftModelPath { get; private set; } = "auto";
     public string SelectedPersonality { get; private set; } = "Default";
-    public int UserContextLimit { get; private set; } = 0;
+    public int UserContextLimit { get; private set; } = 65536;
 
     public void SaveSpeculativeSettings(bool enabled, int draftCount, string selectedDraftModelPath = "auto")
     {

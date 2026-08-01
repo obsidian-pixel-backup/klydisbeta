@@ -382,29 +382,33 @@ public class ChatEngine(
         
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
         
-        // Calculate system prompt size for context shifting (TokensKeep)
+        // Calculate system prompt size
         var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType);
-        int sysPromptTokens = inferenceEngine.GetTokenCount(sysOnlyPrompt);
+        int sysPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(sysOnlyPrompt) : contextOrchestrator.EstimateTokens(sysOnlyPrompt);
 
         // Dynamic sliding context window calculation reserving response headroom and safety margin.
-        // The system prompt is pinned and does NOT subtract from the allocated user input context limit.
-        int maxUserBudget = (int)inferenceEngine.ContextSize;
-        int reservedForResponse = maxUserBudget switch
+        int totalContext = (int)inferenceEngine.ContextSize;
+        int reservedForResponse = totalContext switch
         {
-            <= 4096 => 1536,
-            <= 16384 => Math.Min(maxUserBudget / 3, 4096),
-            <= 65536 => Math.Min(maxUserBudget / 4, 8192),
-            _ => Math.Min(maxUserBudget / 4, 16384)
+            <= 4096 => 1024,
+            <= 16384 => Math.Min(totalContext / 4, 3072),
+            <= 65536 => Math.Min(totalContext / 4, 6144),
+            _ => Math.Min(totalContext / 4, 12288)
         };
-        int safetyMargin = 64;
-        int targetUserBudget = Math.Max(maxUserBudget - reservedForResponse - safetyMargin, 512);
+        int safetyMargin = 256;
+        
+        // ABSOLUTE upper bound for total prompt tokens (system + user history)
+        int maxTotalPromptTokens = Math.Max(512, totalContext - reservedForResponse - safetyMargin);
+        
+        // Target user budget for conversation history after accounting for system prompt
+        int targetUserBudget = Math.Max(256, maxTotalPromptTokens - sysPromptTokens);
 
         var activeMessages = new List<ChatMessage>();
         int currentTokens = 0; // System prompt is excluded from user history budget
         bool hasDroppedMessages = false;
 
         ChatMessage? initialUserMsg = activeHistory.Count > 0 ? activeHistory[0] : null;
-        int initialUserTokens = initialUserMsg != null ? (inferenceEngine.GetTokenCount(initialUserMsg.Content) + 25) : 0;
+        int initialUserTokens = initialUserMsg != null ? ((inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(initialUserMsg.Content) : contextOrchestrator.EstimateTokens(initialUserMsg.Content)) + 25) : 0;
         
         // Reserve budget up front for the user's initial prompt goal (activeHistory[0])
         currentTokens += initialUserTokens;
@@ -413,7 +417,7 @@ public class ChatEngine(
         for (int i = activeHistory.Count - 1; i >= 1; i--)
         {
             var msg = activeHistory[i];
-            int msgTokens = inferenceEngine.GetTokenCount(msg.Content) + 25; // 25 tokens for template formatting overhead
+            int msgTokens = (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(msg.Content) : contextOrchestrator.EstimateTokens(msg.Content)) + 25; // 25 tokens for template formatting overhead
             if (currentTokens + msgTokens <= targetUserBudget)
             {
                 activeMessages.Insert(0, msg);
@@ -452,19 +456,18 @@ public class ChatEngine(
         messages.AddRange(activeMessages);
 
         var prompt = promptEngine.ApplyTemplate(messages, templateType);
-        int finalPromptTokens = inferenceEngine.GetTokenCount(prompt);
-        int maxAllowedPromptTokens = targetUserBudget + sysPromptTokens;
+        int finalPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(prompt) : contextOrchestrator.EstimateTokens(prompt);
 
-        // Safety truncation loop: If template tokens exceed maxAllowedPromptTokens, prune intermediate active messages (preserving history[0])
-        while (finalPromptTokens > maxAllowedPromptTokens && activeMessages.Count > 1)
+        // Strict safety truncation loop: Ensure total prompt tokens strictly fit inside maxTotalPromptTokens
+        while (finalPromptTokens > maxTotalPromptTokens && activeMessages.Count > 1)
         {
-            // Remove message at index 1 (after initial user prompt) to protect _history[0]
+            // Remove message at index 1 (after initial user prompt) to protect activeHistory[0]
             activeMessages.RemoveAt(1);
             hasDroppedMessages = true;
             messages = new List<ChatMessage> { sysPromptMsg };
             messages.AddRange(activeMessages);
             prompt = promptEngine.ApplyTemplate(messages, templateType);
-            finalPromptTokens = inferenceEngine.GetTokenCount(prompt);
+            finalPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(prompt) : contextOrchestrator.EstimateTokens(prompt);
         }
 
         var fullResponseBuilder = new StringBuilder();
@@ -1171,11 +1174,19 @@ public class ChatEngine(
             if (IsGenerating)
             {
                 logger.LogInformation("ChatEngine is generating; deriving title from user message to prevent lock contention.");
-                return DeriveTitleFromMessage(userMessage);
+                return TitleSanitizer.DeriveTitleFromMessage(userMessage);
             }
 
-            var sysPrompt = "You are an AI that generates a concise 2-4 word title for a conversation based on the user's first message and the assistant's reply. Do not use quotes, punctuation, or thinking tags. Output ONLY the title.";
-            var userPrompt = $"User: {userMessage}\nAssistant: {assistantResponse}\n\nTitle:";
+            var cleanUser = TitleSanitizer.PrepareTextForPrompt(userMessage);
+            var cleanAssistant = TitleSanitizer.PrepareTextForPrompt(assistantResponse);
+
+            if (string.IsNullOrWhiteSpace(cleanUser))
+            {
+                return "New Chat";
+            }
+
+            var sysPrompt = "You are an AI assistant that creates clean, concise 2-5 word titles summarizing user conversations. Do NOT use quotes, markdown, bullet points, special characters, or prefixes (like 'Title:'). Output ONLY the raw title text.";
+            var userPrompt = $"User: {cleanUser}\nAssistant: {cleanAssistant}\n\nTitle:";
 
             var templateType = promptEngine.DetectTemplate(
                 inferenceEngine.Architecture, 
@@ -1192,31 +1203,22 @@ public class ChatEngine(
             
             var generatedText = await inferenceEngine.GenerateTextAsync(prompt, isIsolated: true, ct);
             
-            // Clean up any think blocks or quotes just in case
-            generatedText = Regex.Replace(generatedText, @"<think>.*?</think>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
-            generatedText = generatedText.Trim('"', '\'', ' ', '\n', '\r', '.', '*');
+            var sanitizedTitle = TitleSanitizer.SanitizeTitle(generatedText);
             
-            if (string.IsNullOrWhiteSpace(generatedText))
-                return DeriveTitleFromMessage(userMessage);
+            if (string.IsNullOrWhiteSpace(sanitizedTitle) || sanitizedTitle == "New Chat")
+                return TitleSanitizer.DeriveTitleFromMessage(userMessage);
 
-            // Limit to max 50 chars just in case
-            if (generatedText.Length > 50)
-                generatedText = generatedText.Substring(0, 50).Trim();
-
-            return generatedText;
+            return sanitizedTitle;
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to generate title.");
-            return DeriveTitleFromMessage(userMessage);
+            return TitleSanitizer.DeriveTitleFromMessage(userMessage);
         }
     }
 
     private static string DeriveTitleFromMessage(string userMessage)
     {
-        if (string.IsNullOrWhiteSpace(userMessage)) return "New Chat";
-        var words = userMessage.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Take(5);
-        var title = string.Join(" ", words).Trim('"', '\'', ' ', '.', ',', '!', '?');
-        return string.IsNullOrWhiteSpace(title) ? "New Chat" : (title.Length > 50 ? title.Substring(0, 50).Trim() : title);
+        return TitleSanitizer.DeriveTitleFromMessage(userMessage);
     }
 }

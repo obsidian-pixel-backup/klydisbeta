@@ -100,10 +100,15 @@ public class SystemPromptManager
     /// </summary>
     public static readonly string[] UserStyleFileNameCandidates = new[]
     {
+        "user style.md",
+        "user_style.md",
+        "UserStyle.md",
         "UserStyle_Modes.md",
         "user styles mode.md",
         "UserStyle_Mode.md",
-        "UserStyles.md"
+        "UserStyles.md",
+        "user style mode.md",
+        "user_style_modes.md"
     };
 
     /// <summary>
@@ -302,11 +307,15 @@ public class SystemPromptManager
         sb.AppendLine("- Use 'crawl_url' when you need the full content of a specific page (documentation, articles, web apps). It renders dynamic JavaScript and bypasses anti-bot verification.");
         sb.AppendLine("- After receiving search/crawl results, SUMMARIZE the key information concisely for the user. Do NOT dump raw search output.");
         sb.AppendLine();
+        sb.AppendLine("### RESPONSE & LIST FORMATTING DIRECTIVES");
+        sb.AppendLine("- PROPER LIST FORMATTING: Always format numbered items and bullet points cleanly with standard Markdown line breaks. Every list item MUST sit on its own separate line.");
+        sb.AppendLine("- NEVER compress or squash numbered steps into a single continuous line (e.g. NEVER write '1) Step one 2) Step two 3) Step three' squished on one line).");
+        sb.AppendLine();
         sb.AppendLine("### IMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING");
         sb.AppendLine("1. If you need to think or plan, use <think>...</think> tags FIRST.");
         sb.AppendLine("2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.");
         sb.AppendLine("3. To use a tool, output a JSON block exactly like this: <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>");
-        sb.AppendLine("4. CRITICAL: Whenever the user asks you to perform an action, test tools, inspect system/files, execute commands, or manage skills, YOU MUST CALL THE TOOL IMMEDIATELY using the <tool_call> tag. Do not just state that you will run a tool—OUTPUT THE <tool_call> TAG DIRECTLY.");
+        sb.AppendLine("4. CRITICAL: Whenever the user asks you to perform an action, test tools, inspect system/files, execute commands, explore/study a codebase, or manage skills, YOU MUST CALL THE TOOL IMMEDIATELY using the <tool_call> tag. Do NOT ask clarifying questions or elicitation options—take autonomous action and execute the exploration/indexing tools immediately.");
         sb.AppendLine("5. SKILL BRAIN & LEARNING: You are connected to a Skills Library Brain. You can use 'list_skills' or 'search_skills' to discover skills, 'get_skill_details' or 'activate_skill' to inspect/activate specialized domain instructions, and 'learn_skill' to create and save new custom skills to your library brain when learning new workflows or user directives.");
         sb.AppendLine("6. Examples of tool calls:");
         sb.AppendLine("   - Call tool with no arguments: <tool_call>{\"name\": \"get_system_info\", \"arguments\": {}}</tool_call>");

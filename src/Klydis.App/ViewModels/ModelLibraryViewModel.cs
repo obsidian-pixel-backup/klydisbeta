@@ -462,7 +462,7 @@ public partial class ModelLibraryViewModel : ObservableObject
                 contextLength, 
                 gpuInfo, 
                 systemInfo, 
-                Klydis.Core.Hardware.OffloadStrategyType.BalancedSplit);
+                Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
 
             if (ct.IsCancellationRequested || seqId != System.Threading.Volatile.Read(ref _modelLoadSequenceId)) return;
 

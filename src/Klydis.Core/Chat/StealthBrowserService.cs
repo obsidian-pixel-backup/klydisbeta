@@ -146,39 +146,47 @@ public class StealthBrowserService : IAsyncDisposable
         if (_persistentContext == null)
         {
             _playwright = await Playwright.CreateAsync();
-
-            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var profileDir = Path.Combine(userProfile, ".klydis", "browser_profile");
-            Directory.CreateDirectory(profileDir);
-
-            var camoufoxPath = await _camoufoxManager.GetExecutablePathAsync(ct);
-            var randomAgent = DefaultUserAgents[Random.Shared.Next(DefaultUserAgents.Length)];
-
-            var contextOptions = new BrowserTypeLaunchPersistentContextOptions
+            try
             {
-                Headless = true,
-                UserAgent = randomAgent,
-                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
-                Locale = "en-US",
-                TimezoneId = "America/New_York",
-                Args = new[]
+                var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                var profileDir = Path.Combine(userProfile, ".klydis", "browser_profile");
+                Directory.CreateDirectory(profileDir);
+
+                var camoufoxPath = await _camoufoxManager.GetExecutablePathAsync(ct);
+                var randomAgent = DefaultUserAgents[Random.Shared.Next(DefaultUserAgents.Length)];
+
+                var contextOptions = new BrowserTypeLaunchPersistentContextOptions
                 {
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-infobars"
-                }
-            };
+                    Headless = true,
+                    UserAgent = randomAgent,
+                    ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+                    Locale = "en-US",
+                    TimezoneId = "America/New_York",
+                    Args = new[]
+                    {
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-infobars"
+                    }
+                };
 
-            if (!string.IsNullOrEmpty(camoufoxPath) && File.Exists(camoufoxPath))
-            {
-                _logger.LogInformation("Launching Playwright with stealth Camoufox engine binary at: {Path}", camoufoxPath);
-                contextOptions.ExecutablePath = camoufoxPath;
-                _persistentContext = await _playwright.Firefox.LaunchPersistentContextAsync(profileDir, contextOptions);
+                if (!string.IsNullOrEmpty(camoufoxPath) && File.Exists(camoufoxPath))
+                {
+                    _logger.LogInformation("Launching Playwright with stealth Camoufox engine binary at: {Path}", camoufoxPath);
+                    contextOptions.ExecutablePath = camoufoxPath;
+                    _persistentContext = await _playwright.Firefox.LaunchPersistentContextAsync(profileDir, contextOptions);
+                }
+                else
+                {
+                    _logger.LogInformation("Camoufox binary unavailable. Launching standard Playwright Chromium with stealth patches.");
+                    _persistentContext = await _playwright.Chromium.LaunchPersistentContextAsync(profileDir, contextOptions);
+                }
             }
-            else
+            catch
             {
-                _logger.LogInformation("Camoufox binary unavailable. Launching standard Playwright Chromium with stealth patches.");
-                _persistentContext = await _playwright.Chromium.LaunchPersistentContextAsync(profileDir, contextOptions);
+                _playwright?.Dispose();
+                _playwright = null;
+                throw;
             }
         }
 

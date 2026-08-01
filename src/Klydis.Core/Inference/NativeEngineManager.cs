@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
@@ -15,6 +16,44 @@ namespace Klydis.Core.Inference;
 /// </summary>
 public static class NativeEngineManager
 {
+    private static int _nativeConfigInitialized = 0;
+
+    /// <summary>
+    /// Guarantees that LLamaSharp NativeLibraryConfig is initialized safely exactly once process-wide.
+    /// Idempotent and thread-safe across parallel test runs and application execution.
+    /// </summary>
+    public static void EnsureNativeLibraryConfigured(bool enableCuda = true, bool enableVulkan = false)
+    {
+        if (Interlocked.CompareExchange(ref _nativeConfigInitialized, 1, 0) == 0)
+        {
+            try
+            {
+                EnsureCudaRuntimesSynced();
+                var appBaseDir = AppDomain.CurrentDomain.BaseDirectory;
+                var cuda12Dir = Path.Combine(appBaseDir, "runtimes", "win-x64", "native", "cuda12");
+                var cuda13Dir = Path.Combine(appBaseDir, "runtimes", "win-x64", "native", "cuda13");
+
+                LLama.Native.NativeLibraryConfig.All
+                    .WithCuda(enableCuda)
+                    .WithVulkan(enableVulkan)
+                    .WithSearchDirectory(appBaseDir)
+                    .WithSearchDirectory(cuda12Dir)
+                    .WithSearchDirectory(cuda13Dir)
+                    .WithLogCallback((level, message) => {
+                        try
+                        {
+                            File.AppendAllText("llama_native.log", $"[{level}] {message}{Environment.NewLine}");
+                        }
+                        catch { /* Ignore logging errors if file is locked */ }
+                    });
+            }
+            catch (InvalidOperationException)
+            {
+                // Native library was already loaded by prior native operations in the process.
+            }
+        }
+    }
+
     private static readonly string KlydisHomeDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".klydis"
@@ -109,6 +148,72 @@ public static class NativeEngineManager
         }
 
         return copiedCount;
+    }
+
+    /// <summary>
+    /// Ensures CUDA runtime subdirectories (including cuda13 mapped from cuda12 if needed)
+    /// and root app directories are synced with CUDA native binaries.
+    /// </summary>
+    public static void EnsureCudaRuntimesSynced(string? targetDirectory = null, ILogger? logger = null)
+    {
+        try
+        {
+            targetDirectory ??= AppDomain.CurrentDomain.BaseDirectory;
+            var nativeDir = Path.Combine(targetDirectory, "runtimes", "win-x64", "native");
+
+            var system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            bool isCudaSupported = File.Exists(Path.Combine(system32, "nvcuda.dll"));
+
+            if (!isCudaSupported || !Directory.Exists(nativeDir)) return;
+
+            var cuda13Path = Path.Combine(nativeDir, "cuda13");
+            var cuda12Path = Path.Combine(nativeDir, "cuda12");
+
+            if (!Directory.Exists(cuda13Path) && Directory.Exists(cuda12Path))
+            {
+                try
+                {
+                    Directory.CreateDirectory(cuda13Path);
+                    foreach (var file in Directory.GetFiles(cuda12Path))
+                    {
+                        File.Copy(file, Path.Combine(cuda13Path, Path.GetFileName(file)), overwrite: true);
+                    }
+                    logger?.LogInformation("Created and populated cuda13 native directory from cuda12.");
+                }
+                catch (Exception ex)
+                {
+                    logger?.LogWarning(ex, "Failed replicating cuda12 binaries to cuda13 directory.");
+                }
+            }
+
+            string sourceSubFolder = Directory.Exists(cuda13Path) ? "cuda13" : (Directory.Exists(cuda12Path) ? "cuda12" : "");
+            if (!string.IsNullOrEmpty(sourceSubFolder))
+            {
+                var sourcePath = Path.Combine(nativeDir, sourceSubFolder);
+                foreach (var file in Directory.GetFiles(sourcePath))
+                {
+                    var fileName = Path.GetFileName(file);
+                    var destFile = Path.Combine(targetDirectory, fileName);
+                    try
+                    {
+                        var srcInfo = new FileInfo(file);
+                        var destInfo = File.Exists(destFile) ? new FileInfo(destFile) : null;
+                        if (destInfo == null || destInfo.Length != srcInfo.Length)
+                        {
+                            File.Copy(file, destFile, overwrite: true);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger?.LogWarning(ex, "Could not sync CUDA file {File} to base directory.", fileName);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex, "Error ensuring CUDA runtimes are synced.");
+        }
     }
 
     /// <summary>

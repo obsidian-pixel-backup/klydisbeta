@@ -102,67 +102,79 @@ public class OffloadStrategy
         int totalVramMb = gpuInfo?.TotalVramMb ?? 0;
         int reportedFreeVramMb = gpuInfo?.FreeVramMb ?? 0;
 
-        // Respect actual free VRAM, using a safe ceiling (90% of total VRAM) for system headroom.
-        // If reported free VRAM is lower than 90% total VRAM (e.g. during model switching or high GPU usage),
-        // use reported free VRAM to avoid forcing full offload and causing CUDA OOM crashes.
-        int maxUsableVramMb = totalVramMb > 0 ? (int)(totalVramMb * 0.90) : reportedFreeVramMb;
-        int usableVramMb = (reportedFreeVramMb > 0)
-            ? Math.Min(maxUsableVramMb, reportedFreeVramMb)
-            : maxUsableVramMb;
+        bool isCudaAvailable = System.IO.File.Exists(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "nvcuda.dll"));
 
-        // Tightened driver context reservation (200MB)
-        int driverOverheadMb = 200;
-
-        // Tightened compute graph workspace buffer for single-sequence inference (150MB)
-        int computeGraphMb = 150;
-
-        int netAvailableVramMb = Math.Max(0, usableVramMb - driverOverheadMb - computeGraphMb);
-
-        double layerSizeMb = layerSizeBytes / 1048576.0;
-        if (layerSizeMb <= 0) layerSizeMb = 1.0;
-
-        // Non-layer weight overhead (embedding table + output head: ~10% of total layer weights)
-        double nonLayerWeightsMb = (totalLayers * layerSizeMb * 0.10);
-
-        // Calculate KV cache footprint at full native requested context length
-        double totalKvCacheMb = (totalLayers * kvCachePerLayerBytes * contextLength) / 1048576.0;
-        double fullModelVramCostMb = (totalLayers * layerSizeMb) + totalKvCacheMb + nonLayerWeightsMb;
-
-        int recommendedContext = Math.Max(32768, contextLength);
-        int targetGpuLayers;
-
-        // Check if full model fits in net available VRAM (or usable VRAM headroom)
-        if (netAvailableVramMb > 0 && fullModelVramCostMb <= netAvailableVramMb)
+        if ((gpuInfo == null || totalVramMb <= 4096) && isCudaAvailable && strategyType == OffloadStrategyType.FullGpu)
         {
-            targetGpuLayers = totalLayers;
+            // Default to assuming 16GB VRAM on CUDA systems if profiler returned null, 0, or 4GB WMI saturation limit
+            totalVramMb = 16384;
+            reportedFreeVramMb = 15000;
         }
-        else if (strategyType == OffloadStrategyType.FullGpu && netAvailableVramMb > 0 && fullModelVramCostMb <= (netAvailableVramMb + 100))
+
+        // Determine usable VRAM ceiling based on chosen offload strategy
+        int usableVramMb;
+        if (strategyType == OffloadStrategyType.FullGpu)
         {
+            // Full GPU strategy targets up to 98% of total VRAM (reserving ~300 MB for driver/display context)
+            int vramCeilingMb = totalVramMb > 0 ? (int)(totalVramMb * 0.98) : reportedFreeVramMb;
+            // Account for previous model cleanup lag by allowing full VRAM ceiling if free VRAM reported is low right before load
+            usableVramMb = (totalVramMb > 0) ? Math.Max(reportedFreeVramMb, vramCeilingMb) : reportedFreeVramMb;
+        }
+        else
+        {
+            // Balanced split leaves ~10% headroom (or min 1000MB) for system/other applications
+            int vramCeilingMb = totalVramMb > 0 ? (int)(totalVramMb * 0.90) : reportedFreeVramMb;
+            usableVramMb = reportedFreeVramMb > 0 ? Math.Min(vramCeilingMb, reportedFreeVramMb) : vramCeilingMb;
+        }
+
+        int driverOverheadMb = 250;
+        int netAvailableVramMb = Math.Max(0, usableVramMb - driverOverheadMb);
+
+        double totalModelSizeMb = (totalLayers * layerSizeBytes) / 1048576.0;
+        double layerSizeMb = totalLayers > 0 ? totalModelSizeMb / totalLayers : 1.0;
+
+        // Use exact requested context length, clamped to a reasonable range (2048 to 131072)
+        int targetContext = Math.Clamp(contextLength, 2048, 131072);
+
+        // Calculate KV cache per layer at target context length
+        double kvCacheMbPerLayer = (kvCachePerLayerBytes * targetContext) / 1048576.0;
+        double vramCostPerLayerMb = layerSizeMb + kvCacheMbPerLayer;
+
+        // Full model cost = total weights + total KV cache + CUDA driver context overhead
+        double totalKvCacheMb = totalLayers * kvCacheMbPerLayer;
+        double fullModelVramCostMb = totalModelSizeMb + totalKvCacheMb + CudaContextOverheadMb;
+
+        int targetGpuLayers;
+        int recommendedContext = targetContext;
+
+        if (netAvailableVramMb > 0 && (fullModelVramCostMb <= netAvailableVramMb || totalVramMb >= 8000 || strategyType == OffloadStrategyType.FullGpu))
+        {
+            // 100% of layers fit into GPU VRAM (or hardware VRAM >= 8GB / FullGpu strategy)
             targetGpuLayers = totalLayers;
         }
         else if (netAvailableVramMb > 0)
         {
-            // Calculate maximum layers that fit in available VRAM at requested context
-            double vramPerLayerWithKvMb = layerSizeMb + ((kvCachePerLayerBytes * recommendedContext) / 1048576.0);
-            double availableForLayers = Math.Max(0, netAvailableVramMb - nonLayerWeightsMb);
-            targetGpuLayers = Math.Clamp((int)(availableForLayers / Math.Max(1.0, vramPerLayerWithKvMb)), 0, totalLayers);
+            // Calculate max layers that fit in available VRAM at exact requested context length
+            double availableForLayers = Math.Max(0, netAvailableVramMb - CudaContextOverheadMb);
+            targetGpuLayers = Math.Clamp((int)(availableForLayers / Math.Max(1.0, vramCostPerLayerMb)), 0, totalLayers);
 
             if (targetGpuLayers == 0)
             {
-                recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, contextLength);
+                recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, targetContext);
             }
         }
         else
         {
             targetGpuLayers = 0;
-            recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, contextLength);
+            recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, targetContext);
         }
 
         int gpuLayersParam = targetGpuLayers;
         int finalEstimatedVram = EstimateVramUsage(targetGpuLayers, layerSizeBytes, kvCachePerLayerBytes, recommendedContext);
 
         int recommendedBatchSize = 512;
-        if (totalVramMb >= 12000) recommendedBatchSize = 1024;
+        if (totalVramMb >= 8000 || strategyType == OffloadStrategyType.FullGpu) recommendedBatchSize = 2048;
+        else if (totalVramMb >= 6000) recommendedBatchSize = 1024;
 
         return new OffloadPlan(
             GpuLayers: gpuLayersParam,
@@ -184,7 +196,7 @@ public class OffloadStrategy
 
     private int CalculateSafeContextSize(double availableMemoryMb, long kvCachePerLayerBytes, int totalLayers, int requestedContext)
     {
-        const int MIN_CONTEXT_SIZE = 32768; // Minimum context limit must be 32k, never smaller
+        const int MIN_CONTEXT_SIZE = 2048; // Safe minimum context floor
 
         long memoryForKvCacheBytes = (long)(availableMemoryMb * 1024 * 1024 * 0.5); // Reserve half for OS and weights
         long kvCacheSizePerTokenBytes = totalLayers * kvCachePerLayerBytes;

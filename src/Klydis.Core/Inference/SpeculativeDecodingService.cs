@@ -186,7 +186,7 @@ public class SpeculativeDecodingService
 
             int availableVramMb = gpuInfo?.TotalVramMb ?? 0;
 
-            if (targetStandalonePlan.GpuLayers == -1 && combinedVramMb > availableVramMb)
+            if (targetStandalonePlan.CpuLayers == 0 && combinedVramMb > availableVramMb)
             {
                 _logger?.LogInformation("Switching to zero-VRAM N-gram fallback speculative decoding to preserve 100% GPU offload for {TargetModel}.", targetModel.DisplayName);
                 return new SpeculativeResolutionResult(

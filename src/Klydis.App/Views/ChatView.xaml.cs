@@ -127,7 +127,15 @@ public partial class ChatView : UserControl
 
         if (e.Action == NotifyCollectionChangedAction.Add || e.Action == NotifyCollectionChangedAction.Reset)
         {
-            ScrollToBottom(force: true);
+            if (!_shouldAutoScrollToBottom)
+            {
+                SetUnreadBadge(true);
+                UpdateScrollToBottomButtonVisibility();
+            }
+            else
+            {
+                ScrollToBottom(force: true);
+            }
         }
     }
 
@@ -136,7 +144,15 @@ public partial class ChatView : UserControl
         // Follow streaming content growth, but only while auto-scroll is active or near bottom.
         if (e.PropertyName == nameof(ChatMessageViewModel.Content))
         {
-            ScrollToBottom(force: false);
+            if (!_shouldAutoScrollToBottom)
+            {
+                SetUnreadBadge(true);
+                UpdateScrollToBottomButtonVisibility();
+            }
+            else
+            {
+                ScrollToBottom(force: false);
+            }
         }
     }
 
@@ -148,6 +164,7 @@ public partial class ChatView : UserControl
         if (force)
         {
             _shouldAutoScrollToBottom = true;
+            SetUnreadBadge(false);
         }
 
         if (!force && !_shouldAutoScrollToBottom)
@@ -190,6 +207,7 @@ public partial class ChatView : UserControl
                 Dispatcher.InvokeAsync(() =>
                 {
                     _scrollViewer?.ScrollToEnd();
+                    UpdateScrollToBottomButtonVisibility();
                 }, System.Windows.Threading.DispatcherPriority.ContextIdle);
             }
         }, System.Windows.Threading.DispatcherPriority.Loaded);
@@ -209,6 +227,15 @@ public partial class ChatView : UserControl
 
     private void ScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
+        if (e.OriginalSource is ScrollViewer sv)
+        {
+            _scrollViewer = sv;
+        }
+        else if (_scrollViewer == null)
+        {
+            EnsureScrollViewerAttached();
+        }
+
         if (_scrollViewer == null) return;
 
         if (_shouldAutoScrollToBottom && e.ExtentHeightChange > 0)
@@ -218,21 +245,47 @@ public partial class ChatView : UserControl
 
         double distanceToBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset;
 
-        if (distanceToBottom <= 10)
+        if (distanceToBottom <= 15)
         {
             _shouldAutoScrollToBottom = true;
+            SetUnreadBadge(false);
         }
 
-        if (ScrollToBottomButton != null)
+        UpdateScrollToBottomButtonVisibility();
+    }
+
+    private void UpdateScrollToBottomButtonVisibility()
+    {
+        if (ScrollToBottomButton == null) return;
+
+        if (_scrollViewer == null)
         {
-            bool showButton = _scrollViewer.ScrollableHeight > 0 && distanceToBottom > 120;
-            ScrollToBottomButton.Visibility = showButton ? Visibility.Visible : Visibility.Collapsed;
+            EnsureScrollViewerAttached();
+        }
+
+        if (_scrollViewer == null)
+        {
+            ScrollToBottomButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        double distanceToBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset;
+        bool showButton = _scrollViewer.ScrollableHeight > 0 && distanceToBottom > 60;
+        ScrollToBottomButton.Visibility = showButton ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SetUnreadBadge(bool visible)
+    {
+        if (ScrollToBottomButton?.Template?.FindName("UnreadBadge", ScrollToBottomButton) is UIElement badge)
+        {
+            badge.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         }
     }
 
     private void ScrollToBottomButton_Click(object sender, RoutedEventArgs e)
     {
         _shouldAutoScrollToBottom = true;
+        SetUnreadBadge(false);
         ScrollToBottom(force: true);
     }
 

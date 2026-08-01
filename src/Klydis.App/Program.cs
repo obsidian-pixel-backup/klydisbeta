@@ -14,10 +14,6 @@ public class Program
         Environment.SetEnvironmentVariable("GGML_CUDA_FORCE_CUBLAS", "1");
         Environment.SetEnvironmentVariable("GGML_CUDA_DMMV_F16", "1");
 
-        // Force LLamaSharp to load the CUDA backend globally before ANY native calls are made.
-        // This ensures NVIDIA GPUs will properly utilize CUDA offloading instead of silently falling back to CPU.
-        LLama.Native.NativeLibraryConfig.All.WithCuda();
-
         try
         {
             // Configure process PATH to include CUDA toolkit bin directories dynamically.
@@ -113,9 +109,27 @@ public class Program
                     string sourceSubFolder = "avx2";
                     if (isCudaSupported)
                     {
-                        if (Directory.Exists(Path.Combine(nativeDir, "cuda13")))
+                        var cuda13Path = Path.Combine(nativeDir, "cuda13");
+                        var cuda12Path = Path.Combine(nativeDir, "cuda12");
+
+                        // If cuda13 directory is missing but cuda12 exists, replicate cuda12 to cuda13
+                        // to satisfy LLamaSharp's native CUDA 13 loader resolution.
+                        if (!Directory.Exists(cuda13Path) && Directory.Exists(cuda12Path))
+                        {
+                            try
+                            {
+                                Directory.CreateDirectory(cuda13Path);
+                                foreach (var file in Directory.GetFiles(cuda12Path))
+                                {
+                                    File.Copy(file, Path.Combine(cuda13Path, Path.GetFileName(file)), overwrite: true);
+                                }
+                            }
+                            catch {}
+                        }
+
+                        if (Directory.Exists(cuda13Path))
                             sourceSubFolder = "cuda13";
-                        else if (Directory.Exists(Path.Combine(nativeDir, "cuda12")))
+                        else if (Directory.Exists(cuda12Path))
                             sourceSubFolder = "cuda12";
                         else if (Directory.Exists(Path.Combine(nativeDir, "cuda11")))
                             sourceSubFolder = "cuda11";
@@ -130,12 +144,13 @@ public class Program
                             var destFile = Path.Combine(baseDir, fileName);
                             try
                             {
-                                if (!File.Exists(destFile))
-                                {
-                                    File.Copy(file, destFile, true);
-                                }
+                                File.Copy(file, destFile, overwrite: true);
+                                try { File.AppendAllText("llama_native.log", $"[NATIVE_SYNC] Synced CUDA binary: {fileName}{Environment.NewLine}"); } catch {}
                             }
-                            catch { }
+                            catch (Exception copyEx) 
+                            {
+                                try { File.AppendAllText("llama_native.log", $"[NATIVE_SYNC] Skip locked file {fileName}: {copyEx.Message}{Environment.NewLine}"); } catch {}
+                            }
                         }
                     }
                 }
@@ -145,17 +160,8 @@ public class Program
                 try { File.AppendAllText("llama_native.log", $"[NATIVE_SYNC] Error in native engine sync: {nativeEx.Message}{Environment.NewLine}"); } catch {}
             }
             
-            // Configure LLamaSharp backend library preferences before anything else.
-            // Prefer CUDA first, then Vulkan as fallback for non-NVIDIA GPUs.
-            NativeLibraryConfig.All
-                .WithCuda()
-                .WithLogCallback((level, message) => {
-                    try
-                    {
-                        File.AppendAllText("llama_native.log", $"[{level}] {message}{Environment.NewLine}");
-                    }
-                    catch { /* Ignore logging errors if file is locked */ }
-                });
+            // Configure LLamaSharp backend library preferences using process-wide idempotent guard.
+            Klydis.Core.Inference.NativeEngineManager.EnsureNativeLibraryConfigured();
 
             Console.WriteLine("Program.Main started");
             var app = new App();
