@@ -530,11 +530,18 @@ public class ChatEngine(
                         }
                     }
                     
-                    int toolIndex = unyieldedText.IndexOf("<tool_call>", StringComparison.Ordinal);
-                    int altToolIndex = unyieldedText.IndexOf("<|tool_call|>", StringComparison.Ordinal);
-                    
-                    if (altToolIndex >= 0 && (toolIndex < 0 || altToolIndex < toolIndex))
-                        toolIndex = altToolIndex;
+                    int toolIndex = -1;
+                    int toolTagLen = 0;
+                    string[] toolStartTags = new[] { "<tool_call>", "<|tool_call|>", "<tool_calls>", "<|tool_calls|>", "[TOOL_CALLS]", "[TOOL_CALL]", "<TOOL_CALL>", "<TOOL_CALLS>" };
+                    foreach (var tag in toolStartTags)
+                    {
+                        int idx = unyieldedText.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
+                        if (idx >= 0 && (toolIndex < 0 || idx < toolIndex))
+                        {
+                            toolIndex = idx;
+                            toolTagLen = tag.Length;
+                        }
+                    }
 
                     // Find which event comes earliest
                     int earliest = int.MaxValue;
@@ -577,29 +584,29 @@ public class ChatEngine(
                         }
                         
                         isToolCall = true;
-                        int skip = unyieldedText.IndexOf("<|tool_call|>", StringComparison.Ordinal) == toolIndex ? 13 : 11;
-                        unyieldedText = unyieldedText.Substring(toolIndex + skip);
+                        unyieldedText = unyieldedText.Substring(toolIndex + toolTagLen);
                         processedAny = true;
                     }
                 }
                 else // isToolCall == true
                 {
-                    int toolEndIndex = unyieldedText.IndexOf("</tool_call>", StringComparison.Ordinal);
-                    int altToolEndIndex = unyieldedText.IndexOf("</|tool_call|>", StringComparison.Ordinal);
-                    if (altToolEndIndex < 0) altToolEndIndex = unyieldedText.IndexOf("<|/tool_call|>", StringComparison.Ordinal);
-                    
-                    if (altToolEndIndex >= 0 && (toolEndIndex < 0 || altToolEndIndex < toolEndIndex))
-                        toolEndIndex = altToolEndIndex;
+                    int toolEndIndex = -1;
+                    int toolEndTagLen = 0;
+                    string[] toolEndTags = new[] { "</tool_call>", "</|tool_call|>", "<|/tool_call|>", "</tool_calls>", "</|tool_calls|>", "<|/tool_calls|>", "[/TOOL_CALLS]", "[/TOOL_CALL]", "</TOOL_CALL>", "</TOOL_CALLS>" };
+                    foreach (var tag in toolEndTags)
+                    {
+                        int idx = unyieldedText.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
+                        if (idx >= 0 && (toolEndIndex < 0 || idx < toolEndIndex))
+                        {
+                            toolEndIndex = idx;
+                            toolEndTagLen = tag.Length;
+                        }
+                    }
                         
                     if (toolEndIndex >= 0)
                     {
                         isToolCall = false;
-                        int skip = 12; // </tool_call> is 12
-                        if (unyieldedText.IndexOf("</|tool_call|>", StringComparison.Ordinal) == toolEndIndex ||
-                            unyieldedText.IndexOf("<|/tool_call|>", StringComparison.Ordinal) == toolEndIndex)
-                            skip = 14;
-                            
-                        unyieldedText = unyieldedText.Substring(toolEndIndex + skip);
+                        unyieldedText = unyieldedText.Substring(toolEndIndex + toolEndTagLen);
                         processedAny = true;
                     }
                 }
@@ -610,14 +617,14 @@ public class ChatEngine(
             {
                 if (isToolCall)
                 {
-                    // Let unyieldedText accumulate so we can find </tool_call> in the next iteration.
+                    // Let unyieldedText accumulate so we can find closing tool tag in the next iteration.
                     // Do not yield the raw tool JSON to the UI, and do not clear it!
                     continue;
                 }
 
                 string[] tagsToCheck = isThinking ? 
-                    new[] { "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>", "[/THINK]", "[/THOUGHT]", "<tool_call>", "<|tool_call|>" } : 
-                    new[] { "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]", "<tool_call>", "<|tool_call|>" };
+                    new[] { "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>", "[/THINK]", "[/THOUGHT]", "<tool_call>", "<|tool_call|>", "[TOOL_CALLS]", "[TOOL_CALL]" } : 
+                    new[] { "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]", "<tool_call>", "<|tool_call|>", "[TOOL_CALLS]", "[TOOL_CALL]" };
                                        
                 bool endsWithPartial = false;
                 int maxPartialLen = 0;
@@ -960,8 +967,8 @@ public class ChatEngine(
 
         var blocksToParse = new List<string>();
 
-        // Native <tool_call> JSON format (supports multiple calls, nested braces, and missing end tag)
-        var matches = Regex.Matches(response, @"<\|?tool_call\|?>(.*?)(?:</\|?tool_call\|?>|<\|/tool_call\|?>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        // 1. Native <tool_call> / <tool_calls> JSON format (supports singular/plural, nested braces, and missing end tag)
+        var matches = Regex.Matches(response, @"<\|?tool_calls?\|?>(.*?)(?:</\|?tool_calls?\|?>|<\|/tool_calls?\|?>|$)", RegexOptions.Singleline | RegexOptions.IgnoreCase);
         foreach (Match match in matches)
         {
             var rawContent = match.Groups[1].Value.Trim();
@@ -971,13 +978,48 @@ public class ChatEngine(
             }
         }
 
-        // Secondary fallback: if no <tool_call> tags found, check for [TOOL_CALLS] [...] format
+        // 2. Bracketed [TOOL_CALLS] or [TOOL_CALL] [...] format
         if (blocksToParse.Count == 0)
         {
-            var toolCallsTagMatch = Regex.Match(response, @"\[TOOL_CALLS\]\s*(\[.*?\]|\{.*?\})", RegexOptions.Singleline | RegexOptions.IgnoreCase);
-            if (toolCallsTagMatch.Success)
+            var toolCallsMatches = Regex.Matches(response, @"\[TOOL_CALLS?\]\s*(\[.*?\]|\{[\s\S]*?\})", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            foreach (Match match in toolCallsMatches)
             {
-                blocksToParse.Add(toolCallsTagMatch.Groups[1].Value.Trim());
+                var rawContent = match.Groups[1].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(rawContent))
+                {
+                    blocksToParse.Add(rawContent);
+                }
+            }
+        }
+
+        // 3. Markdown ```json code blocks containing tool invocation keys
+        if (blocksToParse.Count == 0)
+        {
+            var codeBlockMatches = Regex.Matches(response, @"```(?:json)?\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*```", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            foreach (Match match in codeBlockMatches)
+            {
+                var block = match.Groups[1].Value.Trim();
+                if (block.Contains("\"name\"", StringComparison.OrdinalIgnoreCase) ||
+                    block.Contains("\"tool\"", StringComparison.OrdinalIgnoreCase) ||
+                    block.Contains("\"action\"", StringComparison.OrdinalIgnoreCase) ||
+                    block.Contains("\"function\"", StringComparison.OrdinalIgnoreCase))
+                {
+                    blocksToParse.Add(block);
+                }
+            }
+        }
+
+        // 4. Fallback: Raw un-tagged JSON objects containing name/tool/action/function
+        if (blocksToParse.Count == 0)
+        {
+            var rawJsonMatches = Regex.Matches(response, @"(\{[\s\S]*?""(?:name|tool|action|function)""\s*:\s*""[^""]+""[\s\S]*?\})", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            foreach (Match match in rawJsonMatches)
+            {
+                var block = match.Groups[1].Value.Trim();
+                if (!blocksToParse.Contains(block))
+                {
+                    blocksToParse.Add(block);
+                }
             }
         }
 
@@ -1083,6 +1125,30 @@ public class ChatEngine(
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to parse <tool_call> JSON");
+            }
+        }
+
+        // 5. Final Fallback: Extract narrative simulated tool calls like "- tool_name \n - Input: { ... }"
+        if (results.Count == 0 && !string.IsNullOrWhiteSpace(response))
+        {
+            var simulatedInputMatches = Regex.Matches(response, @"(?:^|\n|\r)\s*(?:-\s*|\*\*\s*|tool:\s*)?([a-zA-Z0-9_.-]+)\s*[\r\n\s]*(?:-\s*)?(?:Input|arguments|params)\s*:\s*(\{[\s\S]*?\})", RegexOptions.IgnoreCase);
+            foreach (Match m in simulatedInputMatches)
+            {
+                var toolName = m.Groups[1].Value.Trim();
+                var rawArgsJson = m.Groups[2].Value.Trim();
+                try
+                {
+                    var rawDict = JsonSerializer.Deserialize<Dictionary<string, object>>(rawArgsJson);
+                    if (rawDict != null)
+                    {
+                        var args = UnwrapArgs(rawDict);
+                        results.Add(new ToolCallRequest(toolName, args));
+                    }
+                }
+                catch
+                {
+                    // Ignore fallback parse failures
+                }
             }
         }
 

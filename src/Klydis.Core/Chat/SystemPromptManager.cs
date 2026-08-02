@@ -316,15 +316,17 @@ public class SystemPromptManager
         sb.AppendLine("2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.");
         sb.AppendLine("3. To use a tool, output a JSON block exactly like this: <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>");
         sb.AppendLine("4. CRITICAL: Whenever the user asks you to perform an action, test tools, inspect system/files, execute commands, explore/study a codebase, or manage skills, YOU MUST CALL THE TOOL IMMEDIATELY using the <tool_call> tag. Do NOT ask clarifying questions or elicitation options—take autonomous action and execute the exploration/indexing tools immediately.");
-        sb.AppendLine("5. SKILL BRAIN & LEARNING: You are connected to a Skills Library Brain. You can use 'list_skills' or 'search_skills' to discover skills, 'get_skill_details' or 'activate_skill' to inspect/activate specialized domain instructions, and 'learn_skill' to create and save new custom skills to your library brain when learning new workflows or user directives.");
-        sb.AppendLine("6. Examples of tool calls:");
+        sb.AppendLine("5. STRICT PROHIBITION AGAINST SIMULATION: NEVER simulate, mock, or fabricate tool execution outputs or results in plain text (e.g. NEVER write text like 'Input: {...}' or 'Output: {...}' pretending a tool ran). You MUST output a real <tool_call> tag and wait for the actual system execution result.");
+        sb.AppendLine("6. MULTI-TOOL EXECUTION: When asked to test or run multiple tools, execute them ONE AT A TIME using <tool_call>. Issue the first tool call, wait for the actual system output, then emit the next tool call in the subsequent turn.");
+        sb.AppendLine("7. SKILL BRAIN & LEARNING: You are connected to a Skills Library Brain. You can use 'list_skills' or 'search_skills' to discover skills, 'get_skill_details' or 'activate_skill' to inspect/activate specialized domain instructions, and 'learn_skill' to create and save new custom skills to your library brain when learning new workflows or user directives.");
+        sb.AppendLine("8. Examples of tool calls:");
         sb.AppendLine("   - Call tool with no arguments: <tool_call>{\"name\": \"get_system_info\", \"arguments\": {}}</tool_call>");
         sb.AppendLine("   - Launch app: <tool_call>{\"name\": \"run_command\", \"arguments\": {\"command\": \"Start-Process -FilePath \\\"chrome.exe\\\" -ArgumentList \\\"https://youtube.com\\\"\"}}</tool_call>");
         sb.AppendLine("   - Search skills: <tool_call>{\"name\": \"search_skills\", \"arguments\": {\"query\": \"wpf\"}}</tool_call>");
         sb.AppendLine("   - Search RAG: <tool_call>{\"name\": \"search_rag\", \"arguments\": {\"query\": \"InferenceEngine model loading\"}}</tool_call>");
-        sb.AppendLine("7. You can provide normal text before or after tool calls outside of think tags.");
-        sb.AppendLine("8. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.");
-        sb.AppendLine("9. DO NOT repeat the exact same tool call if it just failed or returned an error.");
+        sb.AppendLine("9. You can provide normal text before or after tool calls outside of think tags.");
+        sb.AppendLine("10. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.");
+        sb.AppendLine("11. DO NOT repeat the exact same tool call if it just failed or returned an error.");
 
         if (!string.IsNullOrWhiteSpace(worldStateHeader))
         {
