@@ -34,13 +34,20 @@ public partial class ChatView : UserControl
 
         DataContextChanged += OnDataContextChanged;
         Loaded += OnLoaded;
+        MessagesList.Loaded += OnMessagesListLoaded;
         PreviewMouseDown += ChatView_PreviewMouseDown;
+    }
+
+    private void OnMessagesListLoaded(object sender, RoutedEventArgs e)
+    {
+        GetMainScrollViewer();
+        UpdateScrollToBottomButtonVisibility();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         InputTextBox.Focus();
-        EnsureScrollViewerAttached();
+        GetMainScrollViewer();
         _shouldAutoScrollToBottom = true;
         ScrollToBottom(force: true);
     }
@@ -190,60 +197,63 @@ public partial class ChatView : UserControl
         _lastScrollTime = DateTime.Now;
         Dispatcher.InvokeAsync(() =>
         {
-            EnsureScrollViewerAttached();
-            if (_scrollViewer == null)
+            var mainSv = GetMainScrollViewer();
+            if (mainSv == null)
             {
                 return;
             }
 
-            double distanceToBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset;
+            double distanceToBottom = mainSv.ScrollableHeight - mainSv.VerticalOffset;
             bool nearBottom = distanceToBottom < 120;
 
             if (force || nearBottom || _shouldAutoScrollToBottom)
             {
                 StopScrollAnimation();
-                _scrollViewer.ScrollToEnd();
+                mainSv.ScrollToEnd();
 
                 Dispatcher.InvokeAsync(() =>
                 {
-                    _scrollViewer?.ScrollToEnd();
+                    GetMainScrollViewer()?.ScrollToEnd();
                     UpdateScrollToBottomButtonVisibility();
                 }, System.Windows.Threading.DispatcherPriority.ContextIdle);
             }
         }, System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
+    private ScrollViewer? GetMainScrollViewer()
+    {
+        if (_scrollViewer != null) return _scrollViewer;
+
+        _scrollViewer = FindMainScrollViewer(MessagesList);
+        if (_scrollViewer != null)
+        {
+            _scrollViewer.ScrollChanged += ScrollViewer_ScrollChanged;
+        }
+        return _scrollViewer;
+    }
+
     private void EnsureScrollViewerAttached()
     {
-        if (_scrollViewer == null)
-        {
-            _scrollViewer = FindScrollViewer(MessagesList);
-            if (_scrollViewer != null)
-            {
-                _scrollViewer.ScrollChanged += ScrollViewer_ScrollChanged;
-            }
-        }
+        GetMainScrollViewer();
     }
 
     private void ScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (e.OriginalSource is ScrollViewer sv)
-        {
-            _scrollViewer = sv;
-        }
-        else if (_scrollViewer == null)
-        {
-            EnsureScrollViewerAttached();
-        }
+        var mainSv = GetMainScrollViewer();
+        if (mainSv == null) return;
 
-        if (_scrollViewer == null) return;
+        // Ignore ScrollChanged events bubbling up from inner ScrollViewers (e.g. code blocks, markdown containers)
+        if (e.OriginalSource != mainSv && e.Source != mainSv)
+        {
+            return;
+        }
 
         if (_shouldAutoScrollToBottom && e.ExtentHeightChange > 0)
         {
-            _scrollViewer.ScrollToEnd();
+            mainSv.ScrollToEnd();
         }
 
-        double distanceToBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset;
+        double distanceToBottom = mainSv.ScrollableHeight - mainSv.VerticalOffset;
 
         if (distanceToBottom <= 15)
         {
@@ -258,19 +268,20 @@ public partial class ChatView : UserControl
     {
         if (ScrollToBottomButton == null) return;
 
-        if (_scrollViewer == null)
-        {
-            EnsureScrollViewerAttached();
-        }
-
-        if (_scrollViewer == null)
+        var mainSv = GetMainScrollViewer();
+        if (mainSv == null)
         {
             ScrollToBottomButton.Visibility = Visibility.Collapsed;
             return;
         }
 
-        double distanceToBottom = _scrollViewer.ScrollableHeight - _scrollViewer.VerticalOffset;
-        bool showButton = _scrollViewer.ScrollableHeight > 0 && distanceToBottom > 60;
+        double distanceToBottom = mainSv.ScrollableHeight - mainSv.VerticalOffset;
+        bool showButton = mainSv.ScrollableHeight > 0 && (distanceToBottom > 30 || !_shouldAutoScrollToBottom);
+        if (distanceToBottom <= 15)
+        {
+            showButton = false;
+        }
+
         ScrollToBottomButton.Visibility = showButton ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -287,10 +298,12 @@ public partial class ChatView : UserControl
         _shouldAutoScrollToBottom = true;
         SetUnreadBadge(false);
         ScrollToBottom(force: true);
+        UpdateScrollToBottomButtonVisibility();
     }
 
-    private static ScrollViewer? FindScrollViewer(System.Windows.DependencyObject root)
+    private static ScrollViewer? FindMainScrollViewer(System.Windows.DependencyObject root)
     {
+        if (root == null) return null;
         if (root is ScrollViewer viewer)
         {
             return viewer;
@@ -298,7 +311,13 @@ public partial class ChatView : UserControl
 
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
         {
-            var result = FindScrollViewer(VisualTreeHelper.GetChild(root, i));
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is ListBoxItem || child is ItemsPresenter)
+            {
+                continue;
+            }
+
+            var result = FindMainScrollViewer(child);
             if (result != null)
             {
                 return result;
@@ -310,10 +329,10 @@ public partial class ChatView : UserControl
 
     private ScrollViewer? FindNestedScrollViewer(DependencyObject? element)
     {
-        EnsureScrollViewerAttached();
+        var mainSv = GetMainScrollViewer();
         while (element != null && element != MessagesList)
         {
-            if (element is ScrollViewer sv && sv != _scrollViewer)
+            if (element is ScrollViewer sv && sv != mainSv)
             {
                 return sv;
             }
@@ -326,8 +345,8 @@ public partial class ChatView : UserControl
 
     private void MessagesList_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        EnsureScrollViewerAttached();
-        if (_scrollViewer == null)
+        var mainSv = GetMainScrollViewer();
+        if (mainSv == null)
         {
             return;
         }
@@ -348,6 +367,7 @@ public partial class ChatView : UserControl
         {
             // User scrolled UP
             _shouldAutoScrollToBottom = false;
+            UpdateScrollToBottomButtonVisibility();
         }
 
         _scrollVelocity = Math.Clamp(_scrollVelocity - e.Delta * 6.0, -6000, 6000);
@@ -364,7 +384,8 @@ public partial class ChatView : UserControl
 
     private void OnScrollRendering(object? sender, EventArgs e)
     {
-        if (_scrollViewer == null)
+        var mainSv = GetMainScrollViewer();
+        if (mainSv == null)
         {
             StopScrollAnimation();
             return;
@@ -374,8 +395,8 @@ public partial class ChatView : UserControl
         double dt = Math.Min((now - _lastScrollRenderTime).TotalSeconds, 0.05);
         _lastScrollRenderTime = now;
 
-        double max = _scrollViewer.ScrollableHeight;
-        double newOffset = _scrollViewer.VerticalOffset + _scrollVelocity * dt;
+        double max = mainSv.ScrollableHeight;
+        double newOffset = mainSv.VerticalOffset + _scrollVelocity * dt;
 
         if (newOffset < 0)
         {
@@ -388,7 +409,8 @@ public partial class ChatView : UserControl
             _scrollVelocity = 0;
         }
 
-        _scrollViewer.ScrollToVerticalOffset(newOffset);
+        mainSv.ScrollToVerticalOffset(newOffset);
+        UpdateScrollToBottomButtonVisibility();
 
         // Exponential friction: velocity decays to ~5% of itself every second.
         _scrollVelocity *= Math.Pow(0.05, dt);
@@ -407,6 +429,7 @@ public partial class ChatView : UserControl
             _scrollAnimating = false;
         }
         _scrollVelocity = 0;
+        UpdateScrollToBottomButtonVisibility();
     }
 
     private void MarkdownViewer_Loaded(object sender, RoutedEventArgs e)

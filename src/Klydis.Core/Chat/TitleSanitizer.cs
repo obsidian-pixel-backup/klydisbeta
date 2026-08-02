@@ -49,7 +49,7 @@ public static class TitleSanitizer
         if (string.IsNullOrWhiteSpace(rawTitle))
             return "New Chat";
 
-        string title = rawTitle;
+        string title = OutputSanitizer.SanitizeText(rawTitle);
 
         // 1. Remove thinking/thought blocks and unclosed thinking tags
         title = ThinkingTagRegex.Replace(title, "");

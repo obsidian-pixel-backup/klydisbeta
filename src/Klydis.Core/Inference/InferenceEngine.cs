@@ -52,6 +52,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public bool IsSpeculativeDecodingEnabled { get; set; } = true;
     public int SpeculativeDraftCount { get; set; } = 24;
     private string _selectedDraftModelPath = "auto";
+    private Klydis.Core.Hardware.OffloadPlan? _lastOffloadPlan;
     public string SelectedDraftModelPath
     {
         get => _selectedDraftModelPath;
@@ -118,6 +119,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// User-defined explicit context limit preference (0 = Auto smart hardware allocation up to model max, or custom limit up to 1M tokens).
     /// </summary>
     public uint UserContextLimit { get; set; } = 0;
+
+    /// <summary>
+    /// User-defined explicit logical batch size preference (0 = Auto hardware optimized).
+    /// </summary>
+    public uint UserBatchSize { get; set; } = 0;
+
+    /// <summary>
+    /// User-defined explicit micro-batch size (UBatchSize) preference (0 = Auto hardware optimized).
+    /// </summary>
+    public uint UserUBatchSize { get; set; } = 0;
 
     /// <summary>
     /// Gets the loaded context size budget.
@@ -220,6 +231,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             try
             {
                 _logger.LogInformation("Loading model from {ModelPath} with {GpuLayers} GPU layers.", modelPath, offloadPlan.GpuLayers);
+                _lastOffloadPlan = offloadPlan;
 
                 await SpeculativeEngine.UnloadAsync();
                 UnloadModelInternal();
@@ -257,24 +269,30 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 string archLower = (metadata?.Architecture ?? "").ToLowerInvariant();
                 bool isHybridSsm = archLower is "qwen35" or "mamba" or "rwkv" or "jamba";
 
-                // Enable FlashAttention universally on GPU for all non-SSM transformer architectures to accelerate prompt prefill and generation
-                bool useFlashAttention = !isHybridSsm && offloadPlan.GpuLayers > 0;
+                int totalModelLayers = (metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0) ? (int)metadata.BlockCount.Value : 32;
+                // Set GpuLayerCount to 999 for full GPU offload when offloadPlan targets full GPU offload (GpuLayers >= totalModelLayers or FullGpu strategy) to offload all transformer blocks + non-layer tensors to CUDA0
+                int targetGpuLayers = (offloadPlan.GpuLayers < 0 || offloadPlan.GpuLayers >= totalModelLayers || offloadPlan.StrategyUsed == Hardware.OffloadStrategyType.FullGpu) ? 999 : offloadPlan.GpuLayers;
 
-                // Context size scales dynamically with user limit or recommended offload plan context (min 2048)
+                // Enable FlashAttention universally on GPU for all non-SSM transformer architectures to accelerate prompt prefill and generation
+                bool useFlashAttention = !isHybridSsm && targetGpuLayers > 0;
+
+                // Context size scales dynamically with user limit or hardware-calculated offload plan context
                 uint targetContextSize = UserContextLimit > 0
-                    ? UserContextLimit + 8192
-                    : (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
+                    ? UserContextLimit
+                    : (uint)Math.Clamp(offloadPlan.RecommendedContextSize, 2048, 131072);
 
                 if (isHybridSsm)
                 {
                     _logger.LogInformation("Hybrid SSM architecture '{Arch}' detected. Context configured to {MaxCtx} tokens.", archLower, targetContextSize);
                 }
 
-                int totalModelLayers = (metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0) ? (int)metadata.BlockCount.Value : 32;
-                // Set GpuLayerCount to 999 for full GPU offload when offloadPlan targets full GPU offload (GpuLayers >= totalModelLayers or FullGpu strategy) to offload all transformer blocks + non-layer tensors to CUDA0
-                int targetGpuLayers = (offloadPlan.GpuLayers < 0 || offloadPlan.GpuLayers >= totalModelLayers || offloadPlan.StrategyUsed == Hardware.OffloadStrategyType.FullGpu) ? 999 : offloadPlan.GpuLayers;
+                uint safeBatchSize = UserBatchSize > 0
+                    ? UserBatchSize
+                    : (isHybridSsm ? 256u : (uint)Math.Max(2048, offloadPlan.RecommendedBatchSize));
+                uint safeUBatchSize = UserUBatchSize > 0
+                    ? UserUBatchSize
+                    : (isHybridSsm ? 256u : 512u); // Micro-batch size 512u for peak Tensor Core prefill throughput
 
-                uint safeBatchSize = isHybridSsm ? 256u : (uint)Math.Max(2048, offloadPlan.RecommendedBatchSize);
                 // For 100% GPU offload, reduce CPU worker threads to 2 to eliminate llama.cpp spin-wait loops that pin host CPU to 100%.
                 int optimalThreads = (targetGpuLayers >= totalModelLayers || targetGpuLayers == 999) ? 2 : Math.Clamp(Environment.ProcessorCount, 4, 16);
 
@@ -284,7 +302,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     ContextSize = targetContextSize,
                     GpuLayerCount = targetGpuLayers, // Offload 100% of layers to GPU (GpuLayerCount = 999)
                     BatchSize = safeBatchSize,
-                    UBatchSize = isHybridSsm ? 256u : safeBatchSize, // Physical micro-batch size synchronized with BatchSize (2048u)
+                    UBatchSize = safeUBatchSize, // Physical micro-batch size optimized for prefill & generation
                     FlashAttention = useFlashAttention,
                     // Use Unspecified pooling to let the model define its own pooling_type (-1/none for generative models)
                     // instead of LLamaSharp's default Mean (0) which triggers "model default pooling_type is [-1], but [0] was specified"
@@ -395,6 +413,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 FineTuneName = metadata?.FineTuneName;
                 _logger.LogInformation("Model loaded successfully with architecture '{Architecture}'.", Architecture);
                 success = true;
+
+                if (IsSpeculativeDecodingEnabled && !string.IsNullOrEmpty(CurrentModelPath))
+                {
+                    _ = Task.Run(async () => await AttachSpeculativeDraftAsync(CurrentModelPath));
+                }
             }
             catch (Exception ex)
             {
@@ -918,26 +941,78 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         _ = ResetContextAsync();
     }
 
+    /// <summary>
+    /// Re-applies updated user hardware parameters (ContextSize, BatchSize, UBatchSize) dynamically to the active loaded context.
+    /// </summary>
+    public async Task ReapplyModelParametersAsync()
+    {
+        if (!IsModelLoaded || _weights == null || _modelParams == null) return;
+
+        await _modelLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_weights == null || _modelParams == null) return;
+
+            uint targetContextSize = UserContextLimit > 0
+                ? UserContextLimit
+                : (uint)Math.Clamp(_lastOffloadPlan?.RecommendedContextSize ?? 32768, 2048, 131072);
+
+            uint safeBatchSize = UserBatchSize > 0
+                ? UserBatchSize
+                : (uint)Math.Max(2048, _lastOffloadPlan?.RecommendedBatchSize ?? 2048);
+
+            uint safeUBatchSize = UserUBatchSize > 0
+                ? UserUBatchSize
+                : 512u;
+
+            if (_modelParams.ContextSize == targetContextSize &&
+                _modelParams.BatchSize == safeBatchSize &&
+                _modelParams.UBatchSize == safeUBatchSize)
+            {
+                return;
+            }
+
+            _logger?.LogInformation("Re-applying model parameters: ContextSize={Ctx}, BatchSize={Batch}, UBatchSize={UBatch}",
+                targetContextSize, safeBatchSize, safeUBatchSize);
+
+            _modelParams.ContextSize = targetContextSize;
+            _modelParams.BatchSize = safeBatchSize;
+            _modelParams.UBatchSize = safeUBatchSize;
+
+            var oldContext = _context;
+            _context = null;
+            _executor = null;
+
+            if (oldContext != null)
+            {
+                try { oldContext.Dispose(); } catch { }
+            }
+
+            _context = _weights.CreateContext(_modelParams);
+            _executor = new InteractiveExecutor(_context);
+            _lastEvaluatedPrompt = string.Empty;
+            _logger?.LogInformation("Successfully re-created inference context with updated hardware settings.");
+
+            if (IsSpeculativeDecodingEnabled && !string.IsNullOrEmpty(CurrentModelPath))
+            {
+                _ = Task.Run(async () => await AttachSpeculativeDraftAsync(CurrentModelPath));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to re-apply updated model parameters to active context.");
+        }
+        finally
+        {
+            _modelLock.Release();
+        }
+    }
+
     internal void ResetContextInternal()
     {
         lock (_contextResetLock)
         {
             _lastEvaluatedPrompt = string.Empty;
-            if (_context != null && _context.NativeHandle != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
-            {
-                try
-                {
-                    _context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, 0, -1);
-                    _executor = new InteractiveExecutor(_context);
-                    _logger?.LogDebug("Fast KV cache sequence clear (MemorySequenceRemove) completed in ResetContextInternal.");
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning(ex, "Fast KV cache clearing failed; falling back to context recreation.");
-                }
-            }
-
             if (_weights != null && _modelParams != null)
             {
                 var oldContext = _context;
@@ -967,17 +1042,6 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     _logger?.LogError(ex, "Failed to recreate context during ResetContextInternal.");
                     _context = null;
                     _executor = null;
-                }
-            }
-            else
-            {
-                var oldContext = _context;
-                _context = null;
-                _executor = null;
-
-                if (oldContext != null)
-                {
-                    SafeOffloadDisposal(oldContext);
                 }
             }
         }

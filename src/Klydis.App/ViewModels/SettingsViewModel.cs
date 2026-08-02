@@ -21,6 +21,7 @@ public enum SettingsCategory
 public record DraftModelOption(string DisplayName, string FilePath);
 public record ContextSizeOption(string DisplayName, int Value);
 public record ContextSizeBucket(int Value, string Label, string ShortLabel);
+public record BatchSizeOption(string DisplayName, int Value);
 
 /// <summary>
 /// One tile in the Themes gallery. <see cref="Swatch"/> is a fixed preview color
@@ -110,11 +111,19 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _speculativeStatusMessage = "Speculative decoding active.";
 
+    [ObservableProperty]
+    private int _selectedBatchSize = 0;
+
+    [ObservableProperty]
+    private int _selectedUBatchSize = 0;
+
     public ObservableCollection<AccentSwatch> AccentSwatches { get; } = new();
     public ObservableCollection<BackgroundSwatch> BackgroundSwatches { get; } = new();
     public ObservableCollection<DraftModelOption> AvailableDraftModels { get; } = new();
     public ObservableCollection<string> AvailablePersonalities { get; } = new();
     public ObservableCollection<ContextSizeOption> AvailableContextSizes { get; } = new();
+    public ObservableCollection<BatchSizeOption> AvailableBatchSizes { get; } = new();
+    public ObservableCollection<BatchSizeOption> AvailableUBatchSizes { get; } = new();
 
     public string AppVersion { get; }
     public string AppDescription { get; }
@@ -136,6 +145,13 @@ public partial class SettingsViewModel : ObservableObject
         _selectedPersonality = themeService.SelectedPersonality;
         _selectedContextSize = themeService.UserContextLimit;
         _inferenceEngine.UserContextLimit = (uint)_selectedContextSize;
+
+        _selectedBatchSize = themeService.UserBatchSize;
+        _selectedUBatchSize = themeService.UserUBatchSize;
+        _inferenceEngine.UserBatchSize = (uint)_selectedBatchSize;
+        _inferenceEngine.UserUBatchSize = (uint)_selectedUBatchSize;
+
+        PopulateBatchSizeOptions();
 
         int closestIdx = 0;
         int minDiff = int.MaxValue;
@@ -284,6 +300,7 @@ public partial class SettingsViewModel : ObservableObject
         {
             _chatEngine.SelectedPersonality = pName;
         }
+        _inferenceEngine.ResetContext();
         UpdatePersonalityDescription(pName);
     }
 
@@ -411,15 +428,76 @@ public partial class SettingsViewModel : ObservableObject
     {
         _themeService.SaveContextSizeSetting(value);
         _inferenceEngine.UserContextLimit = (uint)value;
+
+        int closestIdx = 0;
+        int minDiff = int.MaxValue;
+        for (int i = 0; i < ContextBuckets.Length; i++)
+        {
+            int diff = Math.Abs(ContextBuckets[i].Value - value);
+            if (diff < minDiff)
+            {
+                minDiff = diff;
+                closestIdx = i;
+            }
+        }
+        if (_contextSliderIndex != closestIdx)
+        {
+            _contextSliderIndex = closestIdx;
+            OnPropertyChanged(nameof(ContextSliderIndex));
+        }
+        SelectedContextSizeFormatted = ContextBuckets[closestIdx].Label;
+        if (_inferenceEngine.IsModelLoaded)
+        {
+            _ = Task.Run(async () => await _inferenceEngine.ReapplyModelParametersAsync());
+        }
     }
 
     partial void OnContextSliderIndexChanged(int value)
     {
         int clampedIdx = Math.Clamp(value, 0, ContextBuckets.Length - 1);
         var bucket = ContextBuckets[clampedIdx];
-        SelectedContextSize = bucket.Value;
-        SelectedContextSizeFormatted = bucket.Label;
-        _themeService.SaveContextSizeSetting(bucket.Value);
-        _inferenceEngine.UserContextLimit = (uint)bucket.Value;
+        if (SelectedContextSize != bucket.Value)
+        {
+            SelectedContextSize = bucket.Value;
+        }
+    }
+
+    private void PopulateBatchSizeOptions()
+    {
+        AvailableBatchSizes.Clear();
+        AvailableBatchSizes.Add(new BatchSizeOption("Auto (Smart Hardware Allocation)", 0));
+        AvailableBatchSizes.Add(new BatchSizeOption("512 tokens (Low Memory)", 512));
+        AvailableBatchSizes.Add(new BatchSizeOption("1,024 tokens (Standard)", 1024));
+        AvailableBatchSizes.Add(new BatchSizeOption("2,048 tokens (High Throughput)", 2048));
+        AvailableBatchSizes.Add(new BatchSizeOption("4,096 tokens (Maximum Prefill)", 4096));
+        AvailableBatchSizes.Add(new BatchSizeOption("8,192 tokens (Extreme Speed)", 8192));
+
+        AvailableUBatchSizes.Clear();
+        AvailableUBatchSizes.Add(new BatchSizeOption("Auto (Smart Tensor Core Allocation)", 0));
+        AvailableUBatchSizes.Add(new BatchSizeOption("128 tokens (Low VRAM)", 128));
+        AvailableUBatchSizes.Add(new BatchSizeOption("256 tokens (Balanced)", 256));
+        AvailableUBatchSizes.Add(new BatchSizeOption("512 tokens (Tensor Core Default)", 512));
+        AvailableUBatchSizes.Add(new BatchSizeOption("1,024 tokens (Large Batch)", 1024));
+        AvailableUBatchSizes.Add(new BatchSizeOption("2,048 tokens (Max Micro-Batch)", 2048));
+    }
+
+    partial void OnSelectedBatchSizeChanged(int value)
+    {
+        _themeService.SaveBatchProcessingSizeSetting(value, SelectedUBatchSize);
+        _inferenceEngine.UserBatchSize = (uint)value;
+        if (_inferenceEngine.IsModelLoaded)
+        {
+            _ = Task.Run(async () => await _inferenceEngine.ReapplyModelParametersAsync());
+        }
+    }
+
+    partial void OnSelectedUBatchSizeChanged(int value)
+    {
+        _themeService.SaveBatchProcessingSizeSetting(SelectedBatchSize, value);
+        _inferenceEngine.UserUBatchSize = (uint)value;
+        if (_inferenceEngine.IsModelLoaded)
+        {
+            _ = Task.Run(async () => await _inferenceEngine.ReapplyModelParametersAsync());
+        }
     }
 }

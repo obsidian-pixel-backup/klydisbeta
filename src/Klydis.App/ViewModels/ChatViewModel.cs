@@ -1480,6 +1480,28 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         DismissPendingApproval(false);
     }
 
+    private void InsertSessionSorted(SessionInfo session)
+    {
+        int index = 0;
+        while (index < Sessions.Count)
+        {
+            var current = Sessions[index];
+            if (session.IsPinned && !current.IsPinned)
+                break;
+            if (session.IsPinned == current.IsPinned && session.Timestamp >= current.Timestamp)
+                break;
+            index++;
+        }
+        Sessions.Insert(index, session);
+    }
+
+    private void ResortSessions()
+    {
+        var sorted = Sessions.OrderByDescending(s => s.IsPinned).ThenByDescending(s => s.Timestamp).ToList();
+        Sessions.Clear();
+        foreach (var s in sorted) Sessions.Add(s);
+    }
+
     [RelayCommand]
     private async Task CreateNewSessionAsync()
     {
@@ -1491,13 +1513,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             {
-                Sessions.Insert(0, newSession);
+                InsertSessionSorted(newSession);
                 SelectedSession = newSession;
             });
         }
         else
         {
-            Sessions.Insert(0, newSession);
+            InsertSessionSorted(newSession);
             SelectedSession = newSession;
         }
     }
@@ -1594,17 +1616,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         session.IsPinned = !session.IsPinned;
         await _messageStore.UpdateSessionAsync(session.Id, null, null, null, session.IsPinned);
         
-        // Re-sort the sessions collection based on IsPinned then Timestamp
-        var sorted = new List<SessionInfo>(Sessions);
-        sorted.Sort((a, b) =>
-        {
-            if (a.IsPinned && !b.IsPinned) return -1;
-            if (!a.IsPinned && b.IsPinned) return 1;
-            return b.Timestamp.CompareTo(a.Timestamp);
-        });
-        
-        Sessions.Clear();
-        foreach (var s in sorted) Sessions.Add(s);
+        ResortSessions();
         
         SelectedSession = session;
     }

@@ -933,6 +933,85 @@
                     <TextBlock Text="Start a conversation" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" HorizontalAlignment="Center" Margin="0,16,0,4"/>
                     <TextBlock Text="Pick a model below and send your first message." FontSize="12.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                 </StackPanel>
+
+                <!-- Scroll To Bottom Floating Button -->
+                <Button x:Name="ScrollToBottomButton"
+                        Click="ScrollToBottomButton_Click"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,16"
+                        Width="38" Height="38"
+                        Cursor="Hand"
+                        ToolTip="Scroll to bottom"
+                        Visibility="Collapsed"
+                        Panel.ZIndex="10">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Grid>
+                                <Border x:Name="BtnBorder"
+                                        Background="{DynamicResource SurfaceElevatedBrush}"
+                                        BorderBrush="{DynamicResource BorderMidBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="19"
+                                        RenderTransformOrigin="0.5,0.5">
+                                    <Border.RenderTransform>
+                                        <ScaleTransform ScaleX="1" ScaleY="1"/>
+                                    </Border.RenderTransform>
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="12" ShadowDepth="3" Direction="270" Color="#000000" Opacity="0.35"/>
+                                    </Border.Effect>
+                                    <Path x:Name="BtnIcon"
+                                          Data="M 12,4 L 12,15 M 6,10 L 12,16 L 18,10 M 5,19 L 19,19"
+                                          Stroke="{DynamicResource TextPrimaryBrush}"
+                                          StrokeThickness="2"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Width="16" Height="16"
+                                          Stretch="Uniform"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"/>
+                                </Border>
+
+                                <!-- Unread Notification Badge Dot -->
+                                <Ellipse x:Name="UnreadBadge"
+                                         Width="10" Height="10"
+                                         Fill="{DynamicResource AccentPrimaryBrush}"
+                                         HorizontalAlignment="Right"
+                                         VerticalAlignment="Top"
+                                         Margin="0,0,0,0"
+                                         Visibility="Collapsed">
+                                    <Ellipse.Effect>
+                                        <DropShadowEffect BlurRadius="6" ShadowDepth="0" Color="#007ACC" Opacity="0.85"/>
+                                    </Ellipse.Effect>
+                                </Ellipse>
+                            </Grid>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="BtnBorder" Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                    <Setter TargetName="BtnBorder" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                    <Setter TargetName="BtnIcon" Property="Stroke" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                </Trigger>
+                                <EventTrigger RoutedEvent="PreviewMouseDown">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.92" Duration="0:0:0.08"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.92" Duration="0:0:0.08"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                                <EventTrigger RoutedEvent="PreviewMouseUp">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.08"/>
+                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.08"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
             </Grid>
 
             <!-- Input Area -->
@@ -1446,85 +1525,6 @@
                                 Content="OK" Width="100" Height="36"/>
                     </StackPanel>
                 </Border>
-
-                <!-- Scroll To Bottom Floating Button -->
-                <Button x:Name="ScrollToBottomButton"
-                        Click="ScrollToBottomButton_Click"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Bottom"
-                        Margin="0,0,0,16"
-                        Width="38" Height="38"
-                        Cursor="Hand"
-                        ToolTip="Scroll to bottom"
-                        Visibility="Collapsed"
-                        Panel.ZIndex="5">
-                    <Button.Template>
-                        <ControlTemplate TargetType="Button">
-                            <Grid>
-                                <Border x:Name="BtnBorder"
-                                        Background="{DynamicResource SurfaceElevatedBrush}"
-                                        BorderBrush="{DynamicResource BorderMidBrush}"
-                                        BorderThickness="1"
-                                        CornerRadius="19"
-                                        RenderTransformOrigin="0.5,0.5">
-                                    <Border.RenderTransform>
-                                        <ScaleTransform ScaleX="1" ScaleY="1"/>
-                                    </Border.RenderTransform>
-                                    <Border.Effect>
-                                        <DropShadowEffect BlurRadius="12" ShadowDepth="3" Direction="270" Color="#000000" Opacity="0.35"/>
-                                    </Border.Effect>
-                                    <Path x:Name="BtnIcon"
-                                          Data="M 12,4 L 12,15 M 6,10 L 12,16 L 18,10 M 5,19 L 19,19"
-                                          Stroke="{DynamicResource TextPrimaryBrush}"
-                                          StrokeThickness="2"
-                                          StrokeStartLineCap="Round"
-                                          StrokeEndLineCap="Round"
-                                          StrokeLineJoin="Round"
-                                          Width="16" Height="16"
-                                          Stretch="Uniform"
-                                          HorizontalAlignment="Center"
-                                          VerticalAlignment="Center"/>
-                                </Border>
-
-                                <!-- Unread Notification Badge Dot -->
-                                <Ellipse x:Name="UnreadBadge"
-                                         Width="10" Height="10"
-                                         Fill="{DynamicResource AccentPrimaryBrush}"
-                                         HorizontalAlignment="Right"
-                                         VerticalAlignment="Top"
-                                         Margin="0,0,0,0"
-                                         Visibility="Collapsed">
-                                    <Ellipse.Effect>
-                                        <DropShadowEffect BlurRadius="6" ShadowDepth="0" Color="#007ACC" Opacity="0.85"/>
-                                    </Ellipse.Effect>
-                                </Ellipse>
-                            </Grid>
-                            <ControlTemplate.Triggers>
-                                <Trigger Property="IsMouseOver" Value="True">
-                                    <Setter TargetName="BtnBorder" Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
-                                    <Setter TargetName="BtnBorder" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
-                                    <Setter TargetName="BtnIcon" Property="Stroke" Value="{DynamicResource AccentPrimaryBrush}"/>
-                                </Trigger>
-                                <EventTrigger RoutedEvent="PreviewMouseDown">
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.92" Duration="0:0:0.08"/>
-                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.92" Duration="0:0:0.08"/>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </EventTrigger>
-                                <EventTrigger RoutedEvent="PreviewMouseUp">
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.08"/>
-                                            <DoubleAnimation Storyboard.TargetName="BtnBorder" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.08"/>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </EventTrigger>
-                            </ControlTemplate.Triggers>
-                        </ControlTemplate>
-                    </Button.Template>
-                </Button>
             </Grid>
         </Grid>
     </Grid>

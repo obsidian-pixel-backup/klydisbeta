@@ -207,6 +207,15 @@ public class ToolExecutor(
         {
             new("folder_path", "string", "Absolute directory path of the project or folder to index", true),
             new("collection_name", "string", "Optional custom collection name (defaults to folder name)", false)
+        }, false),
+        new ToolDefinition("task_complete", "Signals that the current user goal or multi-step task has been fully completed. Call this ONLY when the goal is 100% accomplished. Provide a clear, detailed summary of what was completed.", new List<ToolParameter>
+        {
+            new("summary", "string", "Summary of what was accomplished to complete the goal", true)
+        }, false),
+        new ToolDefinition("task_progress", "Reports intermediate progress toward the current goal during autonomous multi-turn execution.", new List<ToolParameter>
+        {
+            new("percent", "integer", "Estimated percentage of goal completion (0-100)", true),
+            new("status", "string", "Brief description of current progress and next steps", true)
         }, false)
     };
 
@@ -297,9 +306,18 @@ public class ToolExecutor(
         if (toolDef == null)
         {
             var validToolNames = string.Join(", ", tools.Select(t => t.Name));
-            var guidance = $"Tool '{request.Name}' does not exist in available system tools.\n" +
+            string commandHint = (request.Name.Equals("cmd", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("powershell", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("terminal", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("bash", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("sh", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("exec", StringComparison.OrdinalIgnoreCase))
+                ? $"\nAction Required: You attempted to call '{request.Name}' as a tool name. To run command line commands or launch processes, call tool 'run_command' with argument {{\"CommandLine\": \"...\"}}."
+                : "";
+
+            var guidance = $"Tool '{request.Name}' does not exist in available system tools.{commandHint}\n" +
                            $"Available valid tools are: [{validToolNames}].\n" +
-                           $"Guidance: To execute PowerShell commands, launch apps, or manage system processes, use 'run_command' with Start-Process syntax instead of inventing custom tool names.";
+                           $"Guidance: Use 'run_command' for system commands, 'read_file'/'write_file' for file operations, or 'search_web'/'search_rag' for retrieval.";
             return new ToolResult(request.Name, false, string.Empty, guidance);
         }
 
@@ -371,6 +389,8 @@ public class ToolExecutor(
                 "search_rag" => await SearchRagAsync(request, ct),
                 "list_rag_collections" => await ListRagCollectionsAsync(ct),
                 "index_folder_rag" => await IndexFolderRagAsync(request, ct),
+                "task_complete" => ExecuteTaskComplete(request),
+                "task_progress" => ExecuteTaskProgress(request),
                 _ => await ExecuteCustomToolAsync(request, ct)
             };
         }
@@ -1518,7 +1538,6 @@ public class ToolExecutor(
                 embeddingModel: "LLamaEmbedder-Local",
                 dimension: 384
             );
-
             int chunksCreated = await IngestionEngine.IndexDirectoryAsync(
                 collectionId: collection.Id,
                 directoryPath: folderPath,
@@ -1530,8 +1549,22 @@ public class ToolExecutor(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error indexing folder '{FolderPath}' for RAG", folderPath);
+            logger.LogError(ex, "Error indexing folder for RAG");
             return new ToolResult(request.Name, false, string.Empty, ex.Message);
         }
+    }
+
+    private static ToolResult ExecuteTaskComplete(ToolCallRequest request)
+    {
+        string summary = GetStringArg(request.Arguments, "summary") ?? "Goal marked as complete.";
+        return new ToolResult("task_complete", true, $"[GOAL COMPLETED] Summary: {summary}", null);
+    }
+
+    private static ToolResult ExecuteTaskProgress(ToolCallRequest request)
+    {
+        string percentStr = GetStringArg(request.Arguments, "percent") ?? "0";
+        int.TryParse(percentStr, out int pct);
+        string status = GetStringArg(request.Arguments, "status") ?? "In progress";
+        return new ToolResult("task_progress", true, $"[PROGRESS UPDATE: {pct}%] Status: {status}", null);
     }
 }

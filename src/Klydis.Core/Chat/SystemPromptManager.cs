@@ -254,7 +254,8 @@ public class SystemPromptManager
         string ragNotice = "",
         string skillHeader = "",
         string? customPath = null,
-        string? personalityMode = null)
+        string? personalityMode = null,
+        bool isGoalMode = false)
     {
         string masterPrompt = GetMasterSystemPrompt(customPath);
         string? personalityContent = GetPersonalityPrompt(personalityMode);
@@ -327,6 +328,19 @@ public class SystemPromptManager
         sb.AppendLine("9. You can provide normal text before or after tool calls outside of think tags.");
         sb.AppendLine("10. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.");
         sb.AppendLine("11. DO NOT repeat the exact same tool call if it just failed or returned an error.");
+        sb.AppendLine("12. GOAL COMPLETION & PROGRESS SIGNALING: You are equipped with 'task_complete' and 'task_progress'. When executing long-horizon tasks or operating in Goal Mode, call 'task_progress' with {\"percent\": N, \"status\": \"...\"} to report progress. When your requested goal is 100% finished and verified, you MUST call 'task_complete' with {\"summary\": \"...\"} to signal task completion.");
+
+        if (isGoalMode)
+        {
+            sb.AppendLine();
+            sb.AppendLine("### AUTONOMOUS GOAL EXECUTION MODE DIRECTIVES");
+            sb.AppendLine("- You are operating in AUTONOMOUS GOAL MODE. The user has assigned you a goal to achieve.");
+            sb.AppendLine("- You MUST work continuously and autonomously across turns until the goal is fully accomplished.");
+            sb.AppendLine("- Do NOT ask the user for permission or confirmation between turns — execute tools to investigate, fix, test, or build.");
+            sb.AppendLine("- When the goal is 100% complete, call tool 'task_complete' with a detailed summary.");
+            sb.AppendLine("- Periodically call tool 'task_progress' to report your completion percentage.");
+            sb.AppendLine("- If an approach fails, try an alternative tool or parameter strategy. Never stop until the goal is completed or unresolvable.");
+        }
 
         if (!string.IsNullOrWhiteSpace(worldStateHeader))
         {

@@ -492,8 +492,8 @@
                                     Value="{Binding ContextSliderIndex, Mode=TwoWay}"
                                     Margin="0,6,0,4"/>
 
-                            <!-- Bucket labels below slider mathematically aligned to 11 slider ticks -->
-                            <Grid Margin="0,4,0,0">
+                             <!-- Bucket labels below slider mathematically aligned to 12 slider ticks (0=Auto to 11=1M) -->
+                            <Grid Margin="6,4,6,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="*"/>
@@ -511,21 +511,69 @@
                                 <!-- Tick 0: Auto -->
                                 <TextBlock Grid.Column="0" Text="Auto" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Left"/>
                                 <!-- Tick 1: 1K -->
-                                <TextBlock Grid.Column="0" Grid.ColumnSpan="2" Text="1K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-7,0"/>
+                                <TextBlock Grid.Column="0" Grid.ColumnSpan="2" Text="1K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
+                                <!-- Tick 2: 2K -->
+                                <TextBlock Grid.Column="1" Grid.ColumnSpan="2" Text="2K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                                 <!-- Tick 3: 4K -->
-                                <TextBlock Grid.Column="2" Grid.ColumnSpan="2" Text="4K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-7,0"/>
+                                <TextBlock Grid.Column="2" Grid.ColumnSpan="2" Text="4K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
+                                <!-- Tick 4: 8K -->
+                                <TextBlock Grid.Column="3" Grid.ColumnSpan="2" Text="8K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                                 <!-- Tick 5: 16K -->
-                                <TextBlock Grid.Column="4" Grid.ColumnSpan="2" Text="16K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-10,0"/>
+                                <TextBlock Grid.Column="4" Grid.ColumnSpan="2" Text="16K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                                 <!-- Tick 6: 32K -->
-                                <TextBlock Grid.Column="5" Grid.ColumnSpan="2" Text="32K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-10,0"/>
+                                <TextBlock Grid.Column="5" Grid.ColumnSpan="2" Text="32K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                                 <!-- Tick 7: 64K -->
-                                <TextBlock Grid.Column="6" Grid.ColumnSpan="2" Text="64K" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" HorizontalAlignment="Right" Margin="0,0,-10,0"/>
+                                <TextBlock Grid.Column="6" Grid.ColumnSpan="2" Text="64K" FontSize="9.5" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
+                                <!-- Tick 8: 128K -->
+                                <TextBlock Grid.Column="7" Grid.ColumnSpan="2" Text="128K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                                 <!-- Tick 9: 256K -->
-                                <TextBlock Grid.Column="8" Grid.ColumnSpan="2" Text="256K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-13,0"/>
+                                <TextBlock Grid.Column="8" Grid.ColumnSpan="2" Text="256K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                                 <!-- Tick 10: 512K -->
-                                <TextBlock Grid.Column="9" Grid.ColumnSpan="2" Text="512K" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,0,-13,0"/>
+                                <TextBlock Grid.Column="9" Grid.ColumnSpan="2" Text="512K" FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Center"/>
                                 <!-- Tick 11: 1M -->
-                                <TextBlock Grid.Column="10" Text="1M" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" HorizontalAlignment="Right"/>
+                                <TextBlock Grid.Column="10" Text="1M" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Batch Processing Size & Micro-Batching card -->
+                    <TextBlock Text="BATCH PROCESSING &amp; HARDWARE THROUGHPUT" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
+                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
+                        <StackPanel>
+                            <!-- Logical Batch Size -->
+                            <Grid Margin="0,0,0,16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="260"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Logical Batch Processing Size" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    <TextBlock Text="Maximum batch size evaluated simultaneously during prompt prefill (higher values increase prefill speed)." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,2,16,0"/>
+                                </StackPanel>
+                                <ComboBox Grid.Column="1"
+                                          ItemsSource="{Binding AvailableBatchSizes}"
+                                          SelectedValue="{Binding SelectedBatchSize, Mode=TwoWay}"
+                                          SelectedValuePath="Value"
+                                          DisplayMemberPath="DisplayName"
+                                          VerticalAlignment="Center"/>
+                            </Grid>
+
+                            <!-- Physical Micro-Batch Size (UBatch) -->
+                            <Grid Margin="0,0,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="260"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Micro-Batch Size (UBatch)" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    <TextBlock Text="Physical micro-batch size dispatched to GPU Tensor Cores per step (512 tokens recommended for peak GPU throughput)." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,2,16,0"/>
+                                </StackPanel>
+                                <ComboBox Grid.Column="1"
+                                          ItemsSource="{Binding AvailableUBatchSizes}"
+                                          SelectedValue="{Binding SelectedUBatchSize, Mode=TwoWay}"
+                                          SelectedValuePath="Value"
+                                          DisplayMemberPath="DisplayName"
+                                          VerticalAlignment="Center"/>
                             </Grid>
                         </StackPanel>
                     </Border>

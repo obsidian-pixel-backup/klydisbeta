@@ -179,6 +179,7 @@ public class ChatEngine(
 
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public string SelectedPersonality { get; set; } = "Default";
+    public bool IsGoalMode { get; set; } = false;
     public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
     public bool IsGenerating { get; private set; }
     public double TokensPerSecond { get; private set; }
@@ -240,10 +241,12 @@ public class ChatEngine(
     public async IAsyncEnumerable<ChatStreamEvent> StreamResponseAsync(
         string userMessage, 
         [EnumeratorCancellation] CancellationToken ct,
-        string? skillContext = null)
+        string? skillContext = null,
+        bool? isGoalMode = null)
     {
         IsGenerating = true;
         _recentTools.Clear();
+        bool activeGoalMode = isGoalMode ?? IsGoalMode;
         
         string generatingSessionId = CurrentSessionId;
         if (!_sessionHistories.TryGetValue(generatingSessionId, out var activeHistory))
@@ -261,7 +264,7 @@ public class ChatEngine(
 
         await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
         
-        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, ct, skillContext).GetAsyncEnumerator(ct);
+        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, ct, skillContext, activeGoalMode).GetAsyncEnumerator(ct);
         try
         {
             while (true)
@@ -308,7 +311,8 @@ public class ChatEngine(
         string generatingSessionId,
         List<ChatMessage> activeHistory,
         [EnumeratorCancellation] CancellationToken ct,
-        string? skillContext = null)
+        string? skillContext = null,
+        bool isGoalMode = false)
     {
         var templateType = promptEngine.DetectTemplate(
             inferenceEngine.Architecture, 
@@ -378,7 +382,7 @@ public class ChatEngine(
         var skillHeader = !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
 
         var sysPromptManager = new SystemPromptManager();
-        var sysPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, personalityMode: SelectedPersonality);
+        var sysPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
         
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
         
@@ -398,10 +402,10 @@ public class ChatEngine(
         int safetyMargin = 256;
         
         // ABSOLUTE upper bound for total prompt tokens (system + user history)
-        int maxTotalPromptTokens = Math.Max(512, totalContext - reservedForResponse - safetyMargin);
+        int maxTotalPromptTokens = Math.Max(2048, totalContext - reservedForResponse - safetyMargin);
         
-        // Target user budget for conversation history after accounting for system prompt
-        int targetUserBudget = Math.Max(256, maxTotalPromptTokens - sysPromptTokens);
+        // Target user budget for conversation history after accounting for system prompt (minimum 4096 tokens floor)
+        int targetUserBudget = Math.Max(4096, maxTotalPromptTokens - sysPromptTokens);
 
         var activeMessages = new List<ChatMessage>();
         int currentTokens = 0; // System prompt is excluded from user history budget
@@ -418,6 +422,15 @@ public class ChatEngine(
         {
             var msg = activeHistory[i];
             int msgTokens = (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(msg.Content) : contextOrchestrator.EstimateTokens(msg.Content)) + 25; // 25 tokens for template formatting overhead
+            
+            // If an individual tool result message is excessively long (> 3000 chars), create a budget-trimmed variant rather than dropping turn
+            if (msg.Role == ChatRole.User && msg.Content.Length > 3000 && msg.Content.Contains("[Tool Output"))
+            {
+                string trimmedContent = msg.Content.Substring(0, 2500) + "\n...[Tool output truncated to preserve active context budget]...";
+                msg = new ChatMessage(msg.Role, trimmedContent);
+                msgTokens = (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(trimmedContent) : contextOrchestrator.EstimateTokens(trimmedContent)) + 25;
+            }
+
             if (currentTokens + msgTokens <= targetUserBudget)
             {
                 activeMessages.Insert(0, msg);
@@ -426,7 +439,7 @@ public class ChatEngine(
             else
             {
                 hasDroppedMessages = true;
-                logger.LogInformation("Context limit reached. Dropping intermediate message from active prompt.");
+                logger.LogInformation("Context limit reached. Compressing/truncating intermediate message for active prompt.");
             }
         }
 
@@ -502,7 +515,7 @@ public class ChatEngine(
                     int thinkTagLen = 0;
                     if (!isThinking)
                     {
-                        string[] thinkStartTags = new[] { "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]" };
+                        string[] thinkStartTags = new[] { "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]", "{antml:thinking_mode}", "<antml:thinking_mode>", "{thinking_mode}", "<thinking_mode>" };
                         foreach (var tag in thinkStartTags)
                         {
                             int idx = unyieldedText.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
@@ -518,7 +531,7 @@ public class ChatEngine(
                     int thinkEndTagLen = 0;
                     if (isThinking)
                     {
-                        string[] thinkEndTags = new[] { "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>", "[/THINK]", "[/THOUGHT]" };
+                        string[] thinkEndTags = new[] { "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>", "[/THINK]", "[/THOUGHT]", "{/antml:thinking_mode}", "</antml:thinking_mode>", "{/thinking_mode}", "</thinking_mode>" };
                         foreach (var tag in thinkEndTags)
                         {
                             int idx = unyieldedText.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
@@ -690,14 +703,11 @@ public class ChatEngine(
             var fullResponse = fullResponseBuilder.ToString();
             logger.LogWarning("[DIAG] fullResponse (first 200 chars): {Resp}", fullResponse.Length > 200 ? fullResponse.Substring(0, 200) : fullResponse);
 
-            // Strip raw thinking tags so history stored in context does not poison future turns
-            var cleanHistoryResponse = Regex.Replace(fullResponse, @"<\|?(?:think|thought)\|?>.*?(?:</\|?(?:think|thought)\|?>|<\|/(?:think|thought)\|?>|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
-            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"\[(?:THINK|THOUGHT)\].*?(?:\[/(?:THINK|THOUGHT)\]|$)", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
-            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"</?\|?(?:think|thought)\|?>", "", RegexOptions.IgnoreCase).Trim();
-            cleanHistoryResponse = Regex.Replace(cleanHistoryResponse, @"\[/?(?:THINK|THOUGHT)\]", "", RegexOptions.IgnoreCase).Trim();
+            // Strip raw thinking tags and antml system tags so history stored in context does not poison future turns
+            var cleanHistoryResponse = OutputSanitizer.CleanHistoryResponse(fullResponse);
             if (string.IsNullOrWhiteSpace(cleanHistoryResponse))
             {
-                cleanHistoryResponse = fullResponse;
+                cleanHistoryResponse = OutputSanitizer.SanitizeText(fullResponse);
             }
 
             var assistantMsgObj = new ChatMessage(ChatRole.Assistant, cleanHistoryResponse);

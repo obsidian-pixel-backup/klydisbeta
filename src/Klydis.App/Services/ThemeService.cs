@@ -99,6 +99,8 @@ public class ThemeService
                     SelectedDraftModelPath = string.IsNullOrWhiteSpace(settings.SelectedDraftModelPath) ? "auto" : settings.SelectedDraftModelPath;
                     SelectedPersonality = string.IsNullOrWhiteSpace(settings.SelectedPersonality) ? "Default" : settings.SelectedPersonality;
                     UserContextLimit = settings.UserContextLimit > 0 ? settings.UserContextLimit : 65536;
+                    UserBatchSize = settings.UserBatchSize;
+                    UserUBatchSize = settings.UserUBatchSize;
                 }
             }
         }
@@ -164,6 +166,8 @@ public class ThemeService
     public string SelectedDraftModelPath { get; private set; } = "auto";
     public string SelectedPersonality { get; private set; } = "Default";
     public int UserContextLimit { get; private set; } = 65536;
+    public int UserBatchSize { get; private set; } = 0;
+    public int UserUBatchSize { get; private set; } = 0;
 
     public void SaveSpeculativeSettings(bool enabled, int draftCount, string selectedDraftModelPath = "auto")
     {
@@ -185,6 +189,13 @@ public class ThemeService
         PersistAllSettings();
     }
 
+    public void SaveBatchProcessingSizeSetting(int batchSize, int uBatchSize)
+    {
+        UserBatchSize = batchSize;
+        UserUBatchSize = uBatchSize;
+        PersistAllSettings();
+    }
+
     private void PersistAllSettings()
     {
         try
@@ -198,7 +209,9 @@ public class ThemeService
                 SpeculativeDraftCount = SpeculativeDraftCount,
                 SelectedDraftModelPath = SelectedDraftModelPath,
                 SelectedPersonality = SelectedPersonality,
-                UserContextLimit = UserContextLimit
+                UserContextLimit = UserContextLimit,
+                UserBatchSize = UserBatchSize,
+                UserUBatchSize = UserUBatchSize
             });
             File.WriteAllText(_settingsPath, json);
         }
@@ -229,5 +242,7 @@ public class ThemeService
         public string SelectedDraftModelPath { get; set; } = "auto";
         public string SelectedPersonality { get; set; } = "Default";
         public int UserContextLimit { get; set; } = 0;
+        public int UserBatchSize { get; set; } = 0;
+        public int UserUBatchSize { get; set; } = 0;
     }
 }

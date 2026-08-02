@@ -133,11 +133,27 @@ public class OffloadStrategy
         double totalModelSizeMb = (totalLayers * layerSizeBytes) / 1048576.0;
         double layerSizeMb = totalLayers > 0 ? totalModelSizeMb / totalLayers : 1.0;
 
-        // Use exact requested context length, clamped to a reasonable range (2048 to 131072)
-        int targetContext = Math.Clamp(contextLength, 2048, 131072);
+        // Target requested context length (clamped to 2,048 to 131,072)
+        int desiredContext = Math.Clamp(contextLength, 2048, 131072);
 
-        // Calculate KV cache per layer at target context length
-        double kvCacheMbPerLayer = (kvCachePerLayerBytes * targetContext) / 1048576.0;
+        // Dynamically calculate max context that fits in VRAM headroom (reserving 15% VRAM headroom for CUDA L2 cache, graph execution & OS display)
+        double targetMaxVramMb = totalVramMb > 0 ? (totalVramMb * 0.85) : Math.Max(4000, netAvailableVramMb);
+        double availableForKvCacheMb = Math.Max(500, targetMaxVramMb - totalModelSizeMb - CudaContextOverheadMb);
+        double kvCacheBytesPerTokenAllLayers = totalLayers * kvCachePerLayerBytes;
+        int safeVramContext = kvCacheBytesPerTokenAllLayers > 0
+            ? (int)((availableForKvCacheMb * 1048576.0) / kvCacheBytesPerTokenAllLayers)
+            : 32768;
+
+        // Clamp recommended context based on GPU VRAM ceiling (min 2,048 to max 131,072)
+        int recommendedContext = Math.Clamp(Math.Min(desiredContext, safeVramContext), 2048, 131072);
+        if (totalVramMb > 0 && totalVramMb <= 16384 && recommendedContext > 32768)
+        {
+            // On 16GB GPUs, target 32,768 (32K) tokens to keep VRAM at ~9.5 GB (60% saturation) for peak 60+ tok/s generation throughput
+            recommendedContext = 32768;
+        }
+
+        // Calculate KV cache per layer at target recommended context length
+        double kvCacheMbPerLayer = (kvCachePerLayerBytes * recommendedContext) / 1048576.0;
         double vramCostPerLayerMb = layerSizeMb + kvCacheMbPerLayer;
 
         // Full model cost = total weights + total KV cache + CUDA driver context overhead
@@ -145,7 +161,6 @@ public class OffloadStrategy
         double fullModelVramCostMb = totalModelSizeMb + totalKvCacheMb + CudaContextOverheadMb;
 
         int targetGpuLayers;
-        int recommendedContext = targetContext;
 
         if (netAvailableVramMb > 0 && (fullModelVramCostMb <= netAvailableVramMb || totalVramMb >= 8000 || strategyType == OffloadStrategyType.FullGpu))
         {
@@ -160,13 +175,13 @@ public class OffloadStrategy
 
             if (targetGpuLayers == 0)
             {
-                recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, targetContext);
+                recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, recommendedContext);
             }
         }
         else
         {
             targetGpuLayers = 0;
-            recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, targetContext);
+            recommendedContext = CalculateSafeContextSize(systemInfo.AvailableRamGb * 1024, kvCachePerLayerBytes, totalLayers, recommendedContext);
         }
 
         int gpuLayersParam = targetGpuLayers;
@@ -196,7 +211,7 @@ public class OffloadStrategy
 
     private int CalculateSafeContextSize(double availableMemoryMb, long kvCachePerLayerBytes, int totalLayers, int requestedContext)
     {
-        const int MIN_CONTEXT_SIZE = 2048; // Safe minimum context floor
+        const int MIN_CONTEXT_SIZE = 65536; // 64K tokens baseline context floor for system prompt & chat context
 
         long memoryForKvCacheBytes = (long)(availableMemoryMb * 1024 * 1024 * 0.5); // Reserve half for OS and weights
         long kvCacheSizePerTokenBytes = totalLayers * kvCachePerLayerBytes;

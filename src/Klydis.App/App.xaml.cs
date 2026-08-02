@@ -120,6 +120,16 @@ public partial class App : Application
             var disposer = sp.GetRequiredService<INativeResourceDisposer>();
             var engine = new InferenceEngine(logger, disposer);
             engine.SpeculativeDecodingService = sp.GetRequiredService<SpeculativeDecodingService>();
+            var themeService = sp.GetService<ThemeService>();
+            if (themeService != null)
+            {
+                engine.UserContextLimit = (uint)themeService.UserContextLimit;
+                engine.UserBatchSize = (uint)themeService.UserBatchSize;
+                engine.UserUBatchSize = (uint)themeService.UserUBatchSize;
+                engine.IsSpeculativeDecodingEnabled = themeService.IsSpeculativeDecodingEnabled;
+                engine.SpeculativeDraftCount = themeService.SpeculativeDraftCount;
+                engine.SelectedDraftModelPath = themeService.SelectedDraftModelPath;
+            }
             return engine;
         });
         services.AddSingleton<Klydis.Core.Chat.IInferenceEngine>(sp => sp.GetRequiredService<InferenceEngine>());
@@ -177,6 +187,8 @@ public partial class App : Application
             return engine;
         });
         services.AddSingleton<PromptTemplateEngine>();
+        services.AddSingleton<Klydis.Core.Chat.GoalBudget>();
+        services.AddTransient<Klydis.Core.Chat.GoalOrchestrator>();
 
         // ViewModels
         services.AddTransient<MainViewModel>();

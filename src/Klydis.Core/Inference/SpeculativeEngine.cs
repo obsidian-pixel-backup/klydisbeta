@@ -350,6 +350,17 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
             yield break;
         }
 
+        // Auto-bypass speculative decoding when candidate acceptance rate (alpha) falls below 45% threshold
+        if (AcceptanceRate < 0.45f)
+        {
+            _logger?.LogDebug("Speculative acceptance rate ({Alpha:P0}) below 45% threshold. Bypassing speculative loop to direct CUDA target execution.", AcceptanceRate);
+            await foreach (var token in targetExecutor.InferAsync(textToEvaluate, targetInferenceParams, ct))
+            {
+                yield return token;
+            }
+            yield break;
+        }
+
         Func<string, InferenceParams, CancellationToken, IAsyncEnumerable<string>> draftGenerator = (promptText, paramsObj, tokenCt) =>
         {
             InteractiveExecutor? currentExec;

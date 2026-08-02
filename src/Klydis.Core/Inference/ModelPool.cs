@@ -146,8 +146,8 @@ public sealed class ModelPool : IDisposable, IAsyncDisposable
             int totalLayers = metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32;
             long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
             
-            int rawContextLength = (int)(metadata?.ContextLength ?? 32768);
-            int contextLength = Math.Clamp(rawContextLength < 32768 ? 32768 : rawContextLength, 32768, 131072);
+            int rawContextLength = (int)(metadata?.ContextLength ?? 65536);
+            int contextLength = Math.Clamp(rawContextLength < 65536 ? 65536 : rawContextLength, 65536, 131072);
             
             // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
             // Klydis enforces Q4_0 4-bit quantized KV cache (configured in InferenceEngine), so sizeof = 0.5 bytes.
