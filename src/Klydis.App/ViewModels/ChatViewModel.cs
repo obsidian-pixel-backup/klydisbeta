@@ -157,7 +157,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         _toolExecutor.ToolApprovalHandlerAsync = ShowToolApprovalDialogAsync;
-        _toolExecutor.ToolApprovalRequested += ToolExecutor_ToolApprovalRequested;
 
         AvailableRiskLevels.Add(RiskLevel.Safe);
         AvailableRiskLevels.Add(RiskLevel.Standard);
@@ -181,10 +180,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
         _registry.RegistryChanged -= OnRegistryChanged;
         _inferenceEngine.ModelStateChanged -= OnModelStateChanged;
-        if (_toolExecutor != null)
-        {
-            _toolExecutor.ToolApprovalRequested -= ToolExecutor_ToolApprovalRequested;
-        }
         GC.SuppressFinalize(this);
     }
 
@@ -310,10 +305,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         return await tcs.Task;
     }
 
-    private void ToolExecutor_ToolApprovalRequested(object? sender, ToolApprovalEventArgs e)
-    {
-        e.IsApproved = ShowToolApprovalDialogAsync(e.Request).GetAwaiter().GetResult();
-    }
+
 
     partial void OnSelectedRiskLevelChanged(RiskLevel value)
     {

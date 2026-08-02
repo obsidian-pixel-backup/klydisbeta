@@ -117,11 +117,12 @@ public class SystemProfiler
         var systemInfoTask = GetSystemInfoAsync();
         var gpuInfoTask = _gpuProfiler.GetGpuInfoAsync();
 
-        await Task.WhenAll(systemInfoTask, gpuInfoTask);
+        var systemInfo = await systemInfoTask;
+        var gpuInfo = await gpuInfoTask;
 
         return new HardwareProfile(
-            System: systemInfoTask.Result,
-            Gpu: gpuInfoTask.Result
+            System: systemInfo,
+            Gpu: gpuInfo
         );
     }
 }

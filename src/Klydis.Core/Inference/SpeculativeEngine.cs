@@ -151,15 +151,7 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
 
     public void Unload()
     {
-        _draftLock.Wait();
-        try
-        {
-            UnloadInternal();
-        }
-        finally
-        {
-            _draftLock.Release();
-        }
+        _ = UnloadAsync();
     }
 
     private async Task UnloadInternalAsync()
@@ -209,47 +201,7 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
 
     private void UnloadInternal()
     {
-        try
-        {
-            Task? waitTask = null;
-            lock (_draftStateLock)
-            {
-                if (_activeDraftCount > 0)
-                {
-                    _draftZeroActiveTcs ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    waitTask = _draftZeroActiveTcs.Task;
-                }
-            }
-
-            if (waitTask != null)
-            {
-                waitTask.Wait();
-            }
-
-            LLamaContext? draftCtx = null;
-            LLamaWeights? draftWeights = null;
-
-            lock (_draftStateLock)
-            {
-                _draftExecutor = null;
-                draftCtx = _draftContext;
-                _draftContext = null;
-                draftWeights = _draftWeights;
-                _draftWeights = null;
-                _draftModelParams = null;
-                LoadedDraftPath = null;
-                _draftZeroActiveTcs = null;
-            }
-
-            if (draftCtx != null || draftWeights != null)
-            {
-                SafeOffloadDisposal(draftCtx, draftWeights);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogWarning(ex, "Error unloading draft model.");
-        }
+        _ = UnloadInternalAsync();
     }
 
     /// <summary>
@@ -267,9 +219,9 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
     /// Performs native KV cache sequence rewinding to keepPosition without native context disposal.
     /// Uses llama_memory_seq_rm (MemorySequenceRemove) to eliminate prompt re-prefill delays (500-1500ms).
     /// </summary>
-    public bool RewindDraftContext(int keepPosition)
+    public async Task<bool> RewindDraftContextAsync(int keepPosition)
     {
-        _draftLock.Wait();
+        await _draftLock.WaitAsync().ConfigureAwait(false);
         try
         {
             if (_draftContext != null && !_draftContext.NativeHandle.IsClosed && !_draftContext.NativeHandle.IsInvalid)
@@ -293,12 +245,33 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
         }
     }
 
-    internal void SynchronizeDraftContextState(string contextText)
+    public bool RewindDraftContext(int keepPosition)
+    {
+        try
+        {
+            if (_draftContext != null && !_draftContext.NativeHandle.IsClosed && !_draftContext.NativeHandle.IsInvalid)
+            {
+                _draftContext.NativeHandle.MemorySequenceRemove(
+                    (LLamaSeqId)0,
+                    (LLamaPos)Math.Max(0, keepPosition),
+                    (LLamaPos)(-1));
+                return true;
+            }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Native KV cache sequence rewinding failed.");
+            return false;
+        }
+    }
+
+    internal async Task SynchronizeDraftContextStateAsync(string contextText)
     {
         int estimatedTokens = GetTokenEstimate(contextText);
-        if (!RewindDraftContext(estimatedTokens))
+        if (!await RewindDraftContextAsync(estimatedTokens).ConfigureAwait(false))
         {
-            _draftLock.Wait();
+            await _draftLock.WaitAsync().ConfigureAwait(false);
             try
             {
                 if (_draftContext != null && _draftWeights != null && _draftModelParams != null)
@@ -313,6 +286,11 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
                 _draftLock.Release();
             }
         }
+    }
+
+    internal void SynchronizeDraftContextState(string contextText)
+    {
+        _ = SynchronizeDraftContextStateAsync(contextText);
     }
 
     private static int GetTokenEstimate(string text)
@@ -375,14 +353,9 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
         Func<string, InferenceParams, CancellationToken, IAsyncEnumerable<string>> draftGenerator = (promptText, paramsObj, tokenCt) =>
         {
             InteractiveExecutor? currentExec;
-            _draftLock.Wait();
-            try
+            lock (_draftStateLock)
             {
                 currentExec = _draftExecutor;
-            }
-            finally
-            {
-                _draftLock.Release();
             }
 
             if (currentExec == null)

@@ -302,21 +302,7 @@ public sealed class ModelPool : IDisposable, IAsyncDisposable
     {
         _idleTimeoutCts.Cancel();
         _idleTimeoutCts.Dispose();
-
-        _poolLock.Wait();
-        try
-        {
-            foreach (var model in _loadedModels.Values)
-            {
-                model.Engine.Dispose();
-            }
-            _loadedModels.Clear();
-        }
-        finally
-        {
-            _poolLock.Release();
-            _poolLock.Dispose();
-        }
+        _ = DisposeAsync();
         GC.SuppressFinalize(this);
     }
 }

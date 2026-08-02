@@ -191,7 +191,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             }
             else
             {
-                SpeculativeEngine.Unload();
+                await SpeculativeEngine.UnloadAsync();
             }
         }
         catch (Exception ex)
@@ -199,7 +199,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             _logger?.LogWarning(ex, "Failed to attach speculative draft model.");
             SpeculativeStatus = $"Speculative decoding unavailable: {ex.Message}";
             SpeculativeStatusChanged?.Invoke(SpeculativeStatus);
-            SpeculativeEngine.Unload();
+            await SpeculativeEngine.UnloadAsync();
         }
         finally
         {
@@ -221,7 +221,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             {
                 _logger.LogInformation("Loading model from {ModelPath} with {GpuLayers} GPU layers.", modelPath, offloadPlan.GpuLayers);
 
-                SpeculativeEngine.Unload();
+                await SpeculativeEngine.UnloadAsync();
                 UnloadModelInternal();
                 if (NativeResourceDisposer != null)
                 {
@@ -898,9 +898,9 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// <summary>
     /// Resets the engine context and executor state, clearing cached prefix state.
     /// </summary>
-    public void ResetContext()
+    public async Task ResetContextAsync(CancellationToken ct = default)
     {
-        _modelLock.Wait();
+        await _modelLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             ResetContextInternal();
@@ -909,6 +909,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         {
             _modelLock.Release();
         }
+    }
+
+    public void ResetContext()
+    {
+        _ = ResetContextAsync();
     }
 
     internal void ResetContextInternal()
@@ -1180,20 +1185,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// </summary>
     public void UnloadModel()
     {
-        CancelActiveGenerationAsync().GetAwaiter().GetResult();
-
-        _modelLock.Wait();
-        try
-        {
-            SpeculativeEngine.Unload();
-            UnloadModelInternal();
-        }
-        finally
-        {
-            _modelLock.Release();
-        }
-        
-        ModelStateChanged?.Invoke(false, null);
+        _ = UnloadModelAsync();
     }
 
     private void UnloadModelInternal()

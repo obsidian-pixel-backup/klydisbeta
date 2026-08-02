@@ -363,7 +363,7 @@ public class ChatEngine(
         {
             try
             {
-                var collections = VectorStore.GetCollectionsAsync().GetAwaiter().GetResult();
+                var collections = await VectorStore.GetCollectionsAsync();
                 if (collections != null && collections.Count > 0)
                 {
                     var colList = string.Join("\n", collections.Select(c => $"- Collection ID: `{c.Id}` | Name: \"{c.Name}\" | Path: {c.FolderPath}"));

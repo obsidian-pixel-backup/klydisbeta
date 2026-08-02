@@ -62,7 +62,7 @@ public partial class MainViewModel : ObservableObject
 
         _inferenceEngine.ModelStateChanged += (isLoaded, path) =>
         {
-            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             {
                 IsModelLoaded = isLoaded;
                 StatusText = isLoaded ? $"Model Loaded: {System.IO.Path.GetFileNameWithoutExtension(path)}" : "Ready";

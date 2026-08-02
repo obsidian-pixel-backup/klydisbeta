@@ -143,13 +143,7 @@ public sealed class NativeResourceDisposer : INativeResourceDisposer
 
         _queue.Writer.TryComplete();
         _cts.Cancel();
-        try
-        {
-            _processingTask.Wait(TimeSpan.FromSeconds(5));
-        }
-        catch { }
-
-        _cts.Dispose();
+        _ = DisposeAsync();
         GC.SuppressFinalize(this);
     }
 
