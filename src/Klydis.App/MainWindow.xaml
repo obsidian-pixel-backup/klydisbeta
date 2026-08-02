@@ -200,6 +200,11 @@
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                     <TextBlock Text="{Binding SystemMonitorViewModel.CpuUsagePercent, StringFormat='CPU: {0:F1}%'}" FontSize="12" Margin="0,0,16,0">
+                        <TextBlock.ToolTip>
+                            <ToolTip>
+                                <TextBlock Text="{Binding SystemMonitorViewModel.ProcessCpuUsagePercent, StringFormat='Process CPU: {0:F1}% | System CPU: Total Load'}" />
+                            </ToolTip>
+                        </TextBlock.ToolTip>
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
                                 <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
@@ -215,7 +220,35 @@
                             </Style>
                         </TextBlock.Style>
                     </TextBlock>
+
+                    <TextBlock Text="{Binding SystemMonitorViewModel.GpuUsagePercent, StringFormat='GPU: {0}%'}" FontSize="12" Margin="0,0,16,0">
+                        <TextBlock.ToolTip>
+                            <ToolTip>
+                                <TextBlock Text="{Binding SystemMonitorViewModel.GpuName, StringFormat='GPU: {0}'}" />
+                            </ToolTip>
+                        </TextBlock.ToolTip>
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.GpuSeverity}" Value="Warning">
+                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.GpuSeverity}" Value="Critical">
+                                        <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                                        <Setter Property="FontWeight" Value="SemiBold"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+
                     <TextBlock Text="{Binding SystemMonitorViewModel.RamUsedGb, StringFormat='RAM: {0:F1} GB'}" FontSize="12" Margin="0,0,16,0">
+                        <TextBlock.ToolTip>
+                            <ToolTip>
+                                <TextBlock Text="{Binding SystemMonitorViewModel.AppRamUsedMb, StringFormat='App WorkingSet RAM: {0} MB'}" />
+                            </ToolTip>
+                        </TextBlock.ToolTip>
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
                                 <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
@@ -231,6 +264,7 @@
                             </Style>
                         </TextBlock.Style>
                     </TextBlock>
+
                     <TextBlock Text="{Binding SystemMonitorViewModel.VramUsedMb, StringFormat='VRAM: {0} MB / '}" FontSize="12">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
@@ -249,7 +283,7 @@
                     </TextBlock>
                     <TextBlock Text="{Binding SystemMonitorViewModel.VramTotalMb, StringFormat='{}{0} MB'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0"/>
                     <TextBlock Text="{Binding SystemMonitorViewModel.ModelMemoryMb, StringFormat='Model Mem: {0:F1} MB'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0"/>
-                    <TextBlock Text="{Binding SystemMonitorViewModel.CurrentTokensPerSecond, StringFormat='{}{0:F1} t/s'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12"/>
+                    <TextBlock Text="{Binding SystemMonitorViewModel.CurrentTokensPerSecond, StringFormat='{}{0:F1} t/s'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" ToolTip="Token generation throughput (live and last generation run)"/>
                 </StackPanel>
             </Grid>
         </Border>

@@ -17,7 +17,8 @@ public record SystemInfo(
     int ClockSpeedMHz,
     double TotalRamGb,
     double AvailableRamGb,
-    double CpuUsagePercent);
+    double CpuUsagePercent,
+    double ProcessCpuUsagePercent = 0);
 
 /// <summary>
 /// A comprehensive hardware profile combining System and GPU information.
@@ -33,6 +34,9 @@ public class SystemProfiler
 {
     private readonly ILogger<SystemProfiler>? _logger;
     private readonly GpuProfiler _gpuProfiler;
+    private TimeSpan _lastProcessCpuTime;
+    private DateTime _lastCpuSampleTime;
+    private readonly object _cpuLock = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SystemProfiler"/> class.
@@ -43,6 +47,41 @@ public class SystemProfiler
     {
         _gpuProfiler = gpuProfiler ?? throw new ArgumentNullException(nameof(gpuProfiler));
         _logger = logger;
+    }
+
+    private double GetProcessCpuUsagePercent()
+    {
+        lock (_cpuLock)
+        {
+            try
+            {
+                using var proc = System.Diagnostics.Process.GetCurrentProcess();
+                var now = DateTime.UtcNow;
+                var cpuTime = proc.TotalProcessorTime;
+
+                if (_lastCpuSampleTime == default)
+                {
+                    _lastCpuSampleTime = now;
+                    _lastProcessCpuTime = cpuTime;
+                    return 0;
+                }
+
+                var timeDelta = (now - _lastCpuSampleTime).TotalMilliseconds;
+                var cpuDelta = (cpuTime - _lastProcessCpuTime).TotalMilliseconds;
+
+                _lastCpuSampleTime = now;
+                _lastProcessCpuTime = cpuTime;
+
+                if (timeDelta <= 0) return 0;
+
+                double usage = (cpuDelta / (Environment.ProcessorCount * timeDelta)) * 100.0;
+                return Math.Round(Math.Clamp(usage, 0, 100.0), 1);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
     }
 
     /// <summary>
@@ -61,6 +100,7 @@ public class SystemProfiler
             double totalRamGb = 0;
             double availableRamGb = 0;
             double cpuUsagePercent = 0;
+            double processCpuPercent = GetProcessCpuUsagePercent();
 
             try
             {
@@ -103,7 +143,8 @@ public class SystemProfiler
                 ClockSpeedMHz: clockSpeed,
                 TotalRamGb: Math.Round(totalRamGb, 2),
                 AvailableRamGb: Math.Round(availableRamGb, 2),
-                CpuUsagePercent: Math.Round(cpuUsagePercent, 2)
+                CpuUsagePercent: Math.Round(cpuUsagePercent, 2),
+                ProcessCpuUsagePercent: processCpuPercent
             );
         });
     }

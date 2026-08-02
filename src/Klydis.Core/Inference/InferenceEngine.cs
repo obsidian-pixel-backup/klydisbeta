@@ -645,20 +645,21 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     {
                         if (generationToken.IsCancellationRequested) break;
 
+                        tokenCount++;
                         if (isFirstToken)
                         {
                             isFirstToken = false;
                             ttftMs = requestStopwatch.Elapsed.TotalMilliseconds;
                             genStopwatch.Start();
                         }
-                        else
-                        {
-                            tokenCount++;
-                        }
                         
                         generatedContent.Append(token);
                         
-                        float tokensPerSecond = tokenCount > 0 ? (float)(tokenCount / genStopwatch.Elapsed.TotalSeconds) : 0;
+                        double elapsedSec = genStopwatch.Elapsed.TotalSeconds;
+                        float tokensPerSecond = (tokenCount > 1 && elapsedSec > 0.001)
+                            ? (float)((tokenCount - 1) / elapsedSec)
+                            : (float)(1.0 / Math.Max(0.001, requestStopwatch.Elapsed.TotalSeconds));
+
                         if (triggerEvents && TokenGenerated != null && eventChannel != null)
                         {
                             var handlers = TokenGenerated;
@@ -705,6 +706,13 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     );
                     LastTelemetry = telemetry;
                     InferenceCompleted?.Invoke(telemetry);
+
+                    if (triggerEvents && TokenGenerated != null && eventChannel != null)
+                    {
+                        var handlers = TokenGenerated;
+                        float finalTps = (float)telemetry.GenerationTokensPerSecond;
+                        eventChannel.Writer.TryWrite(() => handlers.Invoke(string.Empty, finalTps));
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -799,12 +807,6 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 try { await generationTask.ConfigureAwait(false); } catch { }
                 if (triggerEvents && eventChannel != null && eventDispatcherTask != null)
                 {
-                    if (TokenGenerated != null)
-                    {
-                        var handlers = TokenGenerated;
-                        eventChannel.Writer.TryWrite(() => handlers.Invoke(string.Empty, 0f));
-                    }
-
                     eventChannel.Writer.Complete();
                     try
                     {

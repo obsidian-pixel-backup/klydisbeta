@@ -47,6 +47,12 @@ public partial class SystemMonitorViewModel : ObservableObject
     private int _appRamUsedMb;
 
     [ObservableProperty]
+    private int _gpuUsagePercent;
+
+    [ObservableProperty]
+    private double _processCpuUsagePercent;
+
+    [ObservableProperty]
     private ObservableCollection<string> _loadedModels = new();
 
     [ObservableProperty]
@@ -64,6 +70,9 @@ public partial class SystemMonitorViewModel : ObservableObject
     private string _cpuSeverity = "Normal";
 
     [ObservableProperty]
+    private string _gpuSeverity = "Normal";
+
+    [ObservableProperty]
     private string _ramSeverity = "Normal";
 
     [ObservableProperty]
@@ -76,7 +85,7 @@ public partial class SystemMonitorViewModel : ObservableObject
         _inferenceEngine.TokenGenerated += OnTokenGenerated;
         _timer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromSeconds(2)
+            Interval = TimeSpan.FromSeconds(1)
         };
         _timer.Tick += OnTimerTick;
         _timer.Start();
@@ -86,11 +95,14 @@ public partial class SystemMonitorViewModel : ObservableObject
     {
         System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
-            CurrentTokensPerSecond = Math.Round(tokensPerSecond, 2);
-            TokensPerSecondHistory.Add(CurrentTokensPerSecond);
-            if (TokensPerSecondHistory.Count > 60)
+            if (tokensPerSecond > 0)
             {
-                TokensPerSecondHistory.RemoveAt(0);
+                CurrentTokensPerSecond = Math.Round(tokensPerSecond, 1);
+                TokensPerSecondHistory.Add(CurrentTokensPerSecond);
+                if (TokensPerSecondHistory.Count > 60)
+                {
+                    TokensPerSecondHistory.RemoveAt(0);
+                }
             }
         });
     }
@@ -122,11 +134,14 @@ public partial class SystemMonitorViewModel : ObservableObject
             VramTotalMb = profile.Gpu.TotalVramMb;
             VramFreePercent = VramTotalMb > 0 ? 100.0 * (VramTotalMb - VramUsedMb) / VramTotalMb : 0;
             GpuTemperature = profile.Gpu.Temperature;
+            GpuUsagePercent = profile.Gpu.GpuUtilPercent;
             VramSeverity = ClassifySeverity(VramUsedMb, VramTotalMb);
+            GpuSeverity = ClassifySeverity(GpuUsagePercent, 100.0);
         }
 
         CpuName = profile.System.CpuName;
         CpuUsagePercent = profile.System.CpuUsagePercent;
+        ProcessCpuUsagePercent = profile.System.ProcessCpuUsagePercent;
         RamTotalGb = profile.System.TotalRamGb;
         RamUsedGb = Math.Round(RamTotalGb - profile.System.AvailableRamGb, 2);
         CpuSeverity = ClassifySeverity(CpuUsagePercent, 100.0);
