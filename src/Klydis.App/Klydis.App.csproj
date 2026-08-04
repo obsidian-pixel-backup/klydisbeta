@@ -12,6 +12,8 @@
     <AssemblyName>Klydis</AssemblyName>
     <Description>Klydis - Self-contained local LLM orchestrator with premium UI</Description>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    <!-- Embed admin elevation manifest so the agent has full system-level file and command access -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>

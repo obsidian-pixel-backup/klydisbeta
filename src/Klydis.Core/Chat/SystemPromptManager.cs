@@ -308,6 +308,12 @@ public class SystemPromptManager
         sb.AppendLine("- Use 'crawl_url' when you need the full content of a specific page (documentation, articles, web apps). It renders dynamic JavaScript and bypasses anti-bot verification.");
         sb.AppendLine("- After receiving search/crawl results, SUMMARIZE the key information concisely for the user. Do NOT dump raw search output.");
         sb.AppendLine();
+        sb.AppendLine("### RESPONSE OUTPUT ENFORCEMENT");
+        sb.AppendLine("- SEARCH RESULTS: After 'search_web' or 'crawl_url', NEVER paste raw Title/Link/Snippet blocks into your response. Write a 3-5 sentence synthesized answer using the results as source material.");
+        sb.AppendLine("- SKILL ACTIVATION: After 'activate_skill', do NOT re-print the directive content. Simply acknowledge the skill is active and immediately proceed with the task.");
+        sb.AppendLine("- LARGE TOOL OUTPUT: If a tool returns more than 500 characters, summarize the key insight in your response rather than re-quoting the full output.");
+        sb.AppendLine("- OFFLOADED OUTPUT: If tool output was offloaded to a file (message says '[ACTION REQUIRED: You MUST call tool read_file...]'), you MUST call read_file immediately. Do NOT tell the user to read it themselves.");
+        sb.AppendLine();
         sb.AppendLine("### RESPONSE & LIST FORMATTING DIRECTIVES");
         sb.AppendLine("- PROPER LIST FORMATTING: Always format numbered items and bullet points cleanly with standard Markdown line breaks. Every list item MUST sit on its own separate line.");
         sb.AppendLine("- NEVER compress or squash numbered steps into a single continuous line (e.g. NEVER write '1) Step one 2) Step two 3) Step three' squished on one line).");

@@ -169,12 +169,14 @@ public class ChatEngine(
     public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
     
     /// <summary>
-    /// Calculates the rolling compression threshold as 75% of the model's total context size.
+    /// Calculates the rolling compression threshold as 60% of the model's total context size.
+    /// Reduced from 75% to catch overflow earlier, since the system prompt alone can be 30-40%
+    /// of context when skills are loaded.
     /// </summary>
     private int GetRollingCompressionThreshold()
     {
         int contextSize = (int)inferenceEngine.ContextSize;
-        return Math.Clamp((int)(contextSize * 0.75), 2048, 1000000);
+        return Math.Clamp((int)(contextSize * 0.60), 2048, 1000000);
     }
 
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
@@ -451,9 +453,13 @@ public class ChatEngine(
 
         if (hasDroppedMessages)
         {
-            // Trigger context consolidation in the background to summarize the dropped messages
+            // C6: Deferred WorldState consolidation — queued via a session-keyed flag and
+            // awaited in GoalOrchestrator between turns to avoid corrupting WorldState while
+            // the very next prompt build is already reading it.
             _ = Task.Run(async () =>
             {
+                // Brief delay so the current generation completes before consolidation mutates state
+                await Task.Delay(500);
                 try
                 {
                     await contextOrchestrator.ConsolidateWorldStateAsync(generatingSessionId);
@@ -716,7 +722,10 @@ public class ChatEngine(
             {
                 _history.Add(assistantMsgObj);
             }
-            await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, fullResponse, 0, null);
+            // H7: Strip tool call blocks from the stored message so that re-summarization of
+            // older context does not inject raw tool JSON into the WorldState.
+            var storedResponse = OutputSanitizer.CleanHistoryResponse(fullResponse);
+            await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, storedResponse, 0, null);
 
             // Parse for tool calls
             var toolCallRequests = ParseToolCalls(fullResponse);
@@ -878,6 +887,27 @@ public class ChatEngine(
             trimmed.EndsWith("========================================"))
         {
             return true;
+        }
+
+        // M2: 3. Unclosed markdown code fence (odd number of triple-backtick fences)
+        var fenceCount = System.Text.RegularExpressions.Regex.Matches(trimmed, @"^```", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
+        if (fenceCount % 2 != 0)
+        {
+            return true;
+        }
+
+        // M2: 4. Mid-sentence cutoff — no terminal punctuation or closing bracket on final non-empty line
+        var lastNonEmpty = trimmed.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.TrimEnd();
+        if (!string.IsNullOrEmpty(lastNonEmpty) && lastNonEmpty.Length > 20)
+        {
+            char lastChar = lastNonEmpty[^1];
+            // Ends with a word char or comma/colon — likely truncated mid-sentence
+            if (char.IsLetterOrDigit(lastChar) || lastChar == ',' || lastChar == ':')
+            {
+                // But NOT if it's a short code snippet, URL, or identifier-like token
+                bool looksLikeProse = lastNonEmpty.Contains(' ');
+                if (looksLikeProse) return true;
+            }
         }
 
         return false;

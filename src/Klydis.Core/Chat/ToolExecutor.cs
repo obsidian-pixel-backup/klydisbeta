@@ -431,13 +431,14 @@ public class ToolExecutor(
                 ? result.Output[..OffloadPreviewChars] 
                 : result.Output;
 
+            // M1: Directive language — model MUST read the file before responding
             var offloadedMessage = $"[Tool Output Exceeded Context Budget]\n" +
                                    $"Full output ({result.Output.Length} characters) offloaded to: {filePath}\n\n" +
                                    $"Preview (First {preview.Length} characters):\n" +
                                    $"--------------------------------------------------\n" +
                                    $"{preview}\n" +
                                    $"--------------------------------------------------\n" +
-                                   $"[To view full or detailed content, use tool read_file with path: {filePath}]";
+                                   $"[ACTION REQUIRED: You MUST call tool read_file with path '{filePath}' to retrieve the complete content before forming your response. Do NOT tell the user to read the file themselves — read it now and synthesize the answer.]";
 
             logger.LogInformation("Tool output for {ToolName} ({CharCount} chars) offloaded to {FilePath}", result.ToolName, result.Output.Length, filePath);
 
@@ -1059,9 +1060,31 @@ public class ToolExecutor(
         var session = await messageStore.GetSessionAsync(sessionId);
         if (session == null) return new ToolResult(request.Name, false, "", "Session not found");
 
+        // H3: Deduplicate — skip if a normalized version of this fact already exists
+        var normalizedFact = fact.Trim().ToLowerInvariant();
+        if (!string.IsNullOrEmpty(session.WorldState))
+        {
+            var existingLines = session.WorldState.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            bool alreadyStored = existingLines.Any(l => l.TrimStart('-', ' ').Trim().ToLowerInvariant() == normalizedFact);
+            if (alreadyStored)
+                return new ToolResult(request.Name, true, "Fact already exists in session World State (skipped duplicate).", null);
+        }
+
         var newWorldState = string.IsNullOrEmpty(session.WorldState) ? fact : $"{session.WorldState}\n- {fact}";
+
+        // H3: Cap WorldState to prevent unbounded token growth (~2,000 tokens at 4 chars/token)
+        const int MaxWorldStateChars = 8000;
+        if (newWorldState.Length > MaxWorldStateChars)
+        {
+            // Trim oldest lines from the front, preserving the most recent facts
+            int excess = newWorldState.Length - MaxWorldStateChars;
+            int firstNewline = newWorldState.IndexOf('\n', excess);
+            newWorldState = firstNewline >= 0 
+                ? "[...older facts trimmed...]\n" + newWorldState[(firstNewline + 1)..]  
+                : newWorldState[^MaxWorldStateChars..];
+        }
+
         await messageStore.UpdateSessionAsync(sessionId, null, newWorldState, null);
-        
         return new ToolResult(request.Name, true, "Fact stored successfully in session World State.", null);
     }
 
@@ -1070,10 +1093,28 @@ public class ToolExecutor(
         var query = GetStringArg(request.Arguments, "query");
         if (string.IsNullOrEmpty(query)) return new ToolResult(request.Name, false, "", "Query is required");
 
-        var results = await messageStore.SearchMessagesAsync(sessionId, query, 5);
+        // C1/H4/H8: Fetch more candidates so filtering doesn't leave us empty, then filter to
+        // User/Assistant roles only. Exclude injected system/tool messages to prevent the tool
+        // from returning its own invocation or raw tool JSON as a memory result.
+        var allResults = await messageStore.SearchMessagesAsync(sessionId, query, 15);
+        var results = allResults
+            .Where(r => r.Message.Role == ChatRole.User || r.Message.Role == ChatRole.Assistant)
+            .Where(r => !r.Message.Content.StartsWith("[Tool ", StringComparison.OrdinalIgnoreCase))
+            .Where(r => !r.Message.Content.StartsWith("[System ", StringComparison.OrdinalIgnoreCase))
+            .Where(r => !r.Message.Content.StartsWith("[SYSTEM", StringComparison.OrdinalIgnoreCase))
+            .Take(5)
+            .ToList();
+
         if (results.Count == 0) return new ToolResult(request.Name, true, "No relevant past messages found.", null);
 
-        var output = string.Join("\n\n", results.Select(r => $"[{r.Message.Timestamp}] {r.Message.Role}: {r.Message.Content}"));
+        // Truncate individual messages to keep memory context compact (max 500 chars each)
+        var output = string.Join("\n\n", results.Select(r =>
+        {
+            var content = r.Message.Content.Length > 500 
+                ? r.Message.Content[..500] + "...[truncated]" 
+                : r.Message.Content;
+            return $"[{r.Message.Timestamp:HH:mm}] {r.Message.Role}: {content}";
+        }));
         return new ToolResult(request.Name, true, output, null);
     }
 
@@ -1173,6 +1214,42 @@ public class ToolExecutor(
         // Validate schema is parseable
         try { JsonSerializer.Deserialize<List<ToolParameter>>(schema, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }); }
         catch (Exception ex) { return new ToolResult(request.Name, false, "", $"Invalid parameters_schema JSON: {ex.Message}"); }
+
+        // H5: Validate PowerShell script syntax before persisting to prevent silent runtime failures
+        if (lang == "powershell")
+        {
+            try
+            {
+                var escapedScript = script.Replace("'", "''");
+                var validateCmd = $"$null = [System.Management.Automation.ScriptBlock]::Create('{escapedScript}')";
+                var encodedValidate = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(validateCmd));
+                var validatePsi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encodedValidate}",
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var validateProc = Process.Start(validatePsi);
+                if (validateProc != null)
+                {
+                    await validateProc.WaitForExitAsync(ct);
+                    if (validateProc.ExitCode != 0)
+                    {
+                        var syntaxErr = await validateProc.StandardError.ReadToEndAsync(ct);
+                        return new ToolResult(request.Name, false, "", 
+                            $"PowerShell syntax validation failed — tool NOT created.\nError: {syntaxErr.Trim()}\nFix the script and try again.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "PowerShell syntax validation step failed for custom tool '{ToolName}'", name);
+                // Non-fatal: if validation process itself fails, proceed with a warning
+            }
+        }
 
         var record = new Klydis.Core.Memory.CustomToolRecord(name, desc, schema, script, lang, DateTime.UtcNow);
         await messageStore.CreateCustomToolAsync(record);

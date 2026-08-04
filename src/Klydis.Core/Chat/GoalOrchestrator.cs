@@ -100,6 +100,13 @@ public class GoalOrchestrator(
                             state.TotalTokensGenerated += est;
                         }
 
+                        // H1: Also count ToolResult payloads — tool output tokens are real context pressure
+                        if (evt.Type == ChatStreamEventType.ToolResult && !string.IsNullOrEmpty(evt.Content))
+                        {
+                            int toolEst = Math.Max(1, evt.Content.Length / 4);
+                            state.TotalTokensGenerated += toolEst;
+                        }
+
                         // Tool call detection
                         if (evt.Type == ChatStreamEventType.ToolCall)
                         {
@@ -171,19 +178,31 @@ public class GoalOrchestrator(
 
             yield return GoalStreamEvent.TurnCompleted(state.TurnCount, state);
 
-            // Brief delay between turns to allow UI dispatch and prevent CPU hammering
-            await Task.Delay(100, ct);
+            // M6: Raised inter-turn delay to give background consolidation time to settle
+            // and provide genuine backpressure so IO/memory tasks from the prior turn complete.
+            await Task.Delay(250, ct);
         }
     }
 
     private static string BuildContinuationPrompt(GoalExecutionState state)
     {
+        // C5: Inject the last 5 TurnSummaries so the model knows exactly what it has done.
+        // Without this, every continuation turn starts with no memory of prior tool calls.
+        var historySection = string.Empty;
+        if (state.TurnSummaries.Count > 0)
+        {
+            var recent = state.TurnSummaries.TakeLast(5);
+            historySection = $"\nExecution History (last {recent.Count()} turns):\n" +
+                             string.Join("\n", recent.Select(s => $"  {s}")) + "\n";
+        }
+
         return $"[SYSTEM — AUTONOMOUS GOAL CONTINUATION]\n" +
                $"Original Goal: \"{state.OriginalGoal}\"\n" +
                $"Current Execution Status: Turn {state.TurnCount} complete. Estimated Progress: {state.ProgressPercent}%\n" +
-               $"Budget: {state.Budget.GetRemainingDescription(state)}\n\n" +
-               $"Instructions:\n" +
-               $"1. Analyze your findings and work completed in previous turns.\n" +
+               $"Budget: {state.Budget.GetRemainingDescription(state)}\n" +
+               historySection +
+               $"\nInstructions:\n" +
+               $"1. Review the execution history above. Avoid repeating completed steps.\n" +
                $"2. If your requested goal is 100% complete, call tool 'task_complete' with argument {{\"summary\": \"<summary>\"}}.\n" +
                $"3. If further work or tool calls are required, proceed immediately with the next step using <tool_call>.\n" +
                $"4. Periodically call tool 'task_progress' to report your completion percentage.\n" +

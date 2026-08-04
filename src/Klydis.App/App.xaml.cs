@@ -70,6 +70,10 @@ public partial class App : Application
             var messageStore = ServiceProvider.GetRequiredService<Klydis.Core.Memory.MessageStore>();
             await messageStore.InitializeAsync();
 
+            // C2/C3: Repair broken chrome-navigator and weather-fetcher scripts on every launch.
+            // CreateCustomToolAsync uses ON CONFLICT DO UPDATE so this is fully idempotent.
+            await messageStore.RepairBrokenCustomToolsAsync();
+
             var vectorStore = ServiceProvider.GetRequiredService<Klydis.Core.RAG.VectorStore>();
             await vectorStore.InitializeAsync();
 
@@ -156,17 +160,24 @@ public partial class App : Application
         services.AddSingleton<Klydis.Core.RAG.DocumentIngestionEngine>();
         services.AddSingleton<Klydis.Core.RAG.HybridRetriever>();
 
-        services.AddSingleton<ToolExecutor>(sp => new ToolExecutor(
-            sp.GetRequiredService<ILogger<ToolExecutor>>(),
-            sp.GetRequiredService<MessageStore>(),
-            sp.GetRequiredService<ContextOrchestrator>(),
-            sp.GetService<ModelMessageQueue>(),
-            sp.GetService<Klydis.Core.Skills.SkillLibraryManager>(),
-            sp.GetService<Klydis.Core.Chat.StealthBrowserService>(),
-            sp.GetService<Klydis.Core.RAG.VectorStore>(),
-            sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
-            sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>()
-        ));
+        services.AddSingleton<ToolExecutor>(sp =>
+        {
+            var toolExecutor = new ToolExecutor(
+                sp.GetRequiredService<ILogger<ToolExecutor>>(),
+                sp.GetRequiredService<MessageStore>(),
+                sp.GetRequiredService<ContextOrchestrator>(),
+                sp.GetService<ModelMessageQueue>(),
+                sp.GetService<Klydis.Core.Skills.SkillLibraryManager>(),
+                sp.GetService<Klydis.Core.Chat.StealthBrowserService>(),
+                sp.GetService<Klydis.Core.RAG.VectorStore>(),
+                sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
+                sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>()
+            );
+            // AutoPilot: agent has full system-level access — no approval gates,
+            // no risky-keyword blocklist. Matches the requireAdministrator UAC manifest.
+            toolExecutor.CurrentRiskLevel = RiskLevel.AutoPilot;
+            return toolExecutor;
+        });
         services.AddSingleton<ChatEngine>(sp =>
         {
             var engine = new ChatEngine(

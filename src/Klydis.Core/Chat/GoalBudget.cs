@@ -23,9 +23,10 @@ public class GoalBudget
     public TimeSpan MaxWallTime { get; set; } = TimeSpan.FromHours(2);
 
     /// <summary>
-    /// Maximum consecutive empty or non-advancing turns before treating as stuck. Default 3.
+    /// Maximum consecutive empty or non-advancing turns before treating as stuck. Default 5.
+    /// Raised from 3 — reasoning-heavy turns with no tool calls are still genuine work.
     /// </summary>
-    public int MaxConsecutiveEmptyTurns { get; set; } = 3;
+    public int MaxConsecutiveEmptyTurns { get; set; } = 5;
 
     /// <summary>
     /// When set to true, budget limit checks are bypassed for infinite operation. Default false.

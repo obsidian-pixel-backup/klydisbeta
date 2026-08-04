@@ -482,6 +482,94 @@ public class MessageStore
         await command.ExecuteNonQueryAsync();
     }
 
+    /// <summary>
+    /// Repairs known broken built-in custom tool scripts. Called at startup to patch
+    /// chrome-navigator (C2) and weather-fetcher (C3) which had PowerShell syntax errors.
+    /// Uses ON CONFLICT upsert so it is safe to run every launch.
+    /// </summary>
+    public async Task RepairBrokenCustomToolsAsync()
+    {
+        // C2: chrome-navigator — reads args from environment vars set by ToolExecutor
+        const string chromeSchema = "[{\"name\":\"url\",\"type\":\"string\",\"description\":\"The URL to open in Chrome\",\"required\":false},{\"name\":\"mode\",\"type\":\"string\",\"description\":\"Mode: new-window, new-tab, or incognito\",\"required\":false}]";
+        var chromeLines = new[]
+        {
+            "param()",
+            "$url  = if ($env:url)  { $env:url  } else { 'https://www.google.com' }",
+            "$mode = if ($env:mode) { $env:mode } else { 'new-tab' }",
+            "",
+            "$chromePaths = @(",
+            "    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',",
+            "    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',",
+            "    \"$env:LOCALAPPDATA\\Google\\Chrome\\Application\\chrome.exe\"",
+            ")",
+            "",
+            "$chromePath = $chromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1",
+            "if (-not $chromePath) { Write-Output 'Chrome not found'; exit 1 }",
+            "",
+            "$flag = switch ($mode) {",
+            "    'new-window'  { '--new-window' }",
+            "    'incognito'   { '--incognito' }",
+            "    default       { '--new-tab' }",
+            "}",
+            "",
+            "Start-Process -FilePath $chromePath -ArgumentList @($flag, $url)",
+            "Write-Output \"Chrome launched: $url ($mode)\""
+        };
+        string chromeScript = string.Join("\n", chromeLines);
+
+        await CreateCustomToolAsync(new CustomToolRecord(
+            "chrome-navigator",
+            "Opens a URL in Google Chrome in a new tab, new window, or incognito mode.",
+            chromeSchema, chromeScript, "powershell", DateTime.UtcNow));
+
+        // C3: weather-fetcher — uses Open-Meteo free API (no key needed)
+        const string weatherSchema = "[{\"name\":\"location\",\"type\":\"string\",\"description\":\"City name or coordinates for weather lookup\",\"required\":true},{\"name\":\"unit\",\"type\":\"string\",\"description\":\"Temperature unit: celsius or fahrenheit\",\"required\":false}]";
+        var weatherLines = new[]
+        {
+            "param()",
+            "$location = if ($env:location) { $env:location } else { 'London' }",
+            "$unit     = if ($env:unit)     { $env:unit.ToLower() } else { 'celsius' }",
+            "",
+            "$unitParam       = if ($unit -eq 'fahrenheit') { '&temperature_unit=fahrenheit' } else { '' }",
+            "$encodedLocation = [System.Uri]::EscapeDataString($location)",
+            "",
+            "try {",
+            "    $geoUrl      = \"https://geocoding-api.open-meteo.com/v1/search?name=$encodedLocation&count=1&format=json\"",
+            "    $geoResponse = Invoke-RestMethod -Uri $geoUrl -UseBasicParsing -TimeoutSec 15",
+            "    if (-not $geoResponse.results -or $geoResponse.results.Count -eq 0) {",
+            "        Write-Output \"Location '$location' not found.\"; exit 1",
+            "    }",
+            "    $lat  = $geoResponse.results[0].latitude",
+            "    $lon  = $geoResponse.results[0].longitude",
+            "    $name = $geoResponse.results[0].name",
+            "",
+            "    $weatherUrl      = \"https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current_weather=true&hourly=relative_humidity_2m,apparent_temperature,wind_speed_10m$unitParam\"",
+            "    $weatherResponse = Invoke-RestMethod -Uri $weatherUrl -UseBasicParsing -TimeoutSec 15",
+            "    $current         = $weatherResponse.current_weather",
+            "",
+            "    $tempUnit = if ($unit -eq 'fahrenheit') { 'degF' } else { 'degC' }",
+            "    $windKmh  = [math]::Round($current.windspeed, 1)",
+            "",
+            "    Write-Output \"Weather for $name (Lat: $lat, Lon: $lon)\"",
+            "    Write-Output \"Temperature : $($current.temperature) $tempUnit\"",
+            "    Write-Output \"Wind Speed  : $windKmh km/h\"",
+            "    Write-Output \"Wind Dir    : $($current.winddirection) degrees\"",
+            "    Write-Output \"Weather Code: $($current.weathercode)\"",
+            "    Write-Output \"Is Day      : $(if ($current.is_day -eq 1) { 'Yes' } else { 'No' })\"",
+            "} catch {",
+            "    Write-Output \"Failed to fetch weather: $($_.Exception.Message)\"",
+            "    exit 1",
+            "}"
+        };
+        string weatherScript = string.Join("\n", weatherLines);
+
+        await CreateCustomToolAsync(new CustomToolRecord(
+            "weather-fetcher",
+            "Fetches current weather for a location using the Open-Meteo API. Returns temperature, wind speed, and conditions.",
+            weatherSchema, weatherScript, "powershell", DateTime.UtcNow));
+    }
+
+
     private static SessionRecord MapSessionRecord(SqliteDataReader reader)
     {
         return new SessionRecord(
