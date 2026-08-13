@@ -98,7 +98,10 @@ public class ThemeService
                     SpeculativeDraftCount = settings.SpeculativeDraftCount > 0 ? Math.Clamp(settings.SpeculativeDraftCount, 4, 32) : 24;
                     SelectedDraftModelPath = string.IsNullOrWhiteSpace(settings.SelectedDraftModelPath) ? "auto" : settings.SelectedDraftModelPath;
                     SelectedPersonality = string.IsNullOrWhiteSpace(settings.SelectedPersonality) ? "Default" : settings.SelectedPersonality;
-                    UserContextLimit = settings.UserContextLimit > 0 ? settings.UserContextLimit : 65536;
+                    // 0 is a legitimate persisted value (user selected "Auto (Smart Hardware
+                    // Allocation)"); only an unset key (-1 sentinel from pre-Auto versions)
+                    // falls back to the 64K default.
+                    UserContextLimit = settings.UserContextLimit >= 0 ? settings.UserContextLimit : 65536;
                     UserBatchSize = settings.UserBatchSize;
                     UserUBatchSize = settings.UserUBatchSize;
                 }
@@ -241,7 +244,7 @@ public class ThemeService
         public int SpeculativeDraftCount { get; set; } = 24;
         public string SelectedDraftModelPath { get; set; } = "auto";
         public string SelectedPersonality { get; set; } = "Default";
-        public int UserContextLimit { get; set; } = 0;
+        public int UserContextLimit { get; set; } = -1;
         public int UserBatchSize { get; set; } = 0;
         public int UserUBatchSize { get; set; } = 0;
     }

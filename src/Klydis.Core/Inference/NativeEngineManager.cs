@@ -17,6 +17,35 @@ namespace Klydis.Core.Inference;
 public static class NativeEngineManager
 {
     private static int _nativeConfigInitialized = 0;
+    private static int _nativeBackendsLoaded = 0;
+
+    /// <summary>
+    /// Loads all ggml backend plugins (CPU/CUDA/Vulkan) from the deployed native directory.
+    /// llama.cpp builds after the "backends as plugins" refactor (b9181+) require backends to
+    /// be loaded explicitly via ggml_backend_load_all(); the bundled backend auto-loaded them
+    /// at init. Must run after the native DLLs are deployed and before the first model load.
+    /// </summary>
+    public static void LoadNativeBackends(ILogger? logger = null)
+    {
+        if (Interlocked.Exchange(ref _nativeBackendsLoaded, 1) == 1) return;
+        try
+        {
+            NativeBackendLoadAll();
+            logger?.LogInformation("ggml backend plugins loaded.");
+        }
+        catch (EntryPointNotFoundException)
+        {
+            // Very old llama.cpp builds do not export ggml_backend_load_all; they auto-load backends.
+            logger?.LogDebug("ggml_backend_load_all not exported by the native library; skipping explicit backend load.");
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Failed to explicitly load ggml backend plugins; relying on native defaults.");
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("ggml.dll", EntryPoint = "ggml_backend_load_all")]
+    private static extern void NativeBackendLoadAll();
 
     /// <summary>
     /// Guarantees that LLamaSharp NativeLibraryConfig is initialized safely exactly once process-wide.
@@ -29,16 +58,27 @@ public static class NativeEngineManager
             try
             {
                 EnsureCudaRuntimesSynced();
+
+                // If a custom engine is installed, deploy it into EVERY location the wrapper's
+                // resolver can reach (app top-level, runtimes/win-x64/native root, and every
+                // subdir — avx/avx2/avx512/noavx/cuda12/cuda13/vulkan). This runs again here
+                // right before resolution so a stale bundled engine re-copied by a rebuild can
+                // never win the search: the resolver combines its relative paths
+                // (e.g. runtimes/win-x64/native/cuda12/llama.dll) with each search directory,
+                // so every candidate must hold the ABI-matched custom binary. Idempotent: the
+                // sync only copies when the destination length differs (or is missing).
+                if (HasCustomNativeEngine())
+                {
+                    try { SyncCustomNativeEngine(logger: null); } catch { /* best effort */ }
+                }
+
                 var appBaseDir = AppDomain.CurrentDomain.BaseDirectory;
                 var cuda12Dir = Path.Combine(appBaseDir, "runtimes", "win-x64", "native", "cuda12");
                 var cuda13Dir = Path.Combine(appBaseDir, "runtimes", "win-x64", "native", "cuda13");
 
-                LLama.Native.NativeLibraryConfig.All
+                var config = LLama.Native.NativeLibraryConfig.All
                     .WithCuda(enableCuda)
                     .WithVulkan(enableVulkan)
-                    .WithSearchDirectory(appBaseDir)
-                    .WithSearchDirectory(cuda12Dir)
-                    .WithSearchDirectory(cuda13Dir)
                     .WithLogCallback((level, message) => {
                         try
                         {
@@ -46,6 +86,25 @@ public static class NativeEngineManager
                         }
                         catch { /* Ignore logging errors if file is locked */ }
                     });
+
+                // Make the wrapper search the custom native engine directory FIRST whenever one
+                // is installed. The NuGet backend packages drop their own (older ABI) llama.dll
+                // into the app output (top-level AND runtimes subdirs), and `dotnet run`/
+                // rebuilds re-copy those bundled binaries over any synced custom engine. If the
+                // wrapper then resolves the bundled engine — which has an older ABI than the
+                // custom one — every managed struct that gained fields since (e.g.
+                // n_outputs_max_per_seq) is misaligned and native fails with "Unsupported ctx
+                // type". Searching the custom directory first (plus the sync in
+                // StartupSequence) guarantees the ABI-matched engine wins.
+                if (HasCustomNativeEngine())
+                {
+                    config = config.WithSearchDirectory(CustomNativeDirectory);
+                }
+
+                config
+                    .WithSearchDirectory(appBaseDir)
+                    .WithSearchDirectory(cuda12Dir)
+                    .WithSearchDirectory(cuda13Dir);
             }
             catch (InvalidOperationException)
             {
@@ -63,6 +122,103 @@ public static class NativeEngineManager
     /// Path to user native DLL override folder (%USERPROFILE%\.klydis\native).
     /// </summary>
     public static string CustomNativeDirectory => Path.Combine(KlydisHomeDir, "native");
+
+    /// <summary>
+    /// Path to a small JSON marker recording which llama.cpp release is currently installed as
+    /// the custom native engine, and when we last checked for a newer release.
+    /// </summary>
+    private static string NativeVersionFilePath => Path.Combine(CustomNativeDirectory, "version.json");
+
+    /// <summary>
+    /// How often the app re-checks GitHub for a newer llama.cpp release (once per day).
+    /// </summary>
+    private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// Returns the llama.cpp release tag currently installed in the custom native directory,
+    /// or null when unknown (e.g. the user placed DLLs there manually).
+    /// </summary>
+    public static string? GetInstalledNativeTag()
+    {
+        try
+        {
+            if (!File.Exists(NativeVersionFilePath)) return null;
+            using var doc = JsonDocument.Parse(File.ReadAllText(NativeVersionFilePath));
+            return doc.RootElement.TryGetProperty("tag", out var tag) ? tag.GetString() : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Records the llama.cpp release tag currently installed as the custom native engine.
+    /// A fresh install counts as an update check, so the first online re-check happens a day later.
+    /// </summary>
+    public static void SaveInstalledNativeTag(string tag)
+    {
+        try
+        {
+            EnsureDirectoriesExist();
+            var payload = JsonSerializer.Serialize(new
+            {
+                tag,
+                installedAtUtc = DateTime.UtcNow.ToString("O"),
+                lastCheckUtc = DateTime.UtcNow.ToString("O")
+            });
+            File.WriteAllText(NativeVersionFilePath, payload);
+        }
+        catch
+        {
+            // Non-critical
+        }
+    }
+
+    /// <summary>
+    /// True when the daily online update check is due (no record yet, or last check older than 24h).
+    /// </summary>
+    private static bool IsUpdateCheckDue()
+    {
+        try
+        {
+            if (!File.Exists(NativeVersionFilePath)) return true;
+            using var doc = JsonDocument.Parse(File.ReadAllText(NativeVersionFilePath));
+            if (!doc.RootElement.TryGetProperty("lastCheckUtc", out var prop) ||
+                !DateTime.TryParse(prop.GetString(), out var lastCheck))
+            {
+                return true;
+            }
+            return DateTime.UtcNow - lastCheck >= UpdateCheckInterval;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Marks the online update check as performed now (preserving the installed tag), so the next
+    /// re-check is throttled until a day from now. Only called after a successful release lookup.
+    /// </summary>
+    private static void RecordUpdateCheck()
+    {
+        try
+        {
+            string? tag = GetInstalledNativeTag();
+            var payload = JsonSerializer.Serialize(new
+            {
+                tag,
+                installedAtUtc = DateTime.UtcNow.ToString("O"),
+                lastCheckUtc = DateTime.UtcNow.ToString("O")
+            });
+            File.WriteAllText(NativeVersionFilePath, payload);
+        }
+        catch
+        {
+            // Non-critical
+        }
+    }
 
     /// <summary>
     /// Checks whether custom/updated native llama.dll binaries are present in the override folder.
@@ -128,7 +284,19 @@ public static class NativeEngineManager
                         var srcInfo = new FileInfo(file);
                         var destInfo = File.Exists(destPath) ? new FileInfo(destPath) : null;
 
-                        if (destInfo == null || destInfo.Length != srcInfo.Length || destInfo.LastWriteTimeUtc < srcInfo.LastWriteTimeUtc)
+                        // ABI-critical binaries (llama.dll / ggml.dll) MUST always be replaced
+                        // with the custom build: the NuGet backend packages drop their own
+                        // (older) copies into the app output on every build, and a stale one
+                        // misaligns the managed structs ("Unsupported ctx type"). Timestamps
+                        // are unreliable here (package restores can be newer than the custom
+                        // engine), so compare content length when deciding for these.
+                        bool isAbiCritical = string.Equals(fileName, "llama.dll", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(fileName, "ggml.dll", StringComparison.OrdinalIgnoreCase);
+                        bool shouldCopy = isAbiCritical
+                            ? destInfo == null || destInfo.Length != srcInfo.Length
+                            : destInfo == null || destInfo.Length != srcInfo.Length || destInfo.LastWriteTimeUtc < srcInfo.LastWriteTimeUtc;
+
+                        if (shouldCopy)
                         {
                             File.Copy(file, destPath, overwrite: true);
                             copiedCount++;
@@ -236,10 +404,12 @@ public static class NativeEngineManager
 
     /// <summary>
     /// Resolves direct release asset download URLs dynamically from GitHub API or release redirects.
+    /// Returns the release tag name alongside the asset URLs.
     /// </summary>
-    private static async Task<List<string>> ResolveLatestReleaseDownloadUrlsAsync(HttpClient httpClient, ILogger? logger)
+    private static async Task<(string? Tag, List<string> Urls)> ResolveLatestReleaseDownloadUrlsAsync(HttpClient httpClient, ILogger? logger, CancellationToken ct = default)
     {
         var urls = new List<string>();
+        string? tag = null;
         try
         {
         var customReposEnv = Environment.GetEnvironmentVariable("LLAMA_CPP_GITHUB_REPOS");
@@ -257,8 +427,9 @@ public static class NativeEngineManager
                 {
                     logger?.LogInformation("Querying GitHub release API at {Url}...", repoUrl);
                     using var request = new HttpRequestMessage(HttpMethod.Get, repoUrl);
+                    request.Headers.TryAddWithoutValidation("User-Agent", "KlydisApp/1.0");
                     
-                    var response = await httpClient.SendAsync(request);
+                    var response = await httpClient.SendAsync(request, ct);
                     if (!response.IsSuccessStatusCode)
                     {
                         logger?.LogWarning("GitHub API returned HTTP {StatusCode} for {Url}", response.StatusCode, repoUrl);
@@ -267,6 +438,10 @@ public static class NativeEngineManager
 
                     var jsonStr = await response.Content.ReadAsStringAsync();
                     using var doc = JsonDocument.Parse(jsonStr);
+                    if (doc.RootElement.TryGetProperty("tag_name", out var tagProp))
+                    {
+                        tag = tagProp.GetString();
+                    }
                     if (!doc.RootElement.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
                     {
                         continue;
@@ -280,9 +455,12 @@ public static class NativeEngineManager
                         {
                             var name = nameProp.GetString() ?? "";
                             var url = urlProp.GetString() ?? "";
+                            // Only x64 Windows assets: the loose "64" check wrongly matches ARM64
+                            // zips (e.g. ...-win-cpu-arm64.zip), whose llama.dll would then overwrite
+                            // the x64 one and produce a BadImageFormatException at load time.
                             if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
                                 name.Contains("win", StringComparison.OrdinalIgnoreCase) &&
-                                (name.Contains("x64", StringComparison.OrdinalIgnoreCase) || name.Contains("64", StringComparison.OrdinalIgnoreCase)))
+                                name.Contains("x64", StringComparison.OrdinalIgnoreCase))
                             {
                                 candidates.Add((name, url));
                             }
@@ -308,7 +486,16 @@ public static class NativeEngineManager
                         {
                             logger?.LogInformation("Selected CUDA release asset: {Name}", cudaAsset.name);
                             urls.Add(cudaAsset.url);
-                            return urls;
+
+                            // Also fetch the CPU build so inference still works if the CUDA
+                            // runtime cannot initialize on this machine (llama.cpp falls back).
+                            var cpuFallback = candidates.FirstOrDefault(a => a.name.Contains("cpu", StringComparison.OrdinalIgnoreCase));
+                            if (!string.IsNullOrEmpty(cpuFallback.url) && cpuFallback.url != cudaAsset.url)
+                            {
+                                logger?.LogInformation("Also fetching CPU release asset as fallback: {Name}", cpuFallback.name);
+                                urls.Add(cpuFallback.url);
+                            }
+                            return (tag, urls);
                         }
                     }
 
@@ -317,7 +504,7 @@ public static class NativeEngineManager
                     {
                         logger?.LogInformation("Selected Vulkan release asset: {Name}", vulkanAsset.name);
                         urls.Add(vulkanAsset.url);
-                        return urls;
+                        return (tag, urls);
                     }
 
                     var cpuAsset = candidates.FirstOrDefault(a => a.name.Contains("cpu", StringComparison.OrdinalIgnoreCase) || a.name.Contains("avx2", StringComparison.OrdinalIgnoreCase));
@@ -325,13 +512,13 @@ public static class NativeEngineManager
                     {
                         logger?.LogInformation("Selected CPU release asset: {Name}", cpuAsset.name);
                         urls.Add(cpuAsset.url);
-                        return urls;
+                        return (tag, urls);
                     }
 
                     var fallbackAsset = candidates.First();
                     logger?.LogInformation("Selected fallback release asset: {Name}", fallbackAsset.name);
                     urls.Add(fallbackAsset.url);
-                    return urls;
+                    return (tag, urls);
                 }
                 catch (Exception ex)
                 {
@@ -344,7 +531,7 @@ public static class NativeEngineManager
             logger?.LogError(ex, "Failed to resolve latest release URL from GitHub API.");
         }
 
-        return urls;
+        return (tag, urls);
     }
 
     /// <summary>
@@ -353,14 +540,18 @@ public static class NativeEngineManager
     /// <param name="downloadUrl">Optional custom download URL for zip package containing llama.dll.</param>
     /// <param name="logger">Optional logger for telemetry.</param>
     /// <returns>True if downloaded and deployed successfully.</returns>
-    public static async Task<bool> DownloadLatestNativeEngineAsync(string? downloadUrl = null, ILogger? logger = null)
+    public static async Task<bool> DownloadLatestNativeEngineAsync(string? downloadUrl = null, ILogger? logger = null, CancellationToken ct = default, Action<string>? statusCallback = null)
     {
         EnsureDirectoriesExist();
 
         using var httpClient = new HttpClient();
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("KlydisApp/1.0");
+        // A llama.cpp release zip is hundreds of MB — cap the whole download so a stalled
+        // connection can never hang the app (the startup watchdog also cancels via ct).
+        httpClient.Timeout = TimeSpan.FromMinutes(5);
 
         List<string> urlsToDownload = new();
+        string? resolvedTag = null;
         downloadUrl ??= Environment.GetEnvironmentVariable("LLAMA_CPP_RELEASE_URL");
         if (!string.IsNullOrWhiteSpace(downloadUrl))
         {
@@ -368,7 +559,7 @@ public static class NativeEngineManager
         }
         else
         {
-            urlsToDownload = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger);
+            (resolvedTag, urlsToDownload) = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger, ct);
         }
 
         if (urlsToDownload.Count == 0)
@@ -384,9 +575,10 @@ public static class NativeEngineManager
             try
             {
                 logger?.LogInformation("Downloading updated native engine package from {Url}...", url);
+                statusCallback?.Invoke("Downloading updated native engine — this can take a few minutes…");
 
                 var tempZipPath = Path.Combine(Path.GetTempPath(), $"llama_native_{Guid.NewGuid():N}.zip");
-                var zipBytes = await httpClient.GetByteArrayAsync(url);
+                var zipBytes = await httpClient.GetByteArrayAsync(url, ct);
                 await File.WriteAllBytesAsync(tempZipPath, zipBytes);
 
                 var tempExtractDir = Path.Combine(Path.GetTempPath(), $"llama_extracted_{Guid.NewGuid():N}");
@@ -417,10 +609,91 @@ public static class NativeEngineManager
         {
             int deployed = SyncCustomNativeEngine(logger: logger);
             logger?.LogInformation("Successfully deployed {Count} updated native binaries to {Dir}", totalExtracted, CustomNativeDirectory);
+            if (!string.IsNullOrWhiteSpace(resolvedTag))
+            {
+                SaveInstalledNativeTag(resolvedTag);
+            }
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Auto-updates the native llama.cpp engine to the latest release when the current one is
+    /// missing or stale (the vendored LLamaSharp wrapper matches the CURRENT llama.cpp ABI, so
+    /// the bundled backend alone is not enough). Returns true when a new native engine was
+    /// downloaded and synced (caller should restart the app), false when nothing was needed.
+    /// </summary>
+    /// <param name="logger">Optional logger for telemetry.</param>
+    /// <param name="forceCheck">When true, always performs the online "is there a newer release"
+    /// check. When false (default), the online re-check is throttled to once per day; a missing
+    /// custom native engine is always downloaded immediately since the wrapper requires it.</param>
+    public static async Task<bool> TryAutoUpdateNativeEngineAsync(ILogger? logger = null, bool forceCheck = false, CancellationToken ct = default, Action<string>? statusCallback = null)
+    {
+        if (!HasCustomNativeEngine())
+        {
+            // The patched wrapper requires the current llama.cpp ABI — install before first load.
+            logger?.LogInformation("No custom native engine installed. Downloading the latest llama.cpp release...");
+            return await DownloadLatestNativeEngineAsync(logger: logger, ct: ct, statusCallback: statusCallback);
+        }
+
+        if (!forceCheck && !IsUpdateCheckDue())
+        {
+            logger?.LogInformation("Native engine update check not yet due (checked within the last 24h).");
+            return false;
+        }
+
+        try
+        {
+            statusCallback?.Invoke("Checking for native engine updates…");
+            using var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("KlydisApp/1.0");
+            httpClient.Timeout = TimeSpan.FromSeconds(15);
+
+            var (latestTag, _) = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger, ct);
+            if (string.IsNullOrWhiteSpace(latestTag))
+            {
+                return false;
+            }
+
+            // Only record the check when the lookup succeeded, so a network failure retries on the
+            // next launch instead of being throttled for a day.
+            RecordUpdateCheck();
+
+            var installedTag = GetInstalledNativeTag();
+            if (string.Equals(installedTag, latestTag, StringComparison.OrdinalIgnoreCase))
+            {
+                logger?.LogInformation("Native engine already up to date ({LatestTag}).", latestTag);
+                return false;
+            }
+
+            // An installed engine with an unknown tag (e.g. the DLLs were placed manually or the
+            // version record was lost) must NOT trigger a multi-hundred-MB download "just in case":
+            // with a null tag the comparison below could never match, so the app would re-download
+            // on every daily check — and on the very first launch it would stall the splash for
+            // minutes. Record the check, log the unknown state, and keep the current engine; a
+            // normal download path always writes the tag, and forceCheck still forces a real
+            // comparison when the user explicitly requests one.
+            if (string.IsNullOrEmpty(installedTag) && !forceCheck)
+            {
+                logger?.LogWarning("Native engine installed but its release tag is unknown; skipping auto-download for now (latest: {LatestTag}). Run with force-check to update.", latestTag);
+                return false;
+            }
+
+            logger?.LogInformation("Newer llama.cpp release available: {LatestTag} (installed: {InstalledTag}). Downloading...", latestTag, installedTag);
+            return await DownloadLatestNativeEngineAsync(logger: logger, ct: ct, statusCallback: statusCallback);
+        }
+        catch (OperationCanceledException)
+        {
+            logger?.LogWarning("Native engine update check was cancelled (startup watchdog timeout).");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Native engine update check failed.");
+            return false;
+        }
     }
 
     /// <summary>

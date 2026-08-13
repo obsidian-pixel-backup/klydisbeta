@@ -11,9 +11,15 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- In-process GGUF inference - replaces Ollama entirely -->
+    <!-- In-process GGUF inference - replaces Ollama entirely.
+         LLamaSharp is vendored at third_party/LLamaSharp (v0.27.0) with a patched
+         LLamaContextParams that matches the CURRENT llama.cpp ABI (n_rs_seq,
+         n_outputs_max, ctx_type, ctx_other). This lets the app auto-update the native
+         llama.dll to the latest llama.cpp release (e.g. minicpm5 tokenizer support).
+         The backend packages below are the bundled baseline; the app's native
+         auto-updater (NativeEngineManager) overrides them from %USERPROFILE%\.klydis\native\. -->
     <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
-    <PackageReference Include="LLamaSharp" Version="0.27.0" />
+    <ProjectReference Include="..\..\third_party\LLamaSharp\LLama\LLamaSharp.csproj" />
     <PackageReference Include="LLamaSharp.Backend.Cuda12" Version="0.27.0" />
     <PackageReference Include="LLamaSharp.Backend.Vulkan" Version="0.27.0" />
     <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.27.0" />
@@ -31,7 +37,7 @@
     <!-- Playwright for local web crawling -->
     <PackageReference Include="Microsoft.Playwright" Version="1.61.0" />
     <PackageReference Include="ManagedCode.Playwright.Stealth" Version="1.0.1" />
-    <PackageReference Include="ReverseMarkdown" Version="6.1.0" />
+    <PackageReference Include="ReverseMarkdown" Version="6.1.1" />
   </ItemGroup>
 
 </Project>

@@ -8,7 +8,9 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using HtmlAgilityPack;
 using Microsoft.Extensions.Logging;
 using System.Management;
@@ -132,7 +134,7 @@ public class ToolExecutor(
             new("query", "string", "Search query", true),
             new("max_results", "integer", "Optional maximum results to return (default 5)", false)
         }, false),
-        new ToolDefinition("crawl_url", "Fetches and renders a web page, extracts main content as clean Markdown. Use for reading specific documentation pages or articles.", new List<ToolParameter>
+        new ToolDefinition("crawl_url", "Fetches and renders a web page, extracts main content as clean Markdown. Use for reading specific documentation pages or articles. Tries a fast direct HTTP fetch first (no browser needed); falls back to a stealth browser for JavaScript-heavy pages.", new List<ToolParameter>
         {
             new("url", "string", "Target URL", true)
         }, false),
@@ -945,22 +947,56 @@ public class ToolExecutor(
         var url = GetStringArg(request.Arguments, "url");
         if (string.IsNullOrEmpty(url)) return new ToolResult(request.Name, false, "", "URL is required");
 
+        // Tier 1: fast plain-HTTP fetch. Works without any browser binaries and is the most
+        // reliable path for static, server-rendered pages (weather, news, documentation).
         try
         {
-            if (_stealthBrowserService != null)
+            var httpMarkdown = await FetchPageViaHttpAsync(url, ct);
+            if (!string.IsNullOrWhiteSpace(httpMarkdown) && httpMarkdown.Length > 200)
+            {
+                logger.LogInformation("CrawlUrlAsync served via plain HTTP fetch for URL: {Url}", url);
+                return new ToolResult(request.Name, true, httpMarkdown, null);
+            }
+
+            logger.LogInformation("HTTP fetch returned insufficient content for URL: {Url}; falling back to browser rendering.", url);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "HTTP fetch failed for URL: {Url}; falling back to browser rendering.", url);
+        }
+
+        string? lastError = null;
+
+        // Tier 2: stealth browser (renders JavaScript, bypasses anti-bot checks). Auto-installs
+        // Playwright Chromium on first use when the binaries are missing.
+        if (_stealthBrowserService != null)
+        {
+            try
             {
                 logger.LogInformation("CrawlUrlAsync using StealthBrowserService for URL: {Url}", url);
                 var stealthResult = await _stealthBrowserService.CrawlUrlAsync(url, ct);
-                return new ToolResult(request.Name, true, stealthResult, null);
+                if (!string.IsNullOrWhiteSpace(stealthResult))
+                {
+                    return new ToolResult(request.Name, true, stealthResult, null);
+                }
+                lastError = "Browser crawl returned empty content.";
             }
+            catch (Exception ex)
+            {
+                lastError = ex.Message;
+                logger.LogWarning(ex, "Stealth browser crawl failed for URL: {Url}", url);
+            }
+        }
 
-            // Fallback to basic Playwright if stealth service is unavailable
+        // Tier 3: basic Playwright if stealth service is unavailable
+        try
+        {
             using var playwright = await Microsoft.Playwright.Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new Microsoft.Playwright.BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
-            
+
             await page.GotoAsync(url, new Microsoft.Playwright.PageGotoOptions { WaitUntil = Microsoft.Playwright.WaitUntilState.NetworkIdle, Timeout = 20000 });
-            
+
             string title = await page.TitleAsync();
 
             await page.EvaluateAsync(@"() => {
@@ -978,20 +1014,9 @@ public class ToolExecutor(
             {
                 html = await page.InnerHTMLAsync("body");
             }
-            
-#pragma warning disable CS0618
-            var config = new ReverseMarkdown.Config
-            {
-                GithubFlavored = true,
-                RemoveComments = true,
-                SmartHrefHandling = true
-            };
-#pragma warning restore CS0618
-            var converter = new ReverseMarkdown.Converter(config);
-            var markdown = converter.Convert(html);
-            
-            markdown = Regex.Replace(markdown, @"\n{3,}", "\n\n").Trim();
-            
+
+            var markdown = HtmlToMarkdown(html);
+
             var header = $"# Page Title: {title}\nSource URL: {url}\n\n---\n\n";
             var fullOutput = header + markdown;
 
@@ -999,14 +1024,155 @@ public class ToolExecutor(
 
             return new ToolResult(request.Name, true, fullOutput, null);
         }
-        catch (Microsoft.Playwright.PlaywrightException ex) when (ex.Message.Contains("Executable doesn't exist"))
-        {
-            return new ToolResult(request.Name, false, "", "Browser binaries not found. You must run the playwright installation script first: `playwright.ps1 install` ");
-        }
         catch (Exception ex)
         {
-            return new ToolResult(request.Name, false, "", ex.Message);
+            lastError = ex.Message;
+            logger.LogWarning(ex, "Raw Playwright crawl failed for URL: {Url}", url);
         }
+
+        var finalMessage = string.IsNullOrWhiteSpace(lastError)
+            ? "Failed to crawl URL."
+            : $"Failed to crawl URL. {lastError}";
+        if (lastError != null && lastError.Contains("Executable doesn't exist"))
+        {
+            finalMessage = "Browser binaries are not installed and the automatic installation failed, so the page could not be fetched either directly or via a browser.";
+        }
+
+        return new ToolResult(request.Name, false, "", finalMessage);
+    }
+
+    /// <summary>
+    /// Fetches a page over plain HTTP and converts its main content to Markdown.
+    /// Returns null when the page has no meaningful content (e.g. a JavaScript-only shell).
+    /// </summary>
+    private static async Task<string?> FetchPageViaHttpAsync(string url, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new ArgumentException("Only http/https URLs are supported.");
+        }
+
+        // SSRF guard: never fetch private/internal hosts over the direct HTTP path.
+        if (await IsPrivateHostAsync(uri.Host))
+        {
+            throw new ArgumentException($"Host '{uri.Host}' resolves to a private or internal address, which cannot be crawled.");
+        }
+
+        using var requestMsg = new HttpRequestMessage(HttpMethod.Get, uri);
+        requestMsg.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
+        requestMsg.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        requestMsg.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(20));
+
+        using var response = await _httpClient.SendAsync(requestMsg, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase} while fetching the page.");
+        }
+
+        var html = await response.Content.ReadAsStringAsync(cts.Token);
+        if (string.IsNullOrWhiteSpace(html)) return null;
+
+        var doc = new HtmlDocument();
+        doc.LoadHtml(html);
+
+        foreach (var node in doc.DocumentNode.Descendants()
+                     .Where(n => n.Name is "script" or "style" or "noscript" or "nav" or "footer" or "header" or "aside" or "iframe" or "form" or "svg" or "canvas")
+                     .ToList())
+        {
+            node.Remove();
+        }
+
+        var mainNode = doc.DocumentNode.SelectSingleNode("//main | //article | //*[@role='main']");
+        var contentNode = mainNode ?? doc.DocumentNode;
+
+        var markdown = HtmlToMarkdown(contentNode.InnerHtml);
+        if (string.IsNullOrWhiteSpace(markdown)) return null;
+
+        var title = doc.DocumentNode.SelectSingleNode("//title")?.InnerText?.Trim() ?? uri.Host;
+        var header = $"# Page Title: {title}\nSource URL: {url}\n\n---\n\n";
+        var fullOutput = header + markdown;
+
+        if (fullOutput.Length > 20000) fullOutput = fullOutput[..20000] + "\n\n... [TRUNCATED]";
+
+        return fullOutput;
+    }
+
+    private static string HtmlToMarkdown(string html)
+    {
+#pragma warning disable CS0618
+        var config = new ReverseMarkdown.Config
+        {
+            GithubFlavored = true,
+            RemoveComments = true,
+            SmartHrefHandling = true
+        };
+#pragma warning restore CS0618
+        var converter = new ReverseMarkdown.Converter(config);
+        var markdown = converter.Convert(html);
+
+        markdown = Regex.Replace(markdown, @"\n{3,}", "\n\n").Trim();
+        return markdown;
+    }
+
+    /// <summary>
+    /// Returns true when the host resolves to a loopback, private, link-local, or otherwise
+    /// internal address. Prevents the crawl tool from being used as an SSRF vector.
+    /// </summary>
+    private static async Task<bool> IsPrivateHostAsync(string host)
+    {
+        if (IPAddress.TryParse(host, out var parsed))
+        {
+            return IsPrivateAddress(parsed);
+        }
+
+        try
+        {
+            var addresses = await Dns.GetHostAddressesAsync(host);
+            return addresses.Any(IsPrivateAddress);
+        }
+        catch
+        {
+            // If DNS resolution fails, let the actual request surface the error.
+            return false;
+        }
+    }
+
+    private static bool IsPrivateAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        if (IPAddress.IsLoopback(address)) return true;
+
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            var bytes = address.GetAddressBytes();
+            var ip = ((uint)bytes[0] << 24) | ((uint)bytes[1] << 16) | ((uint)bytes[2] << 8) | bytes[3];
+
+            if ((ip & 0xFF000000) == 0x0A000000) return true;  // 10.0.0.0/8
+            if ((ip & 0xFFF00000) == 0xAC100000) return true;  // 172.16.0.0/12
+            if ((ip & 0xFFFF0000) == 0xC0A80000) return true;  // 192.168.0.0/16
+            if ((ip & 0xFFFF0000) == 0xA9FE0000) return true;  // 169.254.0.0/16 link-local
+            if ((ip & 0xFFC00000) == 0x64400000) return true;  // 100.64.0.0/10 CGNAT
+            return ip == 0;                                    // 0.0.0.0/8
+        }
+
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            var bytes = address.GetAddressBytes();
+            if ((bytes[0] & 0xFE) == 0xFC) return true;                      // fc00::/7 unique local
+            if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;  // fe80::/10 link-local
+            if (bytes[0] == 0xFF) return true;                               // multicast
+            return bytes.All(b => b == 0);                                   // ::
+        }
+
+        return false;
     }
 
     private async Task<ToolResult> SearchFilesAsync(ToolCallRequest request, CancellationToken ct)

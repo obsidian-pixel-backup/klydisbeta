@@ -215,7 +215,7 @@ public partial class ModelLibraryViewModel : ObservableObject
         {
             Interval = TimeSpan.FromSeconds(2)
         };
-        _timer.Tick += async (s, e) => await UpdateVramUsageAsync();
+        _timer.Tick += async (s, e) => { try { await UpdateVramUsageAsync(); } catch { } };
         _timer.Start();
     }
 
@@ -272,11 +272,18 @@ public partial class ModelLibraryViewModel : ObservableObject
 
     private async Task UpdateVramUsageAsync()
     {
-        var usage = await _gpuProfiler.GetRealTimeVramUsageAsync();
-        if (usage != null && VramTotalMb > 0)
+        try
         {
-            VramUsageMb = usage.UsedVramMb;
-            VramUsagePercent = 100.0 * VramUsageMb / VramTotalMb;
+            var usage = await _gpuProfiler.GetRealTimeVramUsageAsync();
+            if (usage != null && VramTotalMb > 0)
+            {
+                VramUsageMb = usage.UsedVramMb;
+                VramUsagePercent = 100.0 * VramUsageMb / VramTotalMb;
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"VRAM usage update failed: {ex.Message}");
         }
     }
 
@@ -365,6 +372,13 @@ public partial class ModelLibraryViewModel : ObservableObject
                               model.DisplayName.Contains("-r1", StringComparison.OrdinalIgnoreCase) ||
                               (model.Architecture != null && model.Architecture.Contains("deepseek2", StringComparison.OrdinalIgnoreCase));
 
+            // Pre-flight compatibility evaluation: flags models the bundled native engine
+            // cannot load (e.g. a newer tokenizer pre-type) so users see it on the card
+            // instead of discovering it via a confusing load error.
+            var compat = Klydis.Core.Inference.GgufCompatibilityAdapter.Evaluate(model.FilePath);
+            bool isCompatible = compat.IsSupported;
+            string? compatWarning = isCompatible ? null : (compat.WarningMessage ?? "Model is not compatible with the bundled native engine.");
+
             var card = new ModelCardViewModel
             {
                 ModelId = model.Id,
@@ -379,7 +393,9 @@ public partial class ModelLibraryViewModel : ObservableObject
                 CanFitInVram = gpuInfo == null || estimatedVramMb <= gpuInfo.TotalVramMb,
                 Role = model.Role ?? "None",
                 IsVision = isVision,
-                IsThinking = isThinking
+                IsThinking = isThinking,
+                IsCompatible = isCompatible,
+                CompatibilityWarning = compatWarning
             };
             card.PropertyChanged += ModelCard_PropertyChanged;
             Models.Add(card);
@@ -390,9 +406,16 @@ public partial class ModelLibraryViewModel : ObservableObject
 
     private async void ModelCard_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ModelCardViewModel.Role) && sender is ModelCardViewModel card)
+        try
         {
-            await _registry.UpdateModelRoleAsync(card.ModelId, card.Role);
+            if (e.PropertyName == nameof(ModelCardViewModel.Role) && sender is ModelCardViewModel card)
+            {
+                await _registry.UpdateModelRoleAsync(card.ModelId, card.Role);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Model role update failed: {ex.Message}");
         }
     }
 

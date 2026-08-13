@@ -64,6 +64,29 @@ public partial class SystemMonitorViewModel : ObservableObject
     [ObservableProperty]
     private double _modelMemoryMb;
 
+    // ---- Session token usage stats (bottom-right status bar) ----
+    // "Tokens in" = prompt/context tokens consumed by chat generations;
+    // "Tokens out" = tokens generated (counted live as they stream).
+    // Internal summarization/RAG generations (IsIsolated) are excluded so these
+    // numbers reflect real conversation usage.
+    [ObservableProperty]
+    private long _totalTokensIn;
+
+    [ObservableProperty]
+    private long _totalTokensOut;
+
+    [ObservableProperty]
+    private long _lastGenerationTokensIn;
+
+    [ObservableProperty]
+    private long _lastGenerationTokensOut;
+
+    [ObservableProperty]
+    private string _tokenUsageSummary = "↑ 0 in · ↓ 0 out";
+
+    [ObservableProperty]
+    private string _tokenUsageTooltip = "Session token usage appears here once the model generates.";
+
     // "Normal" / "Warning" / "Critical" — drives the status bar text color via
     // DataTriggers in MainWindow.xaml, so a maxed-out resource is visible at a glance.
     [ObservableProperty]
@@ -83,6 +106,8 @@ public partial class SystemMonitorViewModel : ObservableObject
         _systemProfiler = systemProfiler;
         _inferenceEngine = inferenceEngine;
         _inferenceEngine.TokenGenerated += OnTokenGenerated;
+        _inferenceEngine.InferenceStarted += OnInferenceStarted;
+        _inferenceEngine.InferenceCompleted += OnInferenceCompleted;
         _timer = new DispatcherTimer
         {
             Interval = TimeSpan.FromSeconds(1)
@@ -95,6 +120,14 @@ public partial class SystemMonitorViewModel : ObservableObject
     {
         System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
+            // Live "tokens out" counter: every non-empty streamed token counts (the final
+            // event carries an empty token and is only a t/s update).
+            if (!string.IsNullOrEmpty(token))
+            {
+                TotalTokensOut++;
+                UpdateTokenUsageDisplay();
+            }
+
             if (tokensPerSecond > 0)
             {
                 CurrentTokensPerSecond = Math.Round(tokensPerSecond, 1);
@@ -105,6 +138,54 @@ public partial class SystemMonitorViewModel : ObservableObject
                 }
             }
         });
+    }
+
+    private void OnInferenceStarted(Klydis.Core.Inference.Telemetry.InferenceTelemetry telemetry)
+    {
+        // Exclude internal summarization / background generations so the status bar reflects
+        // real chat usage rather than context maintenance.
+        if (telemetry.IsIsolated) return;
+
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            // Count "tokens in" live at generation start (the prompt is consumed as soon as
+            // the request begins), so "in" moves in step with the per-token "out" counter.
+            // Previously "in" only accumulated on completion, so a session full of
+            // mid-stream failures showed "out" climbing to millions while "in" stayed near
+            // zero (the observed in/out swap).
+            TotalTokensIn += telemetry.PromptTokenCount;
+            UpdateTokenUsageDisplay();
+        });
+    }
+
+    private void OnInferenceCompleted(Klydis.Core.Inference.Telemetry.InferenceTelemetry telemetry)
+    {
+        // Exclude internal summarization / background generations so the status bar reflects
+        // real chat usage rather than context maintenance.
+        if (telemetry.IsIsolated) return;
+
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            // Completion only updates the "last generation" tooltip pair (the exact in/out
+            // split for the finished generation). Session totals are already handled live
+            // by OnInferenceStarted / OnTokenGenerated.
+            LastGenerationTokensIn = telemetry.PromptTokenCount;
+            LastGenerationTokensOut = telemetry.GeneratedTokenCount;
+            UpdateTokenUsageDisplay();
+        });
+    }
+
+    private void UpdateTokenUsageDisplay()
+    {
+        // Arrows follow the standard chat-app / network convention: ↑ = sent up to the model
+        // (input), ↓ = received back from the model (output). The previous "↓ in · ↑ out" read
+        // backwards (down-arrow looked like the model's output), which is the "swapped around"
+        // the status bar was showing.
+        TokenUsageSummary = $"↑ {TotalTokensIn:N0} in · ↓ {TotalTokensOut:N0} out";
+        TokenUsageTooltip = "↑ Input = prompt/context tokens sent to the model. ↓ Output = tokens the model generated. " +
+                            $"Background (isolated) generations are excluded.\n" +
+                            $"Session: {TotalTokensIn:N0} in, {TotalTokensOut:N0} out.\n" +
+                            $"Last generation: {LastGenerationTokensIn:N0} in, {LastGenerationTokensOut:N0} out.";
     }
 
     private void OnTimerTick(object? sender, EventArgs e)

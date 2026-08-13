@@ -18,5 +18,6 @@ public record InferenceTelemetry(
     double TotalElapsedMs = 0,
     double GenerationTokensPerSecond = 0,
     double EndToEndTokensPerSecond = 0,
-    SpeculativeTelemetry? SpeculativeMetrics = null
+    SpeculativeTelemetry? SpeculativeMetrics = null,
+    bool IsIsolated = false
 );

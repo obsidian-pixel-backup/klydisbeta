@@ -61,15 +61,18 @@ public class MessageStore
     /// Initializes a new instance of the <see cref="MessageStore"/> class.
     /// </summary>
     /// <param name="logger">The logger instance.</param>
-    public MessageStore(ILogger<MessageStore> logger)
+    /// <param name="dbPathOverride">Optional explicit SQLite database path (used by tests to keep
+    /// the database hermetic and avoid touching the real user-profile database).</param>
+    public MessageStore(ILogger<MessageStore> logger, string? dbPathOverride = null)
     {
         _logger = logger;
         
-        string appData = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string dbDirectory = Path.Combine(appData, ".klydis", "data");
+        string dbPath = dbPathOverride ?? Path.Combine(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".klydis", "data"),
+            "klydis.db");
+        string dbDirectory = Path.GetDirectoryName(dbPath) ?? ".";
         Directory.CreateDirectory(dbDirectory);
         
-        string dbPath = Path.Combine(dbDirectory, "klydis.db");
         _connectionString = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared";
     }
 

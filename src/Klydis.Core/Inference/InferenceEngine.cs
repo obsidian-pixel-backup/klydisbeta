@@ -9,6 +9,7 @@ using LLama.Common;
 using LLama.Native;
 using Microsoft.Extensions.Logging;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using Klydis.Core.Chat;
 using Klydis.Core.Inference.Telemetry;
@@ -44,6 +45,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     private CancellationTokenSource? _activeGenerationCts;
     private Task? _activeGenerationTask;
     private readonly object _generationCtsLock = new();
+    private volatile bool _isDisposed;
+
+    // Session-level latch: set when a generation fails with a decode-level error (e.g. the
+    // speculative verification path throwing 'llama_decode failed'). Every such failure burns a
+    // full history re-prefill on retry, so once speculation has proven broken for this model it
+    // is disabled for the rest of the session (mirrors the existing low-acceptance bypass, but
+    // triggers on actual failures instead of statistics).
+    private volatile bool _speculationDisabledAfterDecodeFailure;
 
     private readonly object _contextResetLock = new();
 
@@ -86,6 +95,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public event Action<string, float>? TokenGenerated;
 
     /// <summary>
+    /// Event fired when a generation begins, carrying the prompt token count so consumers can
+    /// account for "tokens in" live (alongside the per-token "tokens out" events) instead of
+    /// waiting for completion. Fired only when triggerEvents is true (the chat path), matching
+    /// TokenGenerated. PromptTokenCount is populated; GeneratedTokenCount is always 0.
+    /// </summary>
+    public event Action<InferenceTelemetry>? InferenceStarted;
+
+    /// <summary>
     /// Event fired when a model is loaded or unloaded (isLoaded, modelPath).
     /// </summary>
     public event Action<bool, string?>? ModelStateChanged;
@@ -99,6 +116,40 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// Architecture of the loaded model.
     /// </summary>
     public string Architecture { get; set; } = "llama"; // Default for now
+
+    /// <summary>
+    /// True when the loaded model uses a recurrent/SSM hybrid architecture with M-RoPE
+    /// position requirements (qwen35 / qwen35moe / Qwen3-Next, mamba, rwkv, jamba). These
+    /// models cannot use partial-prefix KV rewinding (MemorySequenceRemove + fresh executor):
+    /// the recurrent memory keeps its old positions while the new input batch starts at 0,
+    /// violating the M-RoPE X &lt; Y invariant and making llama_decode fail.
+    /// </summary>
+    public bool IsRecurrentArchitecture
+    {
+        get
+        {
+            string? arch = Architecture?.ToLowerInvariant();
+            return arch is "qwen35" or "mamba" or "rwkv" or "jamba" ||
+                   (arch != null && arch.StartsWith("qwen35", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// True when the loaded model uses a Mixture-of-Experts (MoE) architecture
+    /// (qwen35moe / qwen3.6-Next, mixtral, deepseek-v2/v3, qwen2moe, grok, ...). MoE models are
+    /// prone to repetition attractors and tangential drift under stress, so the chat pipeline
+    /// applies a stricter anti-repetition sampling profile and runs the degenerate-loop
+    /// self-correction system for them (see <see cref="GenerationLoopDetector"/>).
+    /// </summary>
+    public bool IsMixtureOfExperts { get; private set; }
+
+    /// <summary>
+    /// Set when the most recent chat-path generation was stopped because the degenerate-loop
+    /// detector fired. ChatEngine reads this after the token stream ends, discards the looped
+    /// tail, injects a self-correction instruction and regenerates. Reset at the start of every
+    /// generation; null when the last generation was clean.
+    /// </summary>
+    public GenerationLoopInfo? LastGenerationLoopInfo { get; private set; }
 
     /// <summary>
     /// Raw GGUF chat template string if present.
@@ -166,6 +217,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public InferenceEngine(ILogger<InferenceEngine> logger, INativeResourceDisposer? nativeResourceDisposer = null)
     {
         NativeEngineManager.EnsureNativeLibraryConfigured();
+        // Newer llama.cpp releases (b9181+) require ggml backend plugins to be loaded explicitly.
+        NativeEngineManager.LoadNativeBackends();
         _logger = logger;
         NativeResourceDisposer = nativeResourceDisposer;
     }
@@ -199,10 +252,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 _logger.LogInformation("Attaching speculative draft model: {DraftPath}", res.DraftModelPath);
                 await SpeculativeEngine.LoadDraftModelAsync(res.DraftModelPath, res.DraftOffloadPlan);
                 SpeculativeEngine.DraftCandidateCount = SpeculativeDraftCount;
+                SpeculativeEngine.IsNGramFallbackEnabled = false;
             }
             else
             {
                 await SpeculativeEngine.UnloadAsync();
+                // When the service resolved "enabled" without a draft model path, it means the
+                // zero-VRAM N-gram prompt-lookup fallback is active. Surface it as an enabled
+                // speculation mode so GenerateAsync actually routes through the speculative path.
+                SpeculativeEngine.IsNGramFallbackEnabled = res.IsEnabled;
             }
         }
         catch (Exception ex)
@@ -267,23 +325,40 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 };
 
                 string archLower = (metadata?.Architecture ?? "").ToLowerInvariant();
-                bool isHybridSsm = archLower is "qwen35" or "mamba" or "rwkv" or "jamba";
+                // Pure recurrent/SSM architectures (mamba, rwkv, jamba) have NO attention layers:
+                // flash attention is meaningless there and llama.cpp force-disables it.
+                bool isPureSsm = archLower is "mamba" or "rwkv" or "jamba";
+                // Qwen3.5 / Qwen3-Next (qwen35/qwen3next/qwen35moe) are HYBRID: most layers are
+                // Gated DeltaNet (recurrent, constant-size state) but ~1/4 of layers are standard
+                // attention layers that DO support flash attention. Modern llama.cpp runs these
+                // with flash_attn=enabled (see ggml-org/llama.cpp issues #22817 / #23321); only
+                // the pure-SSM family and Grok force FA off. Enabling FA here is the single
+                // biggest decode-speedup lever at long context — without it, the attention layers
+                // scan the whole KV cache per token and 64K+ context craters to ~20 tps.
+                bool isHybridAttentionArch = archLower is "qwen35" or "qwen3next" or "qwen35moe";
+                bool isHybridSsm = isPureSsm || isHybridAttentionArch; // KV-shift/context guards still apply to both
 
                 int totalModelLayers = (metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0) ? (int)metadata.BlockCount.Value : 32;
                 // Set GpuLayerCount to 999 for full GPU offload when offloadPlan targets full GPU offload (GpuLayers >= totalModelLayers or FullGpu strategy) to offload all transformer blocks + non-layer tensors to CUDA0
                 int targetGpuLayers = (offloadPlan.GpuLayers < 0 || offloadPlan.GpuLayers >= totalModelLayers || offloadPlan.StrategyUsed == Hardware.OffloadStrategyType.FullGpu) ? 999 : offloadPlan.GpuLayers;
 
-                // Enable FlashAttention universally on GPU for all non-SSM transformer architectures to accelerate prompt prefill and generation
-                bool useFlashAttention = !isHybridSsm && targetGpuLayers > 0;
+                // Enable FlashAttention on GPU for all architectures that have real attention layers
+                // (dense transformers AND hybrid Qwen). Only pure-SSM archs (mamba/rwkv/jamba) and
+                // CPU execution keep it off.
+                bool useFlashAttention = !isPureSsm && targetGpuLayers > 0;
 
-                // Context size scales dynamically with user limit or hardware-calculated offload plan context
+                // Context size scales dynamically with user limit or hardware-calculated offload plan
+                // context. Hybrid/recurrent archs have tiny KV caches (only attention layers grow),
+                // so they are NOT limited by the dense-transformer 128K ceiling — allow up to the
+                // model's native context (e.g. Qwen3.5/3.6 trains at 262144 tokens).
+                uint autoContextCeiling = isHybridSsm ? 262144u : 131072u;
                 uint targetContextSize = UserContextLimit > 0
                     ? UserContextLimit
-                    : (uint)Math.Clamp(offloadPlan.RecommendedContextSize, 2048, 131072);
+                    : (uint)Math.Clamp(offloadPlan.RecommendedContextSize, 2048, autoContextCeiling);
 
                 if (isHybridSsm)
                 {
-                    _logger.LogInformation("Hybrid SSM architecture '{Arch}' detected. Context configured to {MaxCtx} tokens.", archLower, targetContextSize);
+                    _logger.LogInformation("Hybrid SSM architecture '{Arch}' detected. Context configured to {MaxCtx} tokens (native ceiling {Ceiling}).", archLower, targetContextSize, autoContextCeiling);
                 }
 
                 uint safeBatchSize = UserBatchSize > 0
@@ -321,6 +396,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
 
                 var compat = GgufCompatibilityAdapter.Evaluate(modelPath);
+                if (!compat.IsSupported)
+                {
+                    // Pre-flight structural validation (truncated/corrupt GGUF, unreadable header,
+                    // missing file) failed — surface the actionable message instead of letting the
+                    // native loader fail with a confusing "architecture not supported" error.
+                    string preflightMessage = compat.WarningMessage ?? "Model file failed pre-flight validation.";
+                    _logger.LogError("GGUF pre-flight validation failed for {ModelPath}: {Message}", modelPath, preflightMessage);
+                    throw new InvalidOperationException($"Failed to load model '{Path.GetFileName(modelPath)}': {preflightMessage}");
+                }
                 if (compat.WarningMessage != null)
                 {
                     _logger.LogWarning("GGUF Pre-flight Notice: {Message}", compat.WarningMessage);
@@ -360,6 +444,50 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         _logger.LogWarning(loadEx, "Native load failed for '{ModelFile}' (arch: {Arch}). Native log tail: {Tail}",
                             Path.GetFileName(modelPath), compat.Architecture, nativeLogTail);
 
+                        // Distinguish a truncated/corrupt GGUF (missing tensors mid-file, e.g. an
+                        // interrupted download) from a genuinely unsupported architecture. The native
+                        // log prints "missing tensor 'blk.N...'" for the former; blaming the arch is
+                        // misleading and sends users re-downloading their native engine for nothing.
+                        if (nativeLogTail.Contains("missing tensor", StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(
+                                $"Model file '{Path.GetFileName(modelPath)}' appears to be corrupt or truncated " +
+                                $"(missing tensors mid-file). This usually means an interrupted or incomplete download. " +
+                                $"Please re-download the model. Native error: {msg}", loadEx);
+                        }
+
+                        // The native loader rejects models whose tokenizer features the bundled
+                        // backend doesn't know ("unknown pre-tokenizer type: 'minicpm5'", etc.).
+                        // This is a vocabulary/backend-version limitation, NOT an architecture
+                        // problem — surface it precisely so the user knows the model needs a
+                        // newer native engine instead of seeing a misleading "architecture not
+                        // supported" message.
+                        string? vocabDiagnosis = DiagnoseVocabIncompatibility(nativeLogTail, Path.GetFileName(modelPath));
+                        if (vocabDiagnosis != null)
+                        {
+                            // The installed native engine is older than the model's tokenizer.
+                            // Auto-update to the latest llama.cpp release and restart to apply it;
+                            // only surface the error if no newer release is available (e.g. offline).
+                            try
+                            {
+                                bool updated = NativeEngineManager.TryAutoUpdateNativeEngineAsync(_logger, forceCheck: true)
+                                    .GetAwaiter().GetResult();
+                                if (updated)
+                                {
+                                    _logger.LogInformation("Auto-updated native engine to support '{ModelFile}'. Restarting to apply.", Path.GetFileName(modelPath));
+                                    NativeEngineManager.RestartApplication(_logger);
+                                }
+                            }
+                            catch (Exception updateEx)
+                            {
+                                _logger.LogWarning(updateEx, "Native engine auto-update failed while diagnosing '{ModelFile}'.", Path.GetFileName(modelPath));
+                            }
+
+                            throw new InvalidOperationException(
+                                $"{vocabDiagnosis} No newer native engine release could be downloaded right now (check your internet connection and restart Klydis).",
+                                loadEx);
+                        }
+
                         throw new InvalidOperationException(
                             $"Failed to load model '{Path.GetFileName(modelPath)}' natively. " +
                             $"Architecture '{compat.Architecture}' is not supported by the current native engine. " +
@@ -381,26 +509,77 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
                 catch (Exception gpuEx) when (offloadPlan.GpuLayers != 0 && !compat.RequiresUpdatedNativeBackend && !IsArchitectureIncompatibleError(gpuEx))
                 {
-                    _logger.LogWarning(gpuEx, "GPU model/context creation failed for {ModelPath}. Falling back to CPU execution.", modelPath);
-                    UnloadModelInternal();
-
-                    // Fallback to CPU-only execution with conservative context
-                    parameters.GpuLayerCount = 0;
-                    parameters.ContextSize = (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
-
-                    _weights = LLamaWeights.LoadFromFile(parameters);
-                    if (_weights == null)
+                    // Safety net: if flash attention was requested (hybrid Qwen/dense on GPU) and the
+                    // native build rejects it, retry ONCE on GPU with FA disabled before falling to
+                    // CPU. This keeps the speedup when FA works while never hard-failing the load.
+                    if (useFlashAttention)
                     {
-                        throw new InvalidOperationException($"CPU fallback failed to load model weights from '{modelPath}'.");
-                    }
+                        _logger.LogWarning(gpuEx, "GPU context creation failed with flash attention for {ModelPath}. Retrying without flash attention.", modelPath);
+                        UnloadModelInternal();
+                        parameters.FlashAttention = false;
+                        useFlashAttention = false;
 
-                    _context = _weights.CreateContext(parameters);
-                    if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
+                        try
+                        {
+                            _weights = LLamaWeights.LoadFromFile(parameters);
+                            if (_weights == null)
+                            {
+                                throw new InvalidOperationException($"Retry (no-FA) failed to load model weights from '{modelPath}'.");
+                            }
+
+                            _context = _weights.CreateContext(parameters);
+                            if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
+                            {
+                                throw new InvalidOperationException($"Retry (no-FA) failed to create context for '{modelPath}'.");
+                            }
+
+                            _executor = new InteractiveExecutor(_context);
+                        }
+                        catch (Exception noFaEx)
+                        {
+                            _logger.LogWarning(noFaEx, "GPU retry without flash attention also failed for {ModelPath}. Falling back to CPU execution.", modelPath);
+                            UnloadModelInternal();
+                            parameters.GpuLayerCount = 0;
+                            parameters.ContextSize = (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
+
+                            _weights = LLamaWeights.LoadFromFile(parameters);
+                            if (_weights == null)
+                            {
+                                throw new InvalidOperationException($"CPU fallback failed to load model weights from '{modelPath}'.");
+                            }
+
+                            _context = _weights.CreateContext(parameters);
+                            if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
+                            {
+                                throw new InvalidOperationException($"CPU fallback failed to create context for '{modelPath}': {gpuEx.Message}");
+                            }
+
+                            _executor = new InteractiveExecutor(_context);
+                        }
+                    }
+                    else
                     {
-                        throw new InvalidOperationException($"CPU fallback failed to create context for '{modelPath}': {gpuEx.Message}");
-                    }
+                        _logger.LogWarning(gpuEx, "GPU model/context creation failed for {ModelPath}. Falling back to CPU execution.", modelPath);
+                        UnloadModelInternal();
 
-                    _executor = new InteractiveExecutor(_context);
+                        // Fallback to CPU-only execution with conservative context
+                        parameters.GpuLayerCount = 0;
+                        parameters.ContextSize = (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
+
+                        _weights = LLamaWeights.LoadFromFile(parameters);
+                        if (_weights == null)
+                        {
+                            throw new InvalidOperationException($"CPU fallback failed to load model weights from '{modelPath}'.");
+                        }
+
+                        _context = _weights.CreateContext(parameters);
+                        if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
+                        {
+                            throw new InvalidOperationException($"CPU fallback failed to create context for '{modelPath}': {gpuEx.Message}");
+                        }
+
+                        _executor = new InteractiveExecutor(_context);
+                    }
                 }
                 
                 _lastEvaluatedPrompt = string.Empty;
@@ -411,7 +590,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     : System.IO.Path.GetFileNameWithoutExtension(modelPath);
                 RawChatTemplate = metadata?.RawChatTemplate;
                 FineTuneName = metadata?.FineTuneName;
-                _logger.LogInformation("Model loaded successfully with architecture '{Architecture}'.", Architecture);
+                IsMixtureOfExperts = DetectMixtureOfExperts(Architecture);
+                _logger.LogInformation("Model loaded successfully with architecture '{Architecture}'{MoeSuffix}.", Architecture, IsMixtureOfExperts ? " (Mixture-of-Experts: applying MoE stability sampling + loop self-correction)" : "");
                 success = true;
 
                 if (IsSpeculativeDecodingEnabled && !string.IsNullOrEmpty(CurrentModelPath))
@@ -466,6 +646,60 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                logTail.Contains("unknown pre-tokenizer", StringComparison.OrdinalIgnoreCase) ||
                logTail.Contains("unknown tokenizer", StringComparison.OrdinalIgnoreCase) ||
                logTail.Contains("error loading model vocabulary", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Inspects the native log tail for tokenizer/vocabulary incompatibility errors and returns
+    /// an actionable diagnostic message, or null when the failure is not vocab-related.
+    /// Recognized patterns (from llama.cpp's vocab loader):
+    ///   - "unknown pre-tokenizer type: '&lt;type&gt;'" — the model's tokenizer.ggml.pre is newer
+    ///     than what the bundled native backend knows.
+    ///   - "error loading model vocabulary" / "unknown tokenizer" — other vocab-level failures.
+    /// </summary>
+    private static string? DiagnoseVocabIncompatibility(string nativeLogTail, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(nativeLogTail))
+        {
+            return null;
+        }
+
+        // Exact form emitted by llama.cpp: unknown pre-tokenizer type: 'minicpm5'
+        var preTokenizerMatch = Regex.Match(nativeLogTail, @"unknown pre-tokenizer type:\s*'([^']+)'", RegexOptions.IgnoreCase);
+        if (preTokenizerMatch.Success)
+        {
+            string preType = preTokenizerMatch.Groups[1].Value.Trim();
+            return $"Failed to load model '{fileName}': it declares tokenizer pre-type '{preType}', " +
+                   $"which the bundled native engine ({GgufCompatibilityAdapter.BundledNativeBackendLabel}) does not support. " +
+                   $"This model needs a newer llama.cpp native backend. " +
+                   $"Fix: place an updated llama.dll in %USERPROFILE%\\.klydis\\native\\ and restart Klydis (or use a different model/quantization).";
+        }
+
+        if (nativeLogTail.Contains("unknown tokenizer", StringComparison.OrdinalIgnoreCase) ||
+            nativeLogTail.Contains("error loading model vocabulary", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Failed to load model '{fileName}': its tokenizer/vocabulary is not supported by the bundled native engine " +
+                   $"({GgufCompatibilityAdapter.BundledNativeBackendLabel}). " +
+                   $"Fix: place an updated llama.dll in %USERPROFILE%\\.klydis\\native\\ and restart Klydis (or use a different model/quantization).";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Detects whether an architecture string denotes a Mixture-of-Experts model. These models
+    /// (qwen35moe / Qwen3.6-Next, mixtral, deepseek-v2/v3, qwen2moe, grok, ...) are prone to
+    /// repetition attractors and tangential drift, so they get the stricter MoE sampling profile
+    /// and the degenerate-loop self-correction system.
+    /// </summary>
+    internal static bool DetectMixtureOfExperts(string? architecture)
+    {
+        if (string.IsNullOrWhiteSpace(architecture)) return false;
+        string lower = architecture.ToLowerInvariant();
+        return lower.Contains("moe", StringComparison.Ordinal) ||
+               lower.Contains("mixtral", StringComparison.Ordinal) ||
+               lower.Contains("deepseekv2", StringComparison.Ordinal) ||
+               lower.Contains("deepseekv3", StringComparison.Ordinal) ||
+               lower.Contains("grok", StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -546,7 +780,89 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 inferenceParams.SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline();
             }
 
+            // Recurrent/M-RoPE architectures (qwen35, mamba, rwkv, jamba) cannot use native KV
+            // cache shifting: TruncateAndReprefill performs llama_kv_cache_seq_rm, which the
+            // recurrent memory module ignores, so the cache stays at position X while a fresh
+            // batch starts at Y=0 -> M-RoPE requires X < Y -> llama_decode fails (ret = -1) and
+            // every retry re-prefills the whole history. That reset/re-prefill loop is what
+            // craters throughput from 60+ tps to ~20 tps once a long session fills the window.
+            // For these models, cap generation so the window can never fill: prompt + output
+            // must fit inside ContextSize minus a safety margin. The app-level context
+            // compression (ChatEngine) keeps the prompt bounded; this cap protects the
+            // generation side and turns "fill the window, corrupt the cache, retry" into a
+            // clean, bounded response.
+            int promptTokenCount = 0;
+            try { promptTokenCount = GetTokenCount(prompt); }
+            catch { promptTokenCount = Math.Max(1, prompt.Length / 4); }
+
+            // Announce the generation start so consumers can count "tokens in" live. Without this,
+            // "in" only moved when a generation completed, so on long-horizon sessions with
+            // frequent mid-stream failures the status bar showed "out" climbing to millions while
+            // "in" stayed near zero (the observed in/out swap). Firing at start means every
+            // generation contributes its prompt tokens even if it later fails.
+            if (triggerEvents && InferenceStarted != null)
+            {
+                InferenceStarted?.Invoke(new InferenceTelemetry(
+                    RequestId: Guid.NewGuid().ToString("N"),
+                    TargetModelPath: CurrentModelPath ?? "Unknown",
+                    DraftModelPath: SpeculativeEngine.LoadedDraftPath,
+                    IsSpeculativeEnabled: false,
+                    PromptLengthChars: prompt.Length,
+                    PromptTokenCount: promptTokenCount,
+                    GeneratedTokenCount: 0,
+                    TimeToFirstTokenMs: 0,
+                    GenerationDurationMs: 0,
+                    TotalElapsedMs: 0,
+                    GenerationTokensPerSecond: 0,
+                    EndToEndTokensPerSecond: 0,
+                    SpeculativeMetrics: null,
+                    IsIsolated: isIsolated));
+            }
+
+            if (IsRecurrentArchitecture)
+            {
+                int window = (int)ContextSize;
+                const int RecurrentSafetyMargin = 512;
+                int maxGenerationTokens = window - promptTokenCount - RecurrentSafetyMargin;
+
+                if (maxGenerationTokens < 1)
+                {
+                    _logger.LogWarning("Prompt ({PromptTokens} tokens) already fills the recurrent context window ({Window}). Completing this generation empty; context compression must reduce the prompt.",
+                        promptTokenCount, window);
+
+                    var emptyTelemetry = new InferenceTelemetry(
+                        RequestId: Guid.NewGuid().ToString("N"),
+                        TargetModelPath: CurrentModelPath ?? "Unknown",
+                        DraftModelPath: SpeculativeEngine.LoadedDraftPath,
+                        IsSpeculativeEnabled: false,
+                        PromptLengthChars: prompt.Length,
+                        PromptTokenCount: promptTokenCount,
+                        GeneratedTokenCount: 0,
+                        TimeToFirstTokenMs: 0,
+                        GenerationDurationMs: 0,
+                        TotalElapsedMs: 0,
+                        GenerationTokensPerSecond: 0,
+                        EndToEndTokensPerSecond: 0,
+                        SpeculativeMetrics: null,
+                        IsIsolated: isIsolated);
+                    LastTelemetry = emptyTelemetry;
+                    InferenceCompleted?.Invoke(emptyTelemetry);
+                    yield break;
+                }
+
+                if (inferenceParams.MaxTokens < 0 || inferenceParams.MaxTokens > maxGenerationTokens)
+                {
+                    _logger.LogDebug("Capping generation for recurrent architecture to {MaxGen} tokens (window {Window}, prompt {PromptTokens}).",
+                        maxGenerationTokens, window, promptTokenCount);
+                    inferenceParams.MaxTokens = maxGenerationTokens;
+                }
+            }
+
             _logger.LogDebug("Starting token generation.");
+
+            // Reset the degenerate-loop flag so a stale detection from a previous generation can
+            // never leak into this one. Set (chat path only) when GenerationLoopDetector fires.
+            LastGenerationLoopInfo = null;
 
             Channel<Action>? eventChannel = null;
             Task? eventDispatcherTask = null;
@@ -594,12 +910,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 bool completedNormally = false;
                 bool isFirstToken = true;
                 Exception? generationException = null;
+                // Exactly-once completion telemetry. Declared here (outside the try) so the
+                // finally block can always emit it, even when generation fails mid-stream.
+                bool telemetryEmitted = false;
+                var requestStopwatch = Stopwatch.StartNew();
+                var genStopwatch = new Stopwatch();
+                double ttftMs = 0;
+                int tokenCount = 0;
+                bool isSpeculationActive = false;
                 try
                 {
-                    var requestStopwatch = Stopwatch.StartNew();
-                    var genStopwatch = new Stopwatch();
-                    double ttftMs = 0;
-                    int tokenCount = 0;
                     string textToEvaluate = prompt;
 
                     if (isIsolated)
@@ -622,31 +942,46 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                             }
                             else
                             {
-                                int prefixTokenCount = 0;
-                                try { prefixTokenCount = GetTokenCount(commonPrefix); } catch { }
-
-                                if (prefixTokenCount > 0 && _context != null && _context.NativeHandle != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
+                                // Recurrent/M-RoPE architectures (qwen35, mamba, rwkv, jamba) cannot use the
+                                // partial-prefix KV rewind: MemorySequenceRemove is not honored by the recurrent
+                                // memory module (its positions stay at X), while the fresh InteractiveExecutor
+                                // starts input batches at position Y=0. M-RoPE requires X < Y, so llama_decode
+                                // fails (ret = -1) and generation dies or falls into repeated full re-prefills.
+                                // For these models, take the slow-but-correct path: clean context + full prompt.
+                                if (IsRecurrentArchitecture)
                                 {
-                                    try
-                                    {
-                                        _context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, (LLamaPos)prefixTokenCount, (LLamaPos)(-1));
-                                        _executor = new InteractiveExecutor(_context);
-                                        _lastEvaluatedPrompt = commonPrefix;
-                                        textToEvaluate = prompt.Substring(commonPrefixLength);
-                                        textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
-                                        _logger.LogDebug("KV Cache Prefix hit (Partial). Rewound sequence to {Tokens} tokens via MemorySequenceRemove. Evaluating delta ({DeltaLength} chars).", prefixTokenCount, textToEvaluate.Length);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        _logger.LogWarning(ex, "Failed partial KV sequence removal; resetting context cleanly.");
-                                        ResetContextInternal();
-                                        textToEvaluate = prompt;
-                                    }
+                                    _logger.LogDebug("Skipping partial KV prefix reuse for recurrent architecture '{Arch}'. Resetting context cleanly.", Architecture);
+                                    ResetContextInternal();
+                                    textToEvaluate = prompt;
                                 }
                                 else
                                 {
-                                    ResetContextInternal();
-                                    textToEvaluate = prompt;
+                                    int prefixTokenCount = 0;
+                                    try { prefixTokenCount = GetTokenCount(commonPrefix); } catch { }
+
+                                    if (prefixTokenCount > 0 && _context != null && _context.NativeHandle != null && !_context.NativeHandle.IsClosed && !_context.NativeHandle.IsInvalid)
+                                    {
+                                        try
+                                        {
+                                            _context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, (LLamaPos)prefixTokenCount, (LLamaPos)(-1));
+                                            _executor = new InteractiveExecutor(_context);
+                                            _lastEvaluatedPrompt = commonPrefix;
+                                            textToEvaluate = prompt.Substring(commonPrefixLength);
+                                            textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
+                                            _logger.LogDebug("KV Cache Prefix hit (Partial). Rewound sequence to {Tokens} tokens via MemorySequenceRemove. Evaluating delta ({DeltaLength} chars).", prefixTokenCount, textToEvaluate.Length);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            _logger.LogWarning(ex, "Failed partial KV sequence removal; resetting context cleanly.");
+                                            ResetContextInternal();
+                                            textToEvaluate = prompt;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        ResetContextInternal();
+                                        textToEvaluate = prompt;
+                                    }
                                 }
                             }
                         }
@@ -660,7 +995,20 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                     var generatedContent = new System.Text.StringBuilder();
 
-                    var tokenStream = (IsSpeculativeDecodingEnabled && SpeculativeEngine.IsLoaded)
+                    // Degenerate-loop detector for the chat path. MoE / thinking models can fall
+                    // into repetition attractors (think-tag spam, token stutter, n-gram cycles);
+                    // when the detector fires we stop the stream here WITHOUT delivering the
+                    // triggering token. ChatEngine reads LastGenerationLoopInfo, discards the
+                    // looped tail, injects a self-correction instruction and regenerates.
+                    GenerationLoopDetector? loopDetector = null;
+
+                    // Route through the speculative path when a draft model is loaded OR the
+                    // zero-VRAM N-gram fallback is active (previously the fallback was advertised
+                    // in the UI but never engaged because IsLoaded stayed false).
+                    isSpeculationActive = IsSpeculativeDecodingEnabled &&
+                                          !_speculationDisabledAfterDecodeFailure &&
+                                          (SpeculativeEngine.IsLoaded || SpeculativeEngine.IsNGramFallbackEnabled);
+                    var tokenStream = isSpeculationActive
                         ? SpeculativeEngine.SpeculateAndVerifyAsync(textToEvaluate, _executor, _context!, inferenceParams, SpeculativeDraftCount, generationToken)
                         : _executor.InferAsync(textToEvaluate, inferenceParams, cancellationToken: generationToken);
 
@@ -677,6 +1025,22 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         }
                         
                         generatedContent.Append(token);
+
+                        // Self-correction: detect degenerate loops in the chat path only (isolated
+                        // generations like titles have no correction loop to recover through).
+                        if (!isIsolated && triggerEvents)
+                        {
+                            loopDetector ??= new GenerationLoopDetector();
+                            loopDetector.Append(token);
+                            var loop = loopDetector.Detect();
+                            if (loop != null)
+                            {
+                                _logger.LogWarning("Degenerate generation loop detected ({Reason}) after {Tokens} tokens (loop starts at char {LoopStart}). Stopping stream for self-correction.",
+                                    loop.Reason, tokenCount, loop.LoopStartChar);
+                                LastGenerationLoopInfo = loop;
+                                break;
+                            }
+                        }
                         
                         double elapsedSec = genStopwatch.Elapsed.TotalSeconds;
                         float tokensPerSecond = (tokenCount > 1 && elapsedSec > 0.001)
@@ -703,38 +1067,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                     requestStopwatch.Stop();
                     genStopwatch.Stop();
-                    double totalElapsedMs = requestStopwatch.Elapsed.TotalMilliseconds;
-                    double genDurationMs = genStopwatch.Elapsed.TotalMilliseconds;
-                    int totalGeneratedTokens = isFirstToken ? 0 : tokenCount + 1;
-                    double genTokSec = (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
-                    double e2eTokSec = totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0;
-
-                    int promptTokenCount = 0;
-                    try { promptTokenCount = GetTokenCount(prompt); } catch { promptTokenCount = Math.Max(1, prompt.Length / 4); }
-
-                    var telemetry = new InferenceTelemetry(
-                        RequestId: Guid.NewGuid().ToString("N"),
-                        TargetModelPath: CurrentModelPath ?? "Unknown",
-                        DraftModelPath: SpeculativeEngine.LoadedDraftPath,
-                        IsSpeculativeEnabled: IsSpeculativeDecodingEnabled && SpeculativeEngine.IsLoaded,
-                        PromptLengthChars: prompt.Length,
-                        PromptTokenCount: promptTokenCount,
-                        GeneratedTokenCount: totalGeneratedTokens,
-                        TimeToFirstTokenMs: Math.Round(ttftMs, 2),
-                        GenerationDurationMs: Math.Round(genDurationMs, 2),
-                        TotalElapsedMs: Math.Round(totalElapsedMs, 2),
-                        GenerationTokensPerSecond: Math.Round(genTokSec, 2),
-                        EndToEndTokensPerSecond: Math.Round(e2eTokSec, 2),
-                        SpeculativeMetrics: (IsSpeculativeDecodingEnabled && SpeculativeEngine.IsLoaded) ? SpeculativeEngine.LastTelemetry : null
-                    );
-                    LastTelemetry = telemetry;
-                    InferenceCompleted?.Invoke(telemetry);
 
                     if (triggerEvents && TokenGenerated != null && eventChannel != null)
                     {
                         var handlers = TokenGenerated;
-                        float finalTps = (float)telemetry.GenerationTokensPerSecond;
-                        eventChannel.Writer.TryWrite(() => handlers.Invoke(string.Empty, finalTps));
+                        double totalElapsedMs = requestStopwatch.Elapsed.TotalMilliseconds;
+                        double genDurationMs = genStopwatch.Elapsed.TotalMilliseconds;
+                        int totalGeneratedTokens = isFirstToken ? 0 : tokenCount + 1;
+                        double genTokSec = (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
+                        eventChannel.Writer.TryWrite(() => handlers.Invoke(string.Empty, (float)genTokSec));
                     }
                 }
                 catch (OperationCanceledException)
@@ -753,34 +1094,93 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                     if (isContextOverflowError)
                     {
-                        _logger.LogWarning(ex, "Model context overflowed or does not support native memory shifting. Resetting context and retrying generation cleanly.");
-                        try
+                        if (IsRecurrentArchitecture)
                         {
+                            // Recurrent/M-RoPE models cannot use native KV shifting, so a full
+                            // reset + retry would just re-prefill the entire history and fail again
+                            // (the classic re-prefill loop that drops tps from 60+ to ~20). The
+                            // MaxTokens cap above prevents the window from filling in the first
+                            // place; if it still happens (tokenizer edge case), complete the
+                            // channel cleanly with whatever was already generated.
+                            _logger.LogWarning(ex, "Context window filled on recurrent architecture; completing generation cleanly instead of retrying.");
                             ResetContextInternal();
-                            string safePrompt = prompt;
-
-                            if (isFirstToken && _executor != null)
-                            {
-                                var retryStream = _executor.InferAsync(safePrompt, inferenceParams, cancellationToken: generationToken);
-                                await foreach (var token in retryStream)
-                                {
-                                    if (generationToken.IsCancellationRequested) break;
-                                    await channel.Writer.WriteAsync(token, generationToken);
-                                }
-                                completedNormally = true;
-                                generationException = null;
-                            }
-                            else
-                            {
-                                _logger.LogWarning("Context limit reached after tokens were emitted; completing channel cleanly.");
-                                completedNormally = true;
-                                generationException = null;
-                            }
+                            completedNormally = true;
+                            generationException = null;
                         }
-                        catch (Exception retryEx)
+                        else
                         {
-                            _logger.LogError(retryEx, "Error during context reset retry");
-                            generationException = retryEx;
+                            _logger.LogWarning(ex, "Model context overflowed or does not support native memory shifting. Resetting context and retrying generation cleanly.");
+
+                            // The debug log shows these decode failures (llama_decode failed /
+                            // InvalidInputBatch) originate inside the speculative verification
+                            // path. Every one triggers this reset + full-history re-prefill, which
+                            // is the dominant slow-down on long sessions. Disable speculation for
+                            // the rest of the session so the next generations run plain direct
+                            // inference instead of failing speculatively first.
+                            bool isDecodeFailure =
+                                ex.Message.Contains("llama_decode failed", StringComparison.OrdinalIgnoreCase) ||
+                                ex.Message.Contains("InvalidInputBatch", StringComparison.OrdinalIgnoreCase);
+                            if (isDecodeFailure && !_speculationDisabledAfterDecodeFailure)
+                            {
+                                _speculationDisabledAfterDecodeFailure = true;
+                                _logger.LogWarning("Disabling speculative decoding for this session after a decode-level failure; subsequent generations use direct inference.");
+                            }
+
+                            try
+                            {
+                                ResetContextInternal();
+                                string safePrompt = prompt;
+
+                                if (isFirstToken && _executor != null)
+                                {
+                                    // Bounded retry: cap MaxTokens so a post-reset re-prefill of a
+                                    // huge prompt cannot stream unbounded output (StreamTokensAsync
+                                    // uses MaxTokens=-1). The retry must also fire TokenGenerated and
+                                    // count its tokens, otherwise "tokens out" and the completion
+                                    // telemetry silently miss entire recovered generations.
+                                    var retryParams = new InferenceParams
+                                    {
+                                        MaxTokens = Math.Min(inferenceParams.MaxTokens < 0 ? int.MaxValue : inferenceParams.MaxTokens, 2048),
+                                        TokensKeep = inferenceParams.TokensKeep,
+                                        AntiPrompts = inferenceParams.AntiPrompts,
+                                        OverflowStrategy = inferenceParams.OverflowStrategy,
+                                        SamplingPipeline = inferenceParams.SamplingPipeline
+                                    };
+                                    var retryStream = _executor.InferAsync(safePrompt, retryParams, cancellationToken: generationToken);
+                                    await foreach (var token in retryStream)
+                                    {
+                                        if (generationToken.IsCancellationRequested) break;
+                                        if (isFirstToken)
+                                        {
+                                            isFirstToken = false;
+                                            ttftMs = requestStopwatch.Elapsed.TotalMilliseconds;
+                                            genStopwatch.Start();
+                                        }
+                                        tokenCount++;
+                                        if (triggerEvents && TokenGenerated != null && eventChannel != null)
+                                        {
+                                            var handlers = TokenGenerated;
+                                            string currentToken = token;
+                                            float currentTps = 0f;
+                                            eventChannel.Writer.TryWrite(() => handlers.Invoke(currentToken, currentTps));
+                                        }
+                                        await channel.Writer.WriteAsync(token, generationToken);
+                                    }
+                                    completedNormally = true;
+                                    generationException = null;
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("Context limit reached after tokens were emitted; completing channel cleanly.");
+                                    completedNormally = true;
+                                    generationException = null;
+                                }
+                            }
+                            catch (Exception retryEx)
+                            {
+                                _logger.LogError(retryEx, "Error during context reset retry");
+                                generationException = retryEx;
+                            }
                         }
                     }
                     else
@@ -805,6 +1205,44 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     {
                         ResetContextInternal();
                     }
+
+                    // ALWAYS emit completion telemetry, including failed/partial generations.
+                    // Previously this lived only in the success path, so a turn that failed
+                    // mid-stream streamed tokens (counted as "tokens out" via TokenGenerated)
+                    // but never reported its PromptTokenCount — the status-bar "in" counter
+                    // undercounted massively on long-horizon sessions (the observed "2M out,
+                    // ~0 in" swap). Exactly-once via telemetryEmitted.
+                    if (!telemetryEmitted)
+                    {
+                        telemetryEmitted = true;
+                        requestStopwatch.Stop();
+                        genStopwatch.Stop();
+                        double totalElapsedMs = requestStopwatch.Elapsed.TotalMilliseconds;
+                        double genDurationMs = genStopwatch.Elapsed.TotalMilliseconds;
+                        int totalGeneratedTokens = isFirstToken ? 0 : tokenCount + 1;
+                        double genTokSec = (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
+                        double e2eTokSec = totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0;
+
+                        var telemetry = new InferenceTelemetry(
+                            RequestId: Guid.NewGuid().ToString("N"),
+                            TargetModelPath: CurrentModelPath ?? "Unknown",
+                            DraftModelPath: SpeculativeEngine.LoadedDraftPath,
+                            IsSpeculativeEnabled: isSpeculationActive,
+                            PromptLengthChars: prompt.Length,
+                            PromptTokenCount: promptTokenCount,
+                            GeneratedTokenCount: totalGeneratedTokens,
+                            TimeToFirstTokenMs: Math.Round(ttftMs, 2),
+                            GenerationDurationMs: Math.Round(genDurationMs, 2),
+                            TotalElapsedMs: Math.Round(totalElapsedMs, 2),
+                            GenerationTokensPerSecond: Math.Round(genTokSec, 2),
+                            EndToEndTokensPerSecond: Math.Round(e2eTokSec, 2),
+                            SpeculativeMetrics: isSpeculationActive ? SpeculativeEngine.LastTelemetry : null,
+                            IsIsolated: isIsolated
+                        );
+                        LastTelemetry = telemetry;
+                        InferenceCompleted?.Invoke(telemetry);
+                    }
+
                     channel.Writer.Complete(completedNormally ? null : generationException);
                 }
             }, CancellationToken.None);
@@ -862,6 +1300,37 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         }
     }
 
+    /// <summary>
+    /// Builds the sampling pipeline for a generation. MoE models (qwen35moe / Qwen3.6-Next,
+    /// mixtral, deepseek-v2/v3, ...) are prone to repetition attractors and tangential drift,
+    /// so they get a stricter anti-repetition profile: lower temperature, higher repeat penalty,
+    /// plus small frequency/presence penalties that actively suppress self-repeat. Dense models
+    /// keep the proven default profile.
+    /// </summary>
+    private LLama.Sampling.DefaultSamplingPipeline BuildSamplingPipeline()
+    {
+        if (IsMixtureOfExperts)
+        {
+            return new LLama.Sampling.DefaultSamplingPipeline
+            {
+                Temperature = 0.6f,
+                TopP = 0.9f,
+                MinP = 0.05f,
+                RepeatPenalty = 1.25f,
+                FrequencyPenalty = 0.15f,
+                PresencePenalty = 0.15f
+            };
+        }
+
+        return new LLama.Sampling.DefaultSamplingPipeline
+        {
+            Temperature = 0.7f,
+            TopP = 0.9f,
+            MinP = 0.05f,
+            RepeatPenalty = 1.1f
+        };
+    }
+
     public async IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, [EnumeratorCancellation] CancellationToken ct = default)
     {
         int maxKeep = (int)(ContextSize / 2);
@@ -872,14 +1341,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             MaxTokens = -1,
             TokensKeep = safeTokensKeep,
             AntiPrompts = stopTokens.ToList(),
-            OverflowStrategy = LLama.Common.ContextOverflowStrategy.TruncateAndReprefill,
-            SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
-            {
-                Temperature = 0.7f,
-                TopP = 0.9f,
-                MinP = 0.05f,
-                RepeatPenalty = 1.1f
-            }
+            // Native KV shifting (TruncateAndReprefill) is unsupported on recurrent/M-RoPE
+            // models — it corrupts the cache and every retry re-prefills the whole history.
+            // GenerateAsync caps MaxTokens for those architectures so the window never fills;
+            // ThrowException is the no-shift belt-and-suspenders fallback.
+            OverflowStrategy = IsRecurrentArchitecture
+                ? LLama.Common.ContextOverflowStrategy.ThrowException
+                : LLama.Common.ContextOverflowStrategy.TruncateAndReprefill,
+            SamplingPipeline = BuildSamplingPipeline()
         };
 
         await foreach (var token in GenerateAsync(prompt, inferenceParams, triggerEvents: true, isIsolated: false, ct: ct))
@@ -903,14 +1372,13 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         var inferenceParams = new InferenceParams 
         { 
             MaxTokens = maxTokens > 0 ? maxTokens : 256,
-            OverflowStrategy = LLama.Common.ContextOverflowStrategy.TruncateAndReprefill,
-            SamplingPipeline = new LLama.Sampling.DefaultSamplingPipeline
-            {
-                Temperature = 0.7f,
-                TopP = 0.9f,
-                MinP = 0.05f,
-                RepeatPenalty = 1.1f
-            }
+            // Recurrent/M-RoPE models cannot use native KV shifting; ThrowException avoids
+            // corrupting the cache when the window fills (GenerateAsync caps MaxTokens for
+            // recurrent architectures, so this is a rare edge case).
+            OverflowStrategy = IsRecurrentArchitecture
+                ? LLama.Common.ContextOverflowStrategy.ThrowException
+                : LLama.Common.ContextOverflowStrategy.TruncateAndReprefill,
+            SamplingPipeline = BuildSamplingPipeline()
         };
         var sb = new System.Text.StringBuilder();
         await foreach (var token in GenerateAsync(prompt, inferenceParams, triggerEvents: false, isIsolated: isIsolated, ct: ct))
@@ -942,6 +1410,20 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     }
 
     /// <summary>
+    /// Max auto-allocated context ceiling for the currently loaded architecture. Hybrid/recurrent
+    /// SSM architectures (qwen35/qwen3next/qwen35moe, mamba, rwkv, jamba) have tiny per-layer KV
+    /// caches (only their sparse attention layers grow) and run up to their native 256K ceiling;
+    /// dense transformers cap at 128K. Must mirror the ceiling computed at load time.
+    /// </summary>
+    internal uint GetAutoContextCeiling()
+    {
+        string archLower = (Architecture ?? "").ToLowerInvariant();
+        bool isPureSsm = archLower is "mamba" or "rwkv" or "jamba";
+        bool isHybridAttentionArch = archLower is "qwen35" or "qwen3next" or "qwen35moe";
+        return (isPureSsm || isHybridAttentionArch) ? 262144u : 131072u;
+    }
+
+    /// <summary>
     /// Re-applies updated user hardware parameters (ContextSize, BatchSize, UBatchSize) dynamically to the active loaded context.
     /// </summary>
     public async Task ReapplyModelParametersAsync()
@@ -953,9 +1435,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         {
             if (_weights == null || _modelParams == null) return;
 
+            uint autoContextCeiling = GetAutoContextCeiling();
             uint targetContextSize = UserContextLimit > 0
                 ? UserContextLimit
-                : (uint)Math.Clamp(_lastOffloadPlan?.RecommendedContextSize ?? 32768, 2048, 131072);
+                : (uint)Math.Clamp(_lastOffloadPlan?.RecommendedContextSize ?? 32768, 2048, autoContextCeiling);
 
             uint safeBatchSize = UserBatchSize > 0
                 ? UserBatchSize
@@ -1104,6 +1587,18 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             {
                 if (delta.StartsWith(stopToken, StringComparison.Ordinal))
                 {
+                    // Only strip a leading stop token when the ALREADY-EVALUATED context ends
+                    // with it — i.e. it is a duplicate the previous generation emitted. When the
+                    // delta legitimately starts with a NEW message terminator (e.g. the
+                    // <|im_end|> closing the previous assistant turn in an exact KV-prefix
+                    // chain), the evaluated context does NOT contain it yet and stripping would
+                    // corrupt the template (the model would never see the turn close).
+                    if (!_lastEvaluatedPrompt.EndsWith(stopToken, StringComparison.Ordinal))
+                    {
+                        _logger?.LogDebug("Keeping leading stop token '{StopToken}' in prefix delta: evaluated context does not end with it (new message terminator, not a duplicate).", stopToken);
+                        continue;
+                    }
+
                     _logger?.LogDebug("Stripped leading turn stop token '{StopToken}' from prefix delta.", stopToken);
                     _lastEvaluatedPrompt += stopToken;
                     delta = delta.Substring(stopToken.Length);
@@ -1332,8 +1827,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        await UnloadModelAsync().ConfigureAwait(false);
-        await SpeculativeEngine.DisposeAsync().ConfigureAwait(false);
+        if (_isDisposed) return;
+        _isDisposed = true;
+        try
+        {
+            await UnloadModelAsync().ConfigureAwait(false);
+            await SpeculativeEngine.DisposeAsync().ConfigureAwait(false);
+        }
+        catch { }
         _modelLock.Dispose();
         GC.SuppressFinalize(this);
     }
@@ -1343,8 +1844,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// </summary>
     public void Dispose()
     {
-        UnloadModel();
-        SpeculativeEngine.Dispose();
+        if (_isDisposed) return;
+        _isDisposed = true;
+        try
+        {
+            UnloadModel();
+            SpeculativeEngine.Dispose();
+        }
+        catch { }
         _modelLock.Dispose();
         GC.SuppressFinalize(this);
     }

@@ -24,6 +24,13 @@ public record GgufMetadata(
 );
 
 /// <summary>
+/// Result of a structural (non-architecture) integrity check of a GGUF file.
+/// A file can be architecturally "supported" yet structurally broken (truncated download,
+/// interrupted conversion) — this check catches that independently of model type.
+/// </summary>
+public record GgufIntegrityResult(bool IsValid, string? Issue);
+
+/// <summary>
 /// A pure C# binary parser for GGUF file headers.
 /// </summary>
 public static class GgufMetadataReader
@@ -240,6 +247,168 @@ public static class GgufMetadataReader
             GgufValueType.Uint32 or GgufValueType.Int32 or GgufValueType.Float32 => 4,
             GgufValueType.Uint64 or GgufValueType.Int64 or GgufValueType.Float64 => 8,
             _ => -1
+        };
+    }
+
+    /// <summary>
+    /// Validates the structural integrity of a GGUF file WITHOUT any architecture assumptions:
+    /// (1) the tensor-info table must contain exactly tensor_count entries (i.e. the header is
+    ///     not truncated mid-table), (2) every transformer block the metadata declares
+    ///     (blk.0..blk.{block_count-1}) must actually have tensors present, and (3) the tensor
+    ///     data region declared by the last tensor must lie within the file. This is what turns
+    ///     "missing tensor 'blk.16...'" from a confusing "architecture not supported" error into
+    ///     a clear "file corrupt/truncated — re-download" message, and it works for any model
+    ///     architecture (llama.cpp normalizes all layer tensors to the 'blk.N.' prefix).
+    /// </summary>
+    /// <param name="filePath">Path to the GGUF file.</param>
+    /// <returns>Valid=true when the file is structurally sound; otherwise false with a description.</returns>
+    public static GgufIntegrityResult ValidateStructuralIntegrity(string filePath)
+    {
+        try
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new BinaryReader(stream, Encoding.UTF8);
+
+            uint magic = reader.ReadUInt32();
+            if (magic != GgufMagic)
+            {
+                return new GgufIntegrityResult(false, "Not a valid GGUF file (bad magic bytes).");
+            }
+
+            uint version = reader.ReadUInt32();
+            ulong tensorCount;
+            ulong kvCount;
+            if (version == 1)
+            {
+                tensorCount = reader.ReadUInt32();
+                kvCount = reader.ReadUInt32();
+            }
+            else
+            {
+                tensorCount = reader.ReadUInt64();
+                kvCount = reader.ReadUInt64();
+            }
+
+            // Skip the KV metadata section (values are read generically; arrays are skipped via seek).
+            for (ulong i = 0; i < kvCount; i++)
+            {
+                ReadGgufString(reader);
+                var vtype = (GgufValueType)reader.ReadUInt32();
+                ReadGgufValue(reader, vtype);
+            }
+
+            // Walk the tensor-info table: name, n_dims, dims, ggml type, data offset.
+            long fileLength = stream.Length;
+            long maxBlockSeen = -1;
+            long maxDataEnd = -1;
+            bool anyBlockTensors = false;
+            for (ulong i = 0; i < tensorCount; i++)
+            {
+                if (reader.BaseStream.Position >= fileLength)
+                {
+                    return new GgufIntegrityResult(false,
+                        $"Tensor table truncated: header declares {tensorCount} tensors but the file ends after {i}. " +
+                        $"The file is corrupt or was cut short during download/conversion.");
+                }
+
+                string name = ReadGgufString(reader);
+                uint nDims = reader.ReadUInt32();
+                ulong numel = 1;
+                for (uint d = 0; d < nDims; d++)
+                {
+                    numel *= reader.ReadUInt64();
+                }
+                uint ggmlType = reader.ReadUInt32();
+                ulong offset = reader.ReadUInt64();
+
+                if (name.StartsWith("blk.", StringComparison.Ordinal))
+                {
+                    anyBlockTensors = true;
+                    int dot = name.IndexOf('.', 4);
+                    if (dot > 4 && long.TryParse(name.AsSpan(4, dot - 4), out long blkIdx))
+                    {
+                        maxBlockSeen = Math.Max(maxBlockSeen, blkIdx);
+                    }
+                }
+
+                double bytesPerElement = GetGgmlTypeBytesPerElement(ggmlType);
+                if (bytesPerElement > 0)
+                {
+                    long estSize = (long)Math.Ceiling(numel * bytesPerElement);
+                    maxDataEnd = Math.Max(maxDataEnd, (long)offset + estSize);
+                }
+            }
+
+            var metadata = Parse(filePath);
+            long declaredBlocks = metadata?.BlockCount ?? 0;
+
+            if (anyBlockTensors && declaredBlocks > 0 && maxBlockSeen >= 0 && maxBlockSeen < declaredBlocks - 1)
+            {
+                return new GgufIntegrityResult(false,
+                    $"Metadata declares {declaredBlocks} transformer blocks (blk.0..blk.{declaredBlocks - 1}) but the tensor table " +
+                    $"only contains tensors through blk.{maxBlockSeen}. The model file is truncated or was converted from an " +
+                    $"incomplete model — re-download it.");
+            }
+
+            if (maxDataEnd > fileLength)
+            {
+                return new GgufIntegrityResult(false,
+                    $"Tensor data region ends at byte {maxDataEnd} but the file is only {fileLength} bytes long. " +
+                    $"The file is truncated — re-download it.");
+            }
+
+            return new GgufIntegrityResult(true, null);
+        }
+        catch (EndOfStreamException)
+        {
+            return new GgufIntegrityResult(false,
+                "Unexpected end of file while reading GGUF structure. The file is truncated or corrupt — re-download it.");
+        }
+        catch (Exception ex)
+        {
+            return new GgufIntegrityResult(false, $"Failed to read GGUF structure: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Bytes per element for common GGML tensor types (block-quantized types return their
+    /// average bytes per element). Unknown types return 0, which skips the data-bounds check
+    /// for that tensor rather than risking a false "truncated" report.
+    /// </summary>
+    private static double GetGgmlTypeBytesPerElement(uint type)
+    {
+        return type switch
+        {
+            0 => 4.0,          // F32
+            1 => 2.0,          // F16
+            2 => 18.0 / 32.0,  // Q4_0
+            3 => 20.0 / 32.0,  // Q4_1
+            6 => 22.0 / 32.0,  // Q5_0
+            7 => 24.0 / 32.0,  // Q5_1
+            8 => 34.0 / 32.0,  // Q8_0
+            9 => 36.0 / 32.0,  // Q8_1
+            10 => 84.0 / 256.0,  // Q2_K
+            11 => 110.0 / 256.0, // Q3_K
+            12 => 144.0 / 256.0, // Q4_K
+            13 => 176.0 / 256.0, // Q5_K
+            14 => 210.0 / 256.0, // Q6_K
+            15 => 292.0 / 256.0, // Q8_K
+            16 => 40.0 / 256.0,  // IQ2_XXS
+            17 => 48.0 / 256.0,  // IQ2_XS
+            18 => 56.0 / 256.0,  // IQ3_XXS
+            19 => 24.0 / 256.0,  // IQ1_S
+            20 => 18.0 / 32.0,   // IQ4_NL
+            21 => 88.0 / 256.0,  // IQ3_S
+            22 => 52.0 / 256.0,  // IQ2_S
+            23 => 64.0 / 256.0,  // IQ4_XS
+            24 => 30.0 / 256.0,  // IQ1_M
+            25 => 108.0 / 256.0, // IQ3_M
+            26 => 124.0 / 256.0, // IQ3_L
+            27 => 60.0 / 256.0,  // IQ2_M
+            29 => 2.0,           // BF16
+            32 => 34.0 / 256.0,  // TQ1_0
+            33 => 68.0 / 256.0,  // TQ2_0
+            _ => 0.0
         };
     }
 

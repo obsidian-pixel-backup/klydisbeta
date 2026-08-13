@@ -142,6 +142,19 @@ public interface IInferenceEngine
     Task<string> GenerateTextAsync(string prompt, bool isIsolated, CancellationToken ct = default);
     Task<string> GenerateTextAsync(string prompt, bool isIsolated, int maxTokens, CancellationToken ct = default);
     void ResetContext();
+
+    /// <summary>
+    /// True when the loaded model uses a Mixture-of-Experts architecture (qwen35moe, mixtral,
+    /// deepseek-v2/v3, ...), which gets the stricter MoE sampling profile and stability
+    /// directives in the system prompt.
+    /// </summary>
+    bool IsMixtureOfExperts { get; }
+
+    /// <summary>
+    /// Set when the most recent chat-path generation was stopped because the degenerate-loop
+    /// detector fired; null when the last generation was clean. Read after the token stream ends.
+    /// </summary>
+    GenerationLoopInfo? LastGenerationLoopInfo { get; }
     int GetTokenCount(string text);
     Task CancelActiveGenerationAsync();
     Task UnloadModelAsync(CancellationToken ct = default);
@@ -164,6 +177,7 @@ public class ChatEngine(
     private readonly List<ChatMessage> _history = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ChatMessage>> _sessionHistories = new();
     private readonly List<(string ToolName, string ArgsHash, string PriorResult)> _recentTools = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _pendingConsolidations = new();
     private int _consecutiveBlockedToolCalls = 0;
 
     public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
@@ -251,6 +265,17 @@ public class ChatEngine(
         bool activeGoalMode = isGoalMode ?? IsGoalMode;
         
         string generatingSessionId = CurrentSessionId;
+
+        // C6: Complete any deferred WorldState consolidation from a previous turn BEFORE this
+        // turn reads WorldState, so prompt builds never race with consolidation writes.
+        // (Fixes a long-horizon race where turn N+1's system prompt was built from a
+        // half-written WorldState.)
+        if (_pendingConsolidations.TryRemove(generatingSessionId, out var priorConsolidation))
+        {
+            try { await priorConsolidation.ConfigureAwait(false); }
+            catch (Exception ex) { logger.LogWarning(ex, "Prior world-state consolidation failed."); }
+        }
+
         if (!_sessionHistories.TryGetValue(generatingSessionId, out var activeHistory))
         {
             activeHistory = new List<ChatMessage>(_history);
@@ -259,14 +284,17 @@ public class ChatEngine(
 
         var userMsgObj = new ChatMessage(ChatRole.User, userMessage);
         activeHistory.Add(userMsgObj);
-        if (CurrentSessionId == generatingSessionId && !_history.Contains(userMsgObj))
+        // ChatMessage is a value-equality record, so Contains() would skip legitimate duplicate
+        // content (the user re-asking the same question, two identical assistant replies). The
+        // mirror must stay in sync with activeHistory — add unconditionally.
+        if (CurrentSessionId == generatingSessionId)
         {
             _history.Add(userMsgObj);
         }
 
         await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
         
-        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, ct, skillContext, activeGoalMode).GetAsyncEnumerator(ct);
+        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, userMessage, ct, skillContext, activeGoalMode).GetAsyncEnumerator(ct);
         try
         {
             while (true)
@@ -312,6 +340,7 @@ public class ChatEngine(
     private async IAsyncEnumerable<ChatStreamEvent> StreamResponseInternalAsync(
         string generatingSessionId,
         List<ChatMessage> activeHistory,
+        string currentUserMessage,
         [EnumeratorCancellation] CancellationToken ct,
         string? skillContext = null,
         bool isGoalMode = false)
@@ -327,21 +356,71 @@ public class ChatEngine(
         var tools = await toolExecutor.GetToolDefinitionsAsync();
         var toolsSchema = toolExecutor.FormatToolsForPrompt(tools);
 
+        // Qwen3.5/Qwen3.6 thinking models (qwen35 / qwen35moe architectures): their embedded chat
+        // template expects (a) tools presented as an OpenAI-style JSON schema inside a <tools>
+        // block with the native <tool_call><function=...><parameter=...> calling instructions, and
+        // (b) the generation prompt to END with an OPEN <think> block (the model continues it,
+        // then closes it — without the opener it degenerates into spamming <think>). Applying
+        // both makes these models think and call tools correctly.
+        bool isQwenThinkingModel = templateType == ChatTemplate.Qwen &&
+                                   inferenceEngine.Architecture?.Contains("qwen35", StringComparison.OrdinalIgnoreCase) == true &&
+                                   !string.IsNullOrWhiteSpace(inferenceEngine.RawChatTemplate) &&
+                                   inferenceEngine.RawChatTemplate.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase);
+
         int iterationCount = 0;
         const int MAX_ITERATIONS = 100;
+
+        // Auto-continuation ("your output was truncated — continue") may only inject its
+        // instruction into the conversation once per user turn. See the truncation branch below.
+        bool continuationInjectedThisTurn = false;
+
+        // Self-correction budget: MoE / thinking models can fall into degenerate loops
+        // (think-tag spam, token stutter, n-gram cycles). When GenerationLoopDetector fires,
+        // the looped tail is discarded, a corrective instruction is injected, and the turn is
+        // regenerated — but only a bounded number of times per user turn, so a pathological
+        // model cannot spin forever (each correction rebuilds and re-prefills the whole prompt).
+        int selfCorrectionsThisTurn = 0;
+        const int MaxSelfCorrectionsPerTurn = 3;
+
+        // Rescue mode: after escalating corrections are exhausted and the model is STILL
+        // degenerate, one final generation strips the tools and the pre-opened think block and
+        // demands a plain direct answer — so the user gets a coherent response instead of an
+        // empty failed turn. Exactly one rescue attempt per turn (rescueTriggered latches it).
+        bool rescueTriggered = false;
+        bool rescueRequested = false;
+        var rescueSysMsg = new ChatMessage(ChatRole.System,
+            "You are Klydis. Answer the user's latest message directly and concisely in plain text. " +
+            "Do not use tools, thinking blocks, tags, or formatting. Just give a clear, short answer.");
+
+        // Token-count cache: the per-iteration budget math below tokenizes the whole active
+        // history over and over (rolling-compression check, backward budget pass, truncation
+        // loop). With a large context model and a 100-iteration tool loop that is
+        // O(iterations x history) tokenizer work per user message, and it becomes the dominant
+        // cost once a session grows to hundreds of thousands of tokens. Cache per-message
+        // counts keyed by reference so each message is tokenized at most once per user message.
+        // ChatMessage is a value-equality record, so reference identity is required to avoid
+        // collapsing distinct messages that happen to share identical content.
+        var tokenCache = new Dictionary<ChatMessage, int>(ReferenceEqualityComparer.Instance);
+        int TokensOf(ChatMessage m)
+        {
+            if (tokenCache.TryGetValue(m, out var cached)) return cached;
+            int t = (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(m.Content) : contextOrchestrator.EstimateTokens(m.Content)) + 25; // 25 tokens for template formatting overhead
+            tokenCache[m] = t;
+            return t;
+        }
 
         while (iterationCount < MAX_ITERATIONS)
         {
             iterationCount++;
             
-            // Execute automated rolling compression when history tokens reach 75% of context window
+            // Execute automated rolling compression when history tokens reach the threshold.
             int rollingThreshold = GetRollingCompressionThreshold();
-            int estimatedHistoryTokens = activeHistory.Sum(m => (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(m.Content) : contextOrchestrator.EstimateTokens(m.Content)) + 25);
+            int estimatedHistoryTokens = activeHistory.Sum(TokensOf);
             if (estimatedHistoryTokens >= rollingThreshold)
             {
                 yield return new ChatStreamEvent(ChatStreamEventType.MemorySummarizing, "🧠 Summarizing conversation context and saving to memory...");
                 int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 262144);
-                logger.LogInformation("Active history tokens ({Tokens}) reached rolling threshold ({Threshold}, 75% of {Ctx} context). Compressing older context into WorldState. Keeping {KeepRecent} recent tokens.",
+                logger.LogInformation("Active history tokens ({Tokens}) reached rolling threshold ({Threshold}, 60% of {Ctx} context). Compressing older context into WorldState. Keeping {KeepRecent} recent tokens.",
                     estimatedHistoryTokens, rollingThreshold, (int)inferenceEngine.ContextSize, keepRecent);
                 await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, rollingThreshold, keepRecent);
             }
@@ -384,13 +463,6 @@ public class ChatEngine(
         var skillHeader = !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
 
         var sysPromptManager = new SystemPromptManager();
-        var sysPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
-        
-        var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
-        
-        // Calculate system prompt size
-        var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType);
-        int sysPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(sysOnlyPrompt) : contextOrchestrator.EstimateTokens(sysOnlyPrompt);
 
         // Dynamic sliding context window calculation reserving response headroom and safety margin.
         int totalContext = (int)inferenceEngine.ContextSize;
@@ -402,12 +474,66 @@ public class ChatEngine(
             _ => Math.Min(totalContext / 4, 12288)
         };
         int safetyMargin = 256;
-        
+
         // ABSOLUTE upper bound for total prompt tokens (system + user history)
         int maxTotalPromptTokens = Math.Max(2048, totalContext - reservedForResponse - safetyMargin);
+
+        // Guaranteed floor for conversation history in the prompt. When the system prompt cannot
+        // fit while leaving this much room, the compact system prompt is used instead of the full
+        // master prompt — otherwise the ~40K-token combined prompt overflows small contexts, the
+        // truncation loop strips ALL user history, and the model answers the session's first
+        // message on every turn instead of the current one ("every message is a new beginning").
+        int minUserBudget = Math.Clamp(maxTotalPromptTokens / 4, 512, 2048);
+
+        // MoE models (qwen3.6-14B-A3B / qwen35moe, mixtral, deepseek-v2/v3, ...) are prone to
+        // repetition attractors and tangential drift — and the full 20K-char master prompt (43KB
+        // with the tool schema) consumes most of a small context window and measurably pushes
+        // these fragile models into loops and empty responses. They get a COMPACT system prompt
+        // that keeps the persona, personality, tool rules, and stability directives in a fraction
+        // of the space (verified live: compact ~2/3 clean vs full ~1/3 on qwen3.6). Dense models
+        // keep the full master prompt UNLESS it cannot fit alongside a usable conversation
+        // window (see the budget check below), in which case they also fall back to the compact
+        // prompt so session history is never starved out of the context window.
+        string sysPrompt;
+        if (isQwenThinkingModel && !string.IsNullOrWhiteSpace(toolsSchema))
+        {
+            // Qwen thinking models get their native tools prelude PREPENDED. The prelude embeds
+            // the full ~17KB tools schema and teaches the model's native
+            // <tool_call><function=...><parameter=...> format, so the base prompt must (a) NOT
+            // re-embed the schema — duplicating it bloats the system prompt to ~37KB and pushes
+            // fragile MoE models (qwen3.6-14B-A3B) into hard repetition loops (verified live:
+            // dedup 3/3 clean vs doubled 1/3) — and (b) NOT teach the conflicting JSON
+            // <tool_call>{"name":...} format, which makes the model flip-flop between the two
+            // calling styles and destabilize. The compact base is lean and conflict-free, so it
+            // is used for BOTH dense and MoE qwen thinking models.
+            var compactBase = sysPromptManager.BuildCompactSystemPrompt("", personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+            sysPrompt = promptEngine.BuildQwenToolsPrelude(toolsSchema) + "\n\n" + compactBase;
+        }
+        else if (inferenceEngine.IsMixtureOfExperts)
+        {
+            sysPrompt = sysPromptManager.BuildCompactSystemPrompt(toolsSchema, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+        }
+        else
+        {
+            var fullPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+            int fullPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(fullPrompt) : contextOrchestrator.EstimateTokens(fullPrompt);
+            sysPrompt = fullPromptTokens > maxTotalPromptTokens - minUserBudget
+                ? sysPromptManager.BuildCompactSystemPrompt(toolsSchema, personalityMode: SelectedPersonality, isGoalMode: isGoalMode)
+                : fullPrompt;
+        }
+
+        var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
         
-        // Target user budget for conversation history after accounting for system prompt (minimum 4096 tokens floor)
-        int targetUserBudget = Math.Max(4096, maxTotalPromptTokens - sysPromptTokens);
+        // Calculate system prompt size
+        var sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType, qwenThinking: isQwenThinkingModel);
+        int sysPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(sysOnlyPrompt) : contextOrchestrator.EstimateTokens(sysOnlyPrompt);
+
+        // Target user budget for conversation history after accounting for the system prompt.
+        // Never claims more than the context can actually hold — the old Math.Max(4096, ...)
+        // floor demanded 4K of user history even when the system prompt left almost no room,
+        // which forced the strict truncation loop below to strip history (including, worst of
+        // all, the current user message).
+        int targetUserBudget = Math.Clamp(maxTotalPromptTokens - sysPromptTokens, minUserBudget, maxTotalPromptTokens);
 
         var activeMessages = new List<ChatMessage>();
         int currentTokens = 0; // System prompt is excluded from user history budget
@@ -419,24 +545,57 @@ public class ChatEngine(
         // Reserve budget up front for the user's initial prompt goal (activeHistory[0])
         currentTokens += initialUserTokens;
 
-        // Iterate backwards from the most recent history message down to index 1 (skipping initial goal)
+        // Also reserve the CURRENT user message up front — the message this turn must answer,
+        // identified by its exact text (it is added to the history by StreamResponseAsync, so the
+        // last matching User message is always the current turn's message, even after the rolling
+        // compression rewrites the list or tool continuations append after it). Without this, the
+        // backward budget pass (and the strict truncation loop below) could evict it, leaving the
+        // model to answer the session's first message on every turn (the "model treats every
+        // message as a new beginning" bug).
+        int currentUserIndex = -1;
         for (int i = activeHistory.Count - 1; i >= 1; i--)
         {
+            if (activeHistory[i].Role == ChatRole.User && activeHistory[i].Content == currentUserMessage)
+            {
+                currentUserIndex = i;
+                break;
+            }
+        }
+        ChatMessage? currentUserMsg = currentUserIndex >= 0 ? activeHistory[currentUserIndex] : null;
+        int currentUserTokens = currentUserMsg != null ? TokensOf(currentUserMsg) : 0;
+        currentTokens += currentUserTokens;
+
+        // Iterate backwards from the most recent history message down to index 1, skipping the
+        // initial goal (index 0) and the already-reserved current user message. Older messages
+        // are dropped first when the budget runs out, so the tail (tool continuations after the
+        // user's message) and the current message itself always survive.
+        int messagesBeforeCurrent = 0;
+        for (int i = activeHistory.Count - 1; i >= 1; i--)
+        {
+            if (i == currentUserIndex) continue;
             var msg = activeHistory[i];
-            int msgTokens = (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(msg.Content) : contextOrchestrator.EstimateTokens(msg.Content)) + 25; // 25 tokens for template formatting overhead
+            int msgTokens = TokensOf(msg);
             
-            // If an individual tool result message is excessively long (> 3000 chars), create a budget-trimmed variant rather than dropping turn
-            if (msg.Role == ChatRole.User && msg.Content.Length > 3000 && msg.Content.Contains("[Tool Output"))
+            // If an individual tool result message is excessively long (> 3000 chars), create a
+            // budget-trimmed variant rather than dropping the whole turn. Tool results are stored
+            // with ChatRole.Tool; legacy sessions may have them as ChatRole.User with a
+            // "[Tool Output" prefix. Without this, one huge tool result (large file read, big
+            // directory listing) silently evicts ALL older messages from the active window, which
+            // destroys long-horizon coherence.
+            bool isToolOutputMessage = msg.Role == ChatRole.Tool ||
+                                       (msg.Role == ChatRole.User && msg.Content.Contains("[Tool Output", StringComparison.OrdinalIgnoreCase));
+            if (isToolOutputMessage && msg.Content.Length > 3000)
             {
                 string trimmedContent = msg.Content.Substring(0, 2500) + "\n...[Tool output truncated to preserve active context budget]...";
-                msg = new ChatMessage(msg.Role, trimmedContent);
-                msgTokens = (inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(trimmedContent) : contextOrchestrator.EstimateTokens(trimmedContent)) + 25;
+                msg = new ChatMessage(msg.Role, trimmedContent, msg.Name);
+                msgTokens = TokensOf(msg);
             }
 
             if (currentTokens + msgTokens <= targetUserBudget)
             {
                 activeMessages.Insert(0, msg);
                 currentTokens += msgTokens;
+                if (i < currentUserIndex) messagesBeforeCurrent++;
             }
             else
             {
@@ -445,21 +604,26 @@ public class ChatEngine(
             }
         }
 
-        // Always preserve the user's initial prompt goal (activeHistory[0]) at index 0 of active messages
+        // Always preserve the user's initial prompt goal (activeHistory[0]) at index 0 of active
+        // messages, and the current user message at its chronological position (right before any
+        // retained tool-continuation messages that followed it).
         if (initialUserMsg != null)
         {
             activeMessages.Insert(0, initialUserMsg);
         }
+        if (currentUserMsg != null)
+        {
+            activeMessages.Insert(1 + messagesBeforeCurrent, currentUserMsg);
+        }
 
         if (hasDroppedMessages)
         {
-            // C6: Deferred WorldState consolidation — queued via a session-keyed flag and
-            // awaited in GoalOrchestrator between turns to avoid corrupting WorldState while
-            // the very next prompt build is already reading it.
-            _ = Task.Run(async () =>
+            // C6: Deferred WorldState consolidation. The task is stored session-keyed and awaited
+            // at the top of the next StreamResponseAsync for this session, so WorldState is never
+            // read while a consolidation write is still in flight (previously this was fire-and-
+            // forget, which let turn N+1 build its prompt from a half-written WorldState).
+            _pendingConsolidations[generatingSessionId] = Task.Run(async () =>
             {
-                // Brief delay so the current generation completes before consolidation mutates state
-                await Task.Delay(500);
                 try
                 {
                     await contextOrchestrator.ConsolidateWorldStateAsync(generatingSessionId);
@@ -474,39 +638,71 @@ public class ChatEngine(
         var messages = new List<ChatMessage> { sysPromptMsg };
         messages.AddRange(activeMessages);
 
-        var prompt = promptEngine.ApplyTemplate(messages, templateType);
+        var prompt = promptEngine.ApplyTemplate(messages, templateType, qwenThinking: isQwenThinkingModel);
         int finalPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(prompt) : contextOrchestrator.EstimateTokens(prompt);
 
-        // Strict safety truncation loop: Ensure total prompt tokens strictly fit inside maxTotalPromptTokens
-        while (finalPromptTokens > maxTotalPromptTokens && activeMessages.Count > 1)
+        // Strict safety truncation loop: Ensure total prompt tokens strictly fit inside
+        // maxTotalPromptTokens. The previous implementation re-tokenized the ENTIRE (potentially
+        // ~1M token) prompt after every single removal, making the trim O(removals x prompt).
+        // Instead, subtract each removed message's cached token cost (the +25 formatting
+        // allowance approximates the template separators), then do one exact re-tokenize after
+        // the loop to guarantee the strict fit.
+        //
+        // Messages are removed oldest-first (index 1 upward), but the loop must stop with at
+        // least the initial goal message (index 0) AND the current user message (the last one)
+        // intact. The old guard (Count > 1) stripped everything down to the initial message,
+        // silently dropping the message the user just sent once the system prompt overflowed the
+        // budget — the model then answered the session's first message on every turn.
+        bool truncationTrimmed = false;
+        while (finalPromptTokens > maxTotalPromptTokens && activeMessages.Count > 2)
         {
             // Remove message at index 1 (after initial user prompt) to protect activeHistory[0]
+            var removedMsg = activeMessages[1];
             activeMessages.RemoveAt(1);
             hasDroppedMessages = true;
+            truncationTrimmed = true;
+            finalPromptTokens -= TokensOf(removedMsg);
+        }
+        if (truncationTrimmed)
+        {
             messages = new List<ChatMessage> { sysPromptMsg };
             messages.AddRange(activeMessages);
-            prompt = promptEngine.ApplyTemplate(messages, templateType);
+            prompt = promptEngine.ApplyTemplate(messages, templateType, qwenThinking: isQwenThinkingModel);
             finalPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(prompt) : contextOrchestrator.EstimateTokens(prompt);
+
+            // Rare fallback: if the subtract-based estimate still leaves the prompt over budget
+            // (separator tokens heavier than the +25 allowance), keep trimming with exact
+            // re-tokenization so the strict fit contract is never violated. Same invariant as the
+            // main loop: never evict the initial goal or the current user message.
+            while (finalPromptTokens > maxTotalPromptTokens && activeMessages.Count > 2)
+            {
+                activeMessages.RemoveAt(1);
+                hasDroppedMessages = true;
+                messages = new List<ChatMessage> { sysPromptMsg };
+                messages.AddRange(activeMessages);
+                prompt = promptEngine.ApplyTemplate(messages, templateType, qwenThinking: isQwenThinkingModel);
+                finalPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(prompt) : contextOrchestrator.EstimateTokens(prompt);
+            }
         }
 
         var fullResponseBuilder = new StringBuilder();
-        bool isThinking = false;
+        // For qwen thinking models the generation prompt already ends with an OPEN <think> block
+        // (the model continues it, then closes it). Start the state machine INSIDE that block —
+        // otherwise the model's first </think> close tag is treated as plain text and streamed to
+        // the user, and a model that then spams </think> shows "psycho loop" garbage in the chat.
+        bool isThinking = isQwenThinkingModel;
         bool isToolCall = false;
         string unyieldedText = string.Empty;
+        // Accumulates ONLY the text actually shown to the user (non-thinking, non-tool-call).
+        // Used to detect empty/degenerate responses: post-hoc tag-stripping cannot distinguish
+        // reasoning inside the pre-opened think block from real content (the opener tag lives in
+        // the prompt, not the stream), but the state machine below knows exactly which tokens
+        // are visible.
+        var visibleTextBuilder = new StringBuilder();
 
-        logger.LogWarning("[DIAG] StreamResponseInternalAsync: finalPromptTokens={FinalPromptTokens}, targetUserBudget={TargetUserBudget}, contextSize={ContextSize}, activeMessages.Count={ActiveMsgCount}, prompt.Length={PromptLen}",
-            finalPromptTokens, targetUserBudget, (int)inferenceEngine.ContextSize, activeMessages.Count, prompt.Length);
-        logger.LogWarning("[DIAG] Prompt (first 500 chars): {PromptStart}", prompt.Length > 500 ? prompt.Substring(prompt.Length - 500) : prompt);
-
-        int _tokenStreamCount = 0;
         // Stream tokens
         await foreach (var token in inferenceEngine.StreamTokensAsync(prompt, stopTokens, sysPromptTokens, ct))
         {
-            _tokenStreamCount++;
-            if (_tokenStreamCount <= 3)
-            {
-                logger.LogWarning("[DIAG] Token #{Num}: '{Token}'", _tokenStreamCount, token);
-            }
             fullResponseBuilder.Append(token);
             unyieldedText += token;
 
@@ -517,6 +713,24 @@ public class ChatEngine(
                 
                 if (!isToolCall)
                 {
+                    // A closing tag for a thinking block while NO block is open is degenerate
+                    // noise — the model spamming </think> after already closing its think block
+                    // (a common MoE "psycho loop"). Drop the stray close tags silently instead of
+                    // streaming them to the user as visible garbage; the detector + self-
+                    // correction still handle the underlying loop.
+                    if (!isThinking)
+                    {
+                        foreach (var strayClose in StrayThinkCloseTags)
+                        {
+                            int idx;
+                            while ((idx = unyieldedText.IndexOf(strayClose, StringComparison.OrdinalIgnoreCase)) >= 0)
+                            {
+                                unyieldedText = unyieldedText.Remove(idx, strayClose.Length);
+                                processedAny = true;
+                            }
+                        }
+                    }
+
                     int thinkIndex = -1;
                     int thinkTagLen = 0;
                     if (!isThinking)
@@ -575,7 +789,10 @@ public class ChatEngine(
                     {
                         string before = unyieldedText.Substring(0, thinkIndex);
                         if (!string.IsNullOrEmpty(before))
+                        {
                             yield return new ChatStreamEvent(ChatStreamEventType.Token, before);
+                            visibleTextBuilder.Append(before);
+                        }
                         
                         isThinking = true;
                         yield return new ChatStreamEvent(ChatStreamEventType.ThinkingStart, "");
@@ -600,6 +817,24 @@ public class ChatEngine(
                         {
                             if (isThinking) yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, before);
                             else yield return new ChatStreamEvent(ChatStreamEventType.Token, before);
+                            // Only text actually shown to the user counts as visible — thinking
+                            // content before a tool call must not inflate the visible counter
+                            // (it would mask empty responses from the self-correction check).
+                            if (!isThinking) visibleTextBuilder.Append(before);
+                        }
+
+                        // Qwen thinking models commonly emit <tool_call> while still "inside" the
+                        // pre-opened think block (their training allows reasoning before the call,
+                        // and this fine-tune often skips </think>). Treat the tool call as
+                        // implicitly closing the think block: close it in the raw stream so the
+                        // sanitizer keeps the call (an unclosed <think> would otherwise swallow
+                        // everything to end-of-string), and exit thinking mode so the call and
+                        // any follow-up text stream as visible content.
+                        if (isThinking)
+                        {
+                            fullResponseBuilder.Append("</think>");
+                            isThinking = false;
+                            yield return new ChatStreamEvent(ChatStreamEventType.ThinkingEnd, "");
                         }
                         
                         isToolCall = true;
@@ -671,14 +906,22 @@ public class ChatEngine(
                     if (!string.IsNullOrEmpty(safePart))
                     {
                         if (isThinking) yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, safePart);
-                        else yield return new ChatStreamEvent(ChatStreamEventType.Token, safePart);
+                        else
+                        {
+                            yield return new ChatStreamEvent(ChatStreamEventType.Token, safePart);
+                            visibleTextBuilder.Append(safePart);
+                        }
                     }
                     unyieldedText = unyieldedText.Substring(safeLen);
                 }
                 else
                 {
                     if (isThinking) yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, unyieldedText);
-                    else yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
+                    else
+                    {
+                        yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
+                        visibleTextBuilder.Append(unyieldedText);
+                    }
                     
                     unyieldedText = string.Empty;
                 }
@@ -693,21 +936,78 @@ public class ChatEngine(
                 // Stream ended inside a tool call block; suppress yielding raw JSON as plain text to UI
                 unyieldedText = string.Empty;
             }
-            else if (isThinking)
-            {
-                yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, unyieldedText);
-            }
             else
             {
-                yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
+                if (!isThinking)
+                {
+                    // Drop stray think-close tags left over at stream end (see the streaming loop).
+                    foreach (var strayClose in StrayThinkCloseTags)
+                    {
+                        int idx;
+                        while ((idx = unyieldedText.IndexOf(strayClose, StringComparison.OrdinalIgnoreCase)) >= 0)
+                        {
+                            unyieldedText = unyieldedText.Remove(idx, strayClose.Length);
+                        }
+                    }
+                }
+
+                if (isThinking)
+                {
+                    yield return new ChatStreamEvent(ChatStreamEventType.ThinkingToken, unyieldedText);
+                }
+                else if (!string.IsNullOrEmpty(unyieldedText))
+                {
+                    yield return new ChatStreamEvent(ChatStreamEventType.Token, unyieldedText);
+                    visibleTextBuilder.Append(unyieldedText);
+                }
             }
             unyieldedText = string.Empty;
         }
 
-        logger.LogWarning("[DIAG] Token streaming complete. Total tokens received: {Count}, fullResponse.Length={Len}", _tokenStreamCount, fullResponseBuilder.Length);
+        var fullResponse = fullResponseBuilder.ToString();
 
-            var fullResponse = fullResponseBuilder.ToString();
-            logger.LogWarning("[DIAG] fullResponse (first 200 chars): {Resp}", fullResponse.Length > 200 ? fullResponse.Substring(0, 200) : fullResponse);
+            // ── Self-correction: degenerate-loop recovery (esp. MoE / thinking models) ──
+            // MoE models (qwen3.6-14B-A3B / qwen35moe, mixtral, deepseek-v2/v3, ...) can fall
+            // into repetition attractors: think-tag spam, token stutter, or n-gram loops.
+            // InferenceEngine stops the token stream when GenerationLoopDetector fires and
+            // exposes LastGenerationLoopInfo. Here we truncate the looped tail from the
+            // response, inject a corrective instruction into history, and regenerate — bounded
+            // by MaxSelfCorrectionsPerTurn so a pathological model cannot spin forever.
+            var loopInfo = inferenceEngine.LastGenerationLoopInfo;
+            bool loopTruncated = false;
+            string? loopCorrection = null;
+            if (loopInfo != null)
+            {
+                logger.LogWarning("Degenerate generation loop detected ({Reason}): loop starts at char {LoopStart} of {Len} generated chars. Truncating looped tail.",
+                    loopInfo.Reason, loopInfo.LoopStartChar, fullResponse.Length);
+                if (loopInfo.LoopStartChar > 0 && loopInfo.LoopStartChar < fullResponse.Length)
+                {
+                    fullResponse = fullResponse.Substring(0, loopInfo.LoopStartChar);
+                }
+                else if (loopInfo.LoopStartChar <= 0)
+                {
+                    fullResponse = string.Empty; // the entire output was degenerate
+                }
+                // else: the loop begins at/after the last delivered char (the triggering token is
+                // never streamed), so the delivered response is clean and is kept as-is.
+                loopTruncated = true;
+
+                if (selfCorrectionsThisTurn < MaxSelfCorrectionsPerTurn)
+                {
+                    selfCorrectionsThisTurn++;
+                    // Corrections escalate: the first is a gentle redirect, the second demands a
+                    // short direct answer, the third is a final hard bound — a model that keeps
+                    // re-entering the same attractor needs progressively stronger instructions.
+                    loopCorrection = BuildSelfCorrectionInstruction(loopInfo.Reason, selfCorrectionsThisTurn);
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, $"⚠ {DescribeLoop(loopInfo.Reason)} detected — discarding looped output and self-correcting…");
+                }
+                else if (!rescueTriggered)
+                {
+                    // Corrections exhausted and the model is still looping — mark that a rescue
+                    // generation is wanted (activated after the truncated response is stored).
+                    rescueRequested = true;
+                }
+            }
 
             // Strip raw thinking tags and antml system tags so history stored in context does not poison future turns
             var cleanHistoryResponse = OutputSanitizer.CleanHistoryResponse(fullResponse);
@@ -716,19 +1016,82 @@ public class ChatEngine(
                 cleanHistoryResponse = OutputSanitizer.SanitizeText(fullResponse);
             }
 
-            var assistantMsgObj = new ChatMessage(ChatRole.Assistant, cleanHistoryResponse);
-            activeHistory.Add(assistantMsgObj);
-            if (CurrentSessionId == generatingSessionId && !_history.Contains(assistantMsgObj))
-            {
-                _history.Add(assistantMsgObj);
-            }
-            // H7: Strip tool call blocks from the stored message so that re-summarization of
-            // older context does not inject raw tool JSON into the WorldState.
-            var storedResponse = OutputSanitizer.CleanHistoryResponse(fullResponse);
-            await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, storedResponse, 0, null);
+            // CONTEXT-INJECTION FIX: for qwen thinking models the stored assistant message must be
+            // the model's raw output VERBATIM (prefixed with the pre-opened <think> block). The
+            // generation prompt ends with "<|im_start|>assistant\n<think>\n" and the model
+            // CONTINUES that block, so storing it clean strips the reasoning and the next
+            // iteration's prompt diverges from what the KV cache already evaluated -> the engine
+            // takes the partial-prefix path, the M-RoPE rewind fails (InvalidInputBatch), and the
+            // ENTIRE prompt (system + world state + full history) gets re-prefilled after every
+            // tool call and think cycle. With verbatim storage the next prompt rebuilds EXACTLY
+            // the evaluated text, the engine hits the exact-prefix path, and only the delta
+            // (tool result / next message) is evaluated. The UI already renders stored messages
+            // via SplitThinkingContent, which expects the raw <think> tags.
+            var assistantContent = isQwenThinkingModel && !string.IsNullOrWhiteSpace(fullResponse)
+                ? "<think>\n" + fullResponse
+                : cleanHistoryResponse;
 
-            // Parse for tool calls
-            var toolCallRequests = ParseToolCalls(fullResponse);
+            var assistantMsgObj = new ChatMessage(ChatRole.Assistant, assistantContent);
+            if (loopTruncated && string.IsNullOrWhiteSpace(assistantContent))
+            {
+                // The entire output was degenerate; storing an empty assistant message would
+                // just pollute the context. The correction below carries the turn forward.
+            }
+            else
+            {
+                activeHistory.Add(assistantMsgObj);
+                if (CurrentSessionId == generatingSessionId)
+                {
+                    _history.Add(assistantMsgObj);
+                }
+                // H7: Strip tool call blocks from the stored message so that re-summarization of
+                // older context does not inject raw tool JSON into the WorldState.
+                var storedResponse = isQwenThinkingModel && !string.IsNullOrWhiteSpace(fullResponse)
+                    ? "<think>\n" + fullResponse
+                    : OutputSanitizer.CleanHistoryResponse(fullResponse);
+                await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, storedResponse, 0, null);
+            }
+
+            // If a degenerate loop was corrected, inject the self-correction instruction and
+            // regenerate. The truncated (garbage-free) assistant message is already in history,
+            // so the rebuild prompt shows the model what it wrote before it started looping.
+            if (loopCorrection != null)
+            {
+                logger.LogWarning("Injecting self-correction instruction and regenerating (correction {Count} of {Max} this turn).", selfCorrectionsThisTurn, MaxSelfCorrectionsPerTurn);
+                var correctionMsg = new ChatMessage(ChatRole.User, loopCorrection);
+                activeHistory.Add(correctionMsg);
+                if (CurrentSessionId == generatingSessionId)
+                {
+                    _history.Add(correctionMsg);
+                }
+                await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, loopCorrection, 0, null);
+                continue;
+            }
+
+            if (rescueRequested)
+            {
+                // Activate rescue mode: strip the tools + think opener for the next generation.
+                // isQwenThinkingModel gates both the qwen tools prelude and the pre-opened
+                // <think> in ApplyTemplate, so flipping it off yields a plain direct answer.
+                rescueTriggered = true;
+                isQwenThinkingModel = false;
+                sysPromptMsg = rescueSysMsg;
+                logger.LogWarning("Loop corrections exhausted ({Max}) and output is still degenerate. Switching to rescue mode: plain direct answer without tools or thinking blocks.", MaxSelfCorrectionsPerTurn);
+                yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model keeps looping — one final attempt with a plain direct answer…");
+                continue;
+            }
+
+            // Parse tool calls from the think-stripped response ONLY. Reasoning inside <think>
+            // blocks routinely contains JSON shaped like {"name": ...} / {"tool": ...} or
+            // "Input: {...}" planning lines, which ParseToolCalls' loose fallback regexes
+            // misread as real tool calls. Each phantom match executes a tool and re-runs the
+            // whole turn loop (full prompt rebuild + re-inference) — the "model gets injected
+            // every time it uses think tags" slowdown. Real <tool_call> tags are emitted
+            // outside think blocks and survive CleanHistoryResponse untouched.
+            // Visible (think-stripped) response — used for BOTH tool-call parsing and the
+            // truncation heuristics, so reasoning content can never drive either decision.
+            var visibleResponse = OutputSanitizer.CleanHistoryResponse(fullResponse);
+            var toolCallRequests = ParseToolCalls(visibleResponse);
             
             if (toolCallRequests.Count > 0)
             {
@@ -827,12 +1190,19 @@ public class ChatEngine(
                     break;
                 }
             }
-            else if (Regex.IsMatch(fullResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
+            else if (Regex.IsMatch(visibleResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
             {
                 // Assistant attempted a tool call tag but parsing produced 0 valid requests.
                 // Do not exit loop prematurely; provide feedback so the model can self-correct on the next iteration.
-                logger.LogWarning("Assistant emitted <tool_call> tag but JSON parsing failed.");
-                var parseErrorMsg = "[Tool Error: Failed to parse <tool_call> JSON. Please ensure arguments are valid JSON with 'name' and 'arguments'.]";
+                logger.LogWarning("Assistant emitted <tool_call> tag but parsing failed.");
+                // For qwen thinking models the tool format is NATIVE (not JSON): the model opens
+                // <tool_call> and must continue with <function=NAME><parameter=K>value</parameter>
+                // </function></tool_call>. Telling it to fix "JSON with 'name' and 'arguments'"
+                // misleads it into the wrong format (a common failure: it emits a bare
+                // <tool_call> and stops). Give format-specific feedback for each template family.
+                var parseErrorMsg = isQwenThinkingModel
+                    ? "[Tool Error: Your tool call is INCOMPLETE — you opened <tool_call> but did not finish it. Complete it using the native format: <tool_call><function=TOOL_NAME><parameter=ARG_NAME>value</parameter></function></tool_call>. Required parameters must be included. Do NOT use JSON inside the tags.]"
+                    : "[Tool Error: Failed to parse <tool_call> JSON. Please ensure arguments are valid JSON with 'name' and 'arguments'.]";
                 var parseErrMsgObj = new ChatMessage(ChatRole.Tool, parseErrorMsg);
                 activeHistory.Add(parseErrMsgObj);
                 if (CurrentSessionId == generatingSessionId) _history.Add(parseErrMsgObj);
@@ -841,16 +1211,49 @@ public class ChatEngine(
             }
             else
             {
-                // Check if generation ended prematurely mid-response (truncated before completing output)
-                bool isTruncatedMidGeneration = IsTruncatedMidGeneration(fullResponse);
-                if (isTruncatedMidGeneration && iterationCount < MAX_ITERATIONS)
+                // Check if generation ended prematurely mid-response (truncated before completing output).
+                // The continuation instruction is injected at most ONCE per turn: re-injecting it on
+                // every subsequent iteration (each of which rebuilds and re-prefills the whole prompt)
+                // is what made thinking models crawl — one truncated-looking response cascades into
+                // repeated full-context re-injections.
+                bool isTruncatedMidGeneration = IsTruncatedMidGeneration(fullResponse, visibleResponse);
+                if (isTruncatedMidGeneration && iterationCount < MAX_ITERATIONS && !continuationInjectedThisTurn)
                 {
+                    continuationInjectedThisTurn = true;
                     logger.LogInformation("Output generation cut off mid-sentence/section. Triggering auto-continuation iteration.");
                     var continuationInstruction = "[System Instruction: Your previous output was truncated mid-generation due to output token constraints. Continue immediately from the exact point of truncation without repeating any previously written text.]";
                     var continuationMsgObj = new ChatMessage(ChatRole.User, continuationInstruction);
                     activeHistory.Add(continuationMsgObj);
                     if (CurrentSessionId == generatingSessionId) _history.Add(continuationMsgObj);
                     await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, continuationInstruction, 0, null);
+                }
+                else if (string.IsNullOrWhiteSpace(visibleTextBuilder.ToString()) && selfCorrectionsThisTurn < MaxSelfCorrectionsPerTurn)
+                {
+                    // Empty/degenerate response: the model closed its think block and produced no
+                    // actual visible content (reasoning alone does not count — the user sees
+                    // nothing). Ending the turn here would silently deliver nothing — treat it
+                    // like a loop and self-correct instead.
+                    selfCorrectionsThisTurn++;
+                    logger.LogWarning("Model produced an empty visible response. Injecting empty-response self-correction (correction {Count} of {Max} this turn).",
+                        selfCorrectionsThisTurn, MaxSelfCorrectionsPerTurn);
+                    var emptyCorrection = "[System Self-Correction: Your previous response was EMPTY — you produced no actual content. Re-read the user's message carefully and respond DIRECTLY with a real answer. Do not just close tags or emit whitespace.]";
+                    var emptyMsgObj = new ChatMessage(ChatRole.User, emptyCorrection);
+                    activeHistory.Add(emptyMsgObj);
+                    if (CurrentSessionId == generatingSessionId) _history.Add(emptyMsgObj);
+                    await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, emptyCorrection, 0, null);
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model produced an empty response — self-correcting…");
+                }
+                else if (string.IsNullOrWhiteSpace(visibleTextBuilder.ToString()) && !rescueTriggered)
+                {
+                    // Empty responses exhausted the correction budget — rescue mode: plain
+                    // direct answer without tools or thinking blocks (see the rescue activation
+                    // above). One final attempt so the user is never left with nothing.
+                    rescueTriggered = true;
+                    isQwenThinkingModel = false;
+                    sysPromptMsg = rescueSysMsg;
+                    logger.LogWarning("Empty-response corrections exhausted ({Max}). Switching to rescue mode: plain direct answer without tools or thinking blocks.", MaxSelfCorrectionsPerTurn);
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model keeps producing empty responses — one final attempt with a plain direct answer…");
+                    continue;
                 }
                 else
                 {
@@ -868,36 +1271,87 @@ public class ChatEngine(
         yield return new ChatStreamEvent(ChatStreamEventType.StreamEnd, "");
     }
 
-    private static bool IsTruncatedMidGeneration(string fullResponse)
+    /// <summary>
+    /// Builds the corrective instruction injected into history when a degenerate loop is
+    /// detected. The message is reason-specific so the model knows exactly what it did wrong
+    /// (tag spam vs token stutter vs phrase cycling) and how to recover.
+    /// </summary>
+    private static string BuildSelfCorrectionInstruction(string reason, int attempt) => attempt >= 3
+        ? "[System Self-Correction: FINAL WARNING — you are STILL repeating the same output in a loop. You MUST now respond with exactly ONE short sentence that directly answers the user's latest message. No thinking tags, no tool calls, no repetition. Nothing else.]"
+        : attempt == 2
+            ? "[System Self-Correction: You are STILL looping on the same output. STOP generating repetitive text immediately. Re-read the user's original message and answer it DIRECTLY in under 50 words — no thinking tags, no tool calls, no preamble. Your previous looped text has been discarded.]"
+            : reason switch
+            {
+                "ToolCallSpam" => "[System Self-Correction: You began emitting tool-call tags without completing a call. Stop. Re-read the user's request, choose at most ONE tool from the available schema, and emit exactly one complete, well-formed tool call — or answer directly without tools. Do not repeat any tags you already emitted.]",
+                "TagSpam" => "[System Self-Correction: You began repeating an opening tag (e.g. <think>) without reasoning. Stop emitting tags. Re-read the user's message, reason ONCE inside a single thinking block if your format requires it, then respond directly and concisely. Do not repeat any tags or text you already generated.]",
+                "RepetitionStutter" => "[System Self-Correction: You began repeating the same word/token in a loop (degenerate repetition). Stop immediately. Re-read the user's message and respond afresh with a short, direct answer. Do not repeat anything you already wrote.]",
+                "NGramLoop" => "[System Self-Correction: You entered a repetitive loop, cycling the same phrase over and over. Stop immediately, re-read the user's latest message, and produce a fresh, concise response that does not reuse the repeated phrase.]",
+                "SemanticLoop" => "[System Self-Correction: You began repeating the same content over and over in different words. Stop immediately. Re-read the user's message and produce ONE fresh, concise answer that does not re-state anything you already wrote.]",
+                "PaddingLoop" => "[System Self-Correction: You began emitting filler/whitespace in a loop. Stop immediately and respond directly to the user's message with substance.]",
+                _ => "[System Self-Correction: You began looping on the same output. Stop immediately, re-read the user's message, and respond afresh and concisely. Do not repeat previous text.]"
+            };
+
+    /// <summary>
+    /// Short human-readable description of a loop reason, used for the user-visible notice.
+    /// </summary>
+    private static string DescribeLoop(string reason) => reason switch
+    {
+        "ToolCallSpam" => "repeated tool-call tags",
+        "TagSpam" => "repeated tag spam",
+        "RepetitionStutter" => "token repetition",
+        "NGramLoop" => "a repetitive phrase loop",
+        "SemanticLoop" => "repeated content (paraphrased loop)",
+        "PaddingLoop" => "filler/whitespace repetition",
+        _ => "a degenerate output loop"
+    };
+
+    /// <summary>
+    /// Decides whether a finished generation was cut off prematurely and should be continued.
+    /// Truncation heuristics run against the VISIBLE (think-stripped) text so that reasoning
+    /// content inside &lt;think&gt; blocks can never trigger a continuation, while an unclosed
+    /// thinking block on the raw stream is itself treated as truncation (the model was cut
+    /// mid-reasoning). The caller bounds the continuation to once per turn.
+    /// </summary>
+    private static bool IsTruncatedMidGeneration(string fullResponse, string cleanResponse)
     {
         if (string.IsNullOrWhiteSpace(fullResponse)) return false;
 
         var trimmed = fullResponse.TrimEnd();
         if (trimmed.Length == 0) return false;
 
+        // 0. Unclosed thinking block: the model was cut off mid-reasoning. Even if the visible
+        //    text is complete (or empty), the turn did not end naturally, so continue once.
+        if (IsUnclosedThinkBlock(trimmed))
+        {
+            return true;
+        }
+
+        var cleanTrimmed = cleanResponse.TrimEnd();
+        if (cleanTrimmed.Length == 0) return false;
+
         // 1. Incomplete/truncated tool call tag (e.g. model started emitting <tool_call... but got cut off before tag closed)
-        if ((trimmed.Contains("<tool_call") && !trimmed.Contains("</tool_call>") && !trimmed.Contains("/>")) ||
-            (trimmed.Contains("<|tool_call") && !trimmed.Contains("</|tool_call|>") && !trimmed.Contains("<|/tool_call|>")))
+        if ((cleanTrimmed.Contains("<tool_call") && !cleanTrimmed.Contains("</tool_call>") && !cleanTrimmed.Contains("/>")) ||
+            (cleanTrimmed.Contains("<|tool_call") && !cleanTrimmed.Contains("</|tool_call|>") && !cleanTrimmed.Contains("<|/tool_call|>")))
         {
             return true;
         }
 
         // 2. Interrupted markdown section header or table divider cut off mid-structure
-        if (trimmed.EndsWith("----------------------------------------") ||
-            trimmed.EndsWith("========================================"))
+        if (cleanTrimmed.EndsWith("----------------------------------------") ||
+            cleanTrimmed.EndsWith("========================================"))
         {
             return true;
         }
 
         // M2: 3. Unclosed markdown code fence (odd number of triple-backtick fences)
-        var fenceCount = System.Text.RegularExpressions.Regex.Matches(trimmed, @"^```", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
+        var fenceCount = System.Text.RegularExpressions.Regex.Matches(cleanTrimmed, @"^```", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
         if (fenceCount % 2 != 0)
         {
             return true;
         }
 
         // M2: 4. Mid-sentence cutoff — no terminal punctuation or closing bracket on final non-empty line
-        var lastNonEmpty = trimmed.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.TrimEnd();
+        var lastNonEmpty = cleanTrimmed.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.TrimEnd();
         if (!string.IsNullOrEmpty(lastNonEmpty) && lastNonEmpty.Length > 20)
         {
             char lastChar = lastNonEmpty[^1];
@@ -911,6 +1365,45 @@ public class ChatEngine(
         }
 
         return false;
+    }
+
+    private static readonly string[] ThinkStartTags = new[]
+    {
+        "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]",
+        "{antml:thinking_mode}", "<antml:thinking_mode>", "{thinking_mode}", "<thinking_mode>"
+    };
+
+    private static readonly string[] ThinkEndTags = new[]
+    {
+        "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>",
+        "[/THINK]", "[/THOUGHT]", "{/antml:thinking_mode}", "</antml:thinking_mode>", "{/thinking_mode}", "</thinking_mode>"
+    };
+
+    /// <summary>
+    /// Closing tags that are dropped silently when NO thinking block is open (see the streaming
+    /// loop) — a model spamming </think> after already closing its block is the classic MoE
+    /// "psycho loop", and those tags must never reach the user as visible chat text.
+    /// </summary>
+    private static readonly string[] StrayThinkCloseTags = ThinkEndTags;
+
+    /// <summary>
+    /// True when the text contains an opening thinking tag whose matching close tag never appears.
+    /// </summary>
+    private static bool IsUnclosedThinkBlock(string text)
+    {
+        int lastStart = -1;
+        int lastEnd = -1;
+        foreach (var tag in ThinkStartTags)
+        {
+            int idx = text.LastIndexOf(tag, StringComparison.OrdinalIgnoreCase);
+            if (idx > lastStart) lastStart = idx;
+        }
+        foreach (var tag in ThinkEndTags)
+        {
+            int idx = text.LastIndexOf(tag, StringComparison.OrdinalIgnoreCase);
+            if (idx > lastEnd) lastEnd = idx;
+        }
+        return lastStart > lastEnd;
     }
 
     private string GetCanonicalArgsHash(IDictionary<string, object>? args)
@@ -1000,10 +1493,67 @@ public class ChatEngine(
         return result;
     }
 
+    /// <summary>
+    /// Parses a qwen native <parameter> value: JSON objects/arrays (rendered by the template with
+    /// tojson) become parsed values; anything else stays a plain string.
+    /// </summary>
+    private static object? TryParseQwenNativeJsonValue(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var trimmed = raw.Trim();
+        if (!trimmed.StartsWith("{", StringComparison.Ordinal) && !trimmed.StartsWith("[", StringComparison.Ordinal))
+        {
+            return null; // scalar: keep as string
+        }
+        try
+        {
+            using var doc = JsonDocument.Parse(trimmed, new JsonDocumentOptions { AllowTrailingCommas = true });
+            return doc.RootElement.Clone();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private List<ToolCallRequest> ParseToolCalls(string response)
     {
         var results = new List<ToolCallRequest>();
         if (string.IsNullOrWhiteSpace(response)) return results;
+
+        // 0. Qwen-native format (qwen35/qwen35moe models): <tool_call><function=NAME><parameter=K>
+        // value</parameter>...</function></tool_call>. The embedded qwen template emits this exact
+        // structure when tools are provided; it is NOT JSON, so it must be parsed before the
+        // JSON heuristics below. Returns immediately when found — the native format is
+        // unambiguous and the loose JSON fallbacks must never run on it.
+        {
+            var nativeMatches = Regex.Matches(response,
+                @"<tool_call>\s*<function=([a-zA-Z0-9_.\-]+)>(.*?)</function>\s*</tool_call>",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            if (nativeMatches.Count > 0)
+            {
+                foreach (Match match in nativeMatches)
+                {
+                    var name = match.Groups[1].Value.Trim();
+                    var args = new Dictionary<string, object>();
+                    foreach (Match pm in Regex.Matches(match.Groups[2].Value,
+                        @"<parameter=([a-zA-Z0-9_]+)>(.*?)</parameter>",
+                        RegexOptions.Singleline | RegexOptions.IgnoreCase))
+                    {
+                        var key = pm.Groups[1].Value.Trim();
+                        var rawVal = System.Net.WebUtility.HtmlDecode(pm.Groups[2].Value.Trim());
+                        // The template renders complex values (objects/arrays) with tojson; keep
+                        // plain scalars as strings.
+                        args[key] = TryParseQwenNativeJsonValue(rawVal) ?? rawVal;
+                    }
+                    if (!string.IsNullOrEmpty(name) && args.Count > 0)
+                    {
+                        results.Add(new ToolCallRequest(name, args));
+                    }
+                }
+                return results;
+            }
+        }
 
         var blocksToParse = new List<string>();
 

@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -18,7 +19,9 @@ public class CamoufoxManager
     private readonly HttpClient _httpClient;
     private readonly string _camoufoxDir;
 
-    private const string DefaultGitHubReleaseUrl = "https://github.com/daijro/camoufox/releases/download/v0.6.1/camoufox-win64.zip";
+    private const string DefaultGitHubReleaseUrl = "https://github.com/daijro/camoufox/releases/download/v152.0.4-beta.28/camoufox-152.0.4-beta.28-win.x86_64.zip";
+    private const string LatestReleasesApiUrl = "https://api.github.com/repos/daijro/camoufox/releases/latest";
+
     public static string ReleaseUrl => Environment.GetEnvironmentVariable("CAMOUFOX_RELEASE_URL") ?? DefaultGitHubReleaseUrl;
 
     public CamoufoxManager(ILogger<CamoufoxManager> logger, HttpClient httpClient)
@@ -84,7 +87,10 @@ public class CamoufoxManager
         var zipPath = Path.Combine(_camoufoxDir, "camoufox-download.zip");
         try
         {
-            using var response = await _httpClient.GetAsync(ReleaseUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            var releaseUrl = await ResolveReleaseUrlAsync(ct);
+            _logger.LogInformation("Downloading Camoufox from: {Url}", releaseUrl);
+
+            using var response = await _httpClient.GetAsync(releaseUrl, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Camoufox download request returned HTTP status {StatusCode}", response.StatusCode);
@@ -122,5 +128,54 @@ public class CamoufoxManager
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Resolves the download URL for Camoufox. Prefers the CAMOUFOX_RELEASE_URL environment
+    /// override, otherwise queries the GitHub latest-release API for the current Windows asset
+    /// (the hardcoded fallback is only a last resort).
+    /// </summary>
+    private async Task<string> ResolveReleaseUrlAsync(CancellationToken ct)
+    {
+        var envUrl = Environment.GetEnvironmentVariable("CAMOUFOX_RELEASE_URL");
+        if (!string.IsNullOrWhiteSpace(envUrl)) return envUrl;
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleasesApiUrl);
+            request.Headers.TryAddWithoutValidation("User-Agent", "KlydisAssistant/1.0");
+
+            using var response = await _httpClient.SendAsync(request, ct);
+            if (response.IsSuccessStatusCode)
+            {
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                if (doc.RootElement.TryGetProperty("assets", out var assets))
+                {
+                    foreach (var asset in assets.EnumerateArray())
+                    {
+                        if (!asset.TryGetProperty("name", out var nameElement) ||
+                            !asset.TryGetProperty("browser_download_url", out var urlElement))
+                        {
+                            continue;
+                        }
+
+                        var name = nameElement.GetString();
+                        if (name != null &&
+                            (name.EndsWith("win.x86_64.zip", StringComparison.OrdinalIgnoreCase) ||
+                             name.EndsWith("win64.zip", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            _logger.LogInformation("Resolved Camoufox release asset: {Name}", name);
+                            return urlElement.GetString()!;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to resolve Camoufox latest release from GitHub API.");
+        }
+
+        return DefaultGitHubReleaseUrl;
     }
 }

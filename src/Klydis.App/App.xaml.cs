@@ -55,38 +55,24 @@ public partial class App : Application
         // flash of the default palette.
         ServiceProvider.GetRequiredService<ThemeService>().LoadAndApplyPersistedTheme();
 
+        // Show the splash IMMEDIATELY — the frontend is alive while the backend initializes
+        // behind it. Previously every startup step (native engine sync, GitHub update check,
+        // model library scan, DB / RAG / skills init) completed before ANY window appeared, so
+        // a slow backend meant minutes of blank screen. StartupSequence reports each phase
+        // into the splash, then we hand over to the main window.
+        var splash = new Views.SplashWindow();
+        Application.Current.MainWindow = splash;
+        splash.Show();
+
         try
         {
-            // Initialize required core services
-            var modelRegistry = ServiceProvider.GetRequiredService<ModelRegistry>();
-            var modelDiscovery = ServiceProvider.GetRequiredService<ModelDiscoveryService>();
-            
-            modelDiscovery.ModelDiscovered += (path) => { _ = modelRegistry.SyncWithDiskAsync(); };
-            modelDiscovery.ModelDeleted += (path) => { _ = modelRegistry.SyncWithDiskAsync(); };
-
-            await modelRegistry.LoadAsync();
-            await modelRegistry.SyncWithDiskAsync();
-
-            var messageStore = ServiceProvider.GetRequiredService<Klydis.Core.Memory.MessageStore>();
-            await messageStore.InitializeAsync();
-
-            // C2/C3: Repair broken chrome-navigator and weather-fetcher scripts on every launch.
-            // CreateCustomToolAsync uses ON CONFLICT DO UPDATE so this is fully idempotent.
-            await messageStore.RepairBrokenCustomToolsAsync();
-
-            var vectorStore = ServiceProvider.GetRequiredService<Klydis.Core.RAG.VectorStore>();
-            await vectorStore.InitializeAsync();
-
-            var orchestrator = ServiceProvider.GetRequiredService<Klydis.Core.Memory.ContextOrchestrator>();
-            orchestrator.HybridRetriever = ServiceProvider.GetRequiredService<Klydis.Core.RAG.HybridRetriever>();
-
-            var skillLibraryManager = ServiceProvider.GetRequiredService<Klydis.Core.Skills.SkillLibraryManager>();
-            await skillLibraryManager.InitializeAsync();
+            var startup = new Services.StartupSequence(ServiceProvider, splash);
+            await startup.RunAsync();
         }
         catch (Exception ex)
         {
             var logger = ServiceProvider.GetRequiredService<ILogger<App>>();
-            logger.LogError(ex, "Failed to initialize core services on startup.");
+            logger.LogError(ex, "Startup sequence failed.");
         }
 
         try
@@ -97,6 +83,7 @@ public partial class App : Application
             Application.Current.MainWindow = mainWindow;
             mainWindow.Show();
             Console.WriteLine("3. Shown MainWindow");
+            splash.Close();
         }
         catch (Exception ex)
         {
@@ -173,8 +160,9 @@ public partial class App : Application
                 sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
                 sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>()
             );
-            // AutoPilot: agent has full system-level access — no approval gates,
-            // no risky-keyword blocklist. Matches the requireAdministrator UAC manifest.
+            // AutoPilot: app-level policy - no approval gates, no risky-keyword
+            // blocklist. This is Klydis's own risk gating, independent of OS
+            // privileges (the app itself runs asInvoker, no UAC elevation).
             toolExecutor.CurrentRiskLevel = RiskLevel.AutoPilot;
             return toolExecutor;
         });
@@ -217,13 +205,20 @@ public partial class App : Application
 
     protected override async void OnExit(ExitEventArgs e)
     {
-        if (ServiceProvider is IAsyncDisposable asyncDisposable)
+        try
         {
-            await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+            if (ServiceProvider is IAsyncDisposable asyncDisposable)
+            {
+                await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+            }
+            else if (ServiceProvider is IDisposable disposable)
+            {
+                disposable.Dispose();
+            }
         }
-        else if (ServiceProvider is IDisposable disposable)
+        catch (Exception ex)
         {
-            disposable.Dispose();
+            System.Diagnostics.Debug.WriteLine($"OnExit disposal error: {ex.Message}");
         }
 
         base.OnExit(e);

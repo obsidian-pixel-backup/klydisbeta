@@ -51,7 +51,17 @@ public class PromptTemplateEngine
     /// <summary>
     /// Formats a list of messages into a single prompt string based on the specified template.
     /// </summary>
-    public string ApplyTemplate(IList<ChatMessage> messages, ChatTemplate template)
+    /// <param name="messages">The chat messages to format.</param>
+    /// <param name="template">The chat template style.</param>
+    /// <param name="qwenThinking">
+    /// When true (Qwen3.5/Qwen3.6 thinking models), the generation prompt is extended with an
+    /// OPEN <see cref="&lt;think&gt;"/> block. These models' embedded templates end the prompt
+    /// with "&lt;|im_start|&gt;assistant\n&lt;think&gt;\n" — the model is trained to CONTINUE
+    /// the opened reasoning block, then close it with "&lt;/think&gt;". Without the opener the
+    /// model has to emit the tag itself and degenerates into spamming &lt;think&gt; instead of
+    /// reasoning or calling tools.
+    /// </param>
+    public string ApplyTemplate(IList<ChatMessage> messages, ChatTemplate template, bool qwenThinking = false)
     {
         var sb = new StringBuilder();
 
@@ -281,7 +291,82 @@ public class PromptTemplateEngine
                 break;
         }
 
+        if (qwenThinking)
+        {
+            sb.Append("<think>\n");
+        }
+
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Builds the Qwen-native tool-calling prelude — the exact text the embedded Qwen3.5/3.6
+    /// chat template emits when a <c>tools</c> list is supplied. Presenting tools in this format
+    /// (OpenAI-style JSON schema inside &lt;tools&gt; + the native &lt;tool_call&gt;
+    /// &lt;function=...&gt;&lt;parameter=...&gt; calling instructions) makes these models emit their
+    /// native tool-call format instead of degenerating, and activates their trained
+    /// thinking-with-tools behavior.
+    /// </summary>
+    /// <param name="toolsJson">The OpenAI-compatible JSON schema array (from ToolExecutor.FormatToolsForPrompt).</param>
+    public string BuildQwenToolsPrelude(string toolsJson)
+    {
+        // The embedded Qwen3.5/3.6 template renders each tool as ONE compact JSON object per
+        // line inside <tools> ({{- tool | tojson }} per tool — no array brackets, no commas).
+        // FormatToolsForPrompt returns a single indented JSON array, which does NOT match the
+        // trained layout and measurably destabilizes tool calling. Render it the way the
+        // template does: split the array into per-object compact lines.
+        string toolsBlock = toolsJson;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(toolsJson);
+            if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var lines = new List<string>();
+                foreach (var tool in doc.RootElement.EnumerateArray())
+                {
+                    lines.Add(tool.GetRawText());
+                }
+                if (lines.Count > 0) toolsBlock = string.Join("\n", lines);
+            }
+        }
+        catch
+        {
+            // Not valid JSON — keep the raw text as-is.
+        }
+
+        return string.Join("\n", new[]
+        {
+            "# Tools",
+            "",
+            "You have access to the following functions:",
+            "",
+            "<tools>",
+            toolsBlock,
+            "</tools>",
+            "",
+            "If you choose to call a function ONLY reply in the following format with NO suffix:",
+            "",
+            "<tool_call>",
+            "<function=example_function_name>",
+            "<parameter=example_parameter_1>",
+            "value_1",
+            "</parameter>",
+            "<parameter=example_parameter_2>",
+            "This is the value for the second parameter",
+            "that can span",
+            "multiple lines",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+            "",
+            "<IMPORTANT>",
+            "Reminder:",
+            "- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags",
+            "- Required parameters MUST be specified",
+            "- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after",
+            "- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls",
+            "</IMPORTANT>"
+        });
     }
 
     /// <summary>
@@ -298,6 +383,19 @@ public class PromptTemplateEngine
         if (!string.IsNullOrWhiteSpace(templateOverride) && Enum.TryParse<ChatTemplate>(templateOverride, true, out var parsedOverride))
         {
             return parsedOverride;
+        }
+
+        // 1.5 Architecture first for the qwen family. Qwen3.x thinking models (qwen35 / qwen35moe
+        // / qwen3-next, ...) use ChatML-style embedded templates (<|im_start|>), so the generic
+        // ChatML check below would otherwise shadow them — and without ChatTemplate.Qwen the
+        // pre-opened <think> block and native <tool_call> tools prelude are never applied, which
+        // makes qwen3.6 fall into think-tag spam, flub tool calls, and loop. Architecture is the
+        // authoritative base-family signal; callers further gate the thinking behavior on the
+        // template's <tool_call> marker, so plain qwen2/2.5 models are unaffected.
+        if (!string.IsNullOrWhiteSpace(architecture) &&
+            architecture.Contains("qwen", StringComparison.OrdinalIgnoreCase))
+        {
+            return ChatTemplate.Qwen;
         }
 
         // 2. Embedded GGUF template string inspection

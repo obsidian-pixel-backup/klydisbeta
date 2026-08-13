@@ -26,12 +26,20 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
     private InteractiveExecutor? _draftExecutor;
     private readonly SemaphoreSlim _draftLock = new(1, 1);
     private readonly NGramLookupEngine _ngramEngine = new();
+    private volatile bool _isDisposed;
 
     private int _activeDraftCount = 0;
     private readonly object _draftStateLock = new();
     private TaskCompletionSource<bool>? _draftZeroActiveTcs;
 
     public bool IsLoaded => _draftWeights != null && _draftContext != null;
+
+    /// <summary>
+    /// True when speculative decoding is active via the zero-VRAM N-gram prompt-lookup
+    /// fallback (no draft model loaded). Set by InferenceEngine based on draft resolution.
+    /// </summary>
+    public bool IsNGramFallbackEnabled { get; set; }
+
     public string? LoadedDraftPath { get; private set; }
     public NGramLookupEngine NGramEngine => _ngramEngine;
 
@@ -51,18 +59,31 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
     public float AcceptanceRate { get; private set; } = 0.5f;
 
     /// <summary>
-    /// Gets the dynamic candidate window K in [2, 10] calculated from rolling acceptance rate alpha.
+    /// Gets the dynamic candidate window K in [2, maxWindow] calculated from rolling acceptance
+    /// rate alpha, where maxWindow is the user-configured <see cref="DraftCandidateCount"/>
+    /// (default 10, UI range 4-32). At high acceptance rates the window saturates at the
+    /// configured ceiling so a larger slider value actually speculates more tokens per step.
     /// </summary>
-    public int CurrentCandidateWindow => Math.Clamp((int)Math.Round(2 + AcceptanceRate * (10 - 2)), 2, 10);
+    public int CurrentCandidateWindow
+    {
+        get
+        {
+            int ceiling = Math.Clamp(DraftCandidateCount, 2, MaxDraftCandidateCount);
+            return Math.Clamp((int)Math.Round(2 + AcceptanceRate * (ceiling - 2)), 2, ceiling);
+        }
+    }
+
+    /// <summary>Maximum user-configured speculation count (matches the settings slider's 32-token ceiling).</summary>
+    public const int MaxDraftCandidateCount = 32;
 
     /// <summary>
-    /// Gets or sets the draft candidate window count. Setting this updates acceptance rate accordingly.
+    /// Gets or sets the configured draft candidate window. This only bounds the initial
+    /// speculation window and is clamped to [2, 10] at use. It is intentionally decoupled
+    /// from <see cref="AcceptanceRate"/>, which is a measured EMA of the actual accept ratio;
+    /// mapping a user slider value onto the measured rate previously pinned alpha at 1.0 and
+    /// disabled both the adaptive window and the low-acceptance bypass.
     /// </summary>
-    public int DraftCandidateCount
-    {
-        get => CurrentCandidateWindow;
-        set => AcceptanceRate = Math.Clamp((value - 2) / 8.0f, 0.0f, 1.0f);
-    }
+    public int DraftCandidateCount { get; set; } = 10;
 
     /// <summary>
     /// Gets or sets a value indicating whether target model verification is bypassed.
@@ -185,6 +206,7 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
                 _draftWeights = null;
                 _draftModelParams = null;
                 LoadedDraftPath = null;
+                IsNGramFallbackEnabled = false;
                 _draftZeroActiveTcs = null;
             }
 
@@ -266,37 +288,57 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
         }
     }
 
-    internal async Task SynchronizeDraftContextStateAsync(string contextText)
-    {
-        int estimatedTokens = GetTokenEstimate(contextText);
-        if (!await RewindDraftContextAsync(estimatedTokens).ConfigureAwait(false))
-        {
-            await _draftLock.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                if (_draftContext != null && _draftWeights != null && _draftModelParams != null)
-                {
-                    _draftContext.Dispose();
-                    _draftContext = _draftWeights.CreateContext(_draftModelParams);
-                    _draftExecutor = new InteractiveExecutor(_draftContext);
-                }
-            }
-            finally
-            {
-                _draftLock.Release();
-            }
-        }
-    }
+    /// <summary>
+    /// Intentionally a no-op. This previously rewound the draft KV cache via
+    /// MemorySequenceRemove using a WORD COUNT as a token position, which desynced
+    /// InteractiveExecutor's tracked prompt state from the actual KV cache and
+    /// corrupted subsequent draft logits. InteractiveExecutor already manages
+    /// prompt/KV continuation internally (prefix matching + delta evaluation), so
+    /// no manual KV surgery is performed here.
+    /// </summary>
+    internal Task SynchronizeDraftContextStateAsync(string contextText) => Task.CompletedTask;
 
     internal void SynchronizeDraftContextState(string contextText)
     {
         _ = SynchronizeDraftContextStateAsync(contextText);
     }
 
-    private static int GetTokenEstimate(string text)
+    /// <summary>
+    /// Generates draft candidate tokens, reserving the draft model for the duration of the
+    /// generation so UnloadAsync cannot dispose the native context mid-generation.
+    /// </summary>
+    private async IAsyncEnumerable<string> GenerateDraftTokensAsync(
+        string promptText,
+        InferenceParams paramsObj,
+        [EnumeratorCancellation] CancellationToken tokenCt)
     {
-        if (string.IsNullOrEmpty(text)) return 0;
-        return text.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
+        InteractiveExecutor? currentExec;
+        lock (_draftStateLock)
+        {
+            currentExec = _draftExecutor;
+            if (currentExec != null)
+            {
+                _activeDraftCount++;
+            }
+        }
+
+        if (currentExec == null)
+        {
+            yield break;
+        }
+
+        try
+        {
+            await foreach (var token in currentExec.InferAsync(promptText, paramsObj, tokenCt))
+            {
+                yield return token;
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeDraftCount);
+            CompleteDraftIdleWaitIfNeeded();
+        }
     }
 
     /// <summary>
@@ -311,11 +353,24 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
         int draftCount,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        int effectiveDraftCount = Math.Clamp(draftCount > 0 ? draftCount : CurrentCandidateWindow, 2, 10);
+        int effectiveDraftCount = Math.Clamp(draftCount > 0 ? draftCount : DraftCandidateCount, 2, MaxDraftCandidateCount);
 
         if (_draftExecutor == null || _draftContext == null)
         {
-            // Zero-VRAM N-gram prompt lookup fallback
+            // Zero-VRAM N-gram prompt lookup fallback. Same low-acceptance policy as the
+            // draft path: word-vs-token N-gram matching rarely pays off on free-form text,
+            // so once the measured acceptance rate drops below the threshold, run plain
+            // target inference instead of paying the speculation overhead every generation.
+            if (AcceptanceRate < 0.45f)
+            {
+                _logger?.LogDebug("Speculative acceptance rate ({Alpha:P0}) below 45% threshold. Bypassing N-gram fallback to direct target execution.", AcceptanceRate);
+                await foreach (var token in targetExecutor.InferAsync(textToEvaluate, targetInferenceParams, ct))
+                {
+                    yield return token;
+                }
+                yield break;
+            }
+
             var ngramCandidates = _ngramEngine.FindCandidatesFromText(textToEvaluate, matchN: 3, maxCandidates: effectiveDraftCount);
             if (ngramCandidates.Count > 0)
             {
@@ -361,21 +416,8 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
             yield break;
         }
 
-        Func<string, InferenceParams, CancellationToken, IAsyncEnumerable<string>> draftGenerator = (promptText, paramsObj, tokenCt) =>
-        {
-            InteractiveExecutor? currentExec;
-            lock (_draftStateLock)
-            {
-                currentExec = _draftExecutor;
-            }
-
-            if (currentExec == null)
-            {
-                return AsyncEnumerableEmpty();
-            }
-
-            return currentExec.InferAsync(promptText, paramsObj, tokenCt);
-        };
+        Func<string, InferenceParams, CancellationToken, IAsyncEnumerable<string>> draftGenerator =
+            (promptText, paramsObj, tokenCt) => GenerateDraftTokensAsync(promptText, paramsObj, tokenCt);
 
         await foreach (var token in SpeculateAndVerifyCoreAsync(
             textToEvaluate,
@@ -391,12 +433,6 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
         }
     }
 
-    private static async IAsyncEnumerable<string> AsyncEnumerableEmpty()
-    {
-        await Task.CompletedTask;
-        yield break;
-    }
-
     private static async IAsyncEnumerable<T> ToAsyncEnumerable<T>(IEnumerable<T> items)
     {
         foreach (var item in items)
@@ -407,79 +443,20 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Result record for batched target candidate evaluation.
+    /// Completes the unload wait when the last in-flight draft generation finishes.
     /// </summary>
-    public record BatchedVerificationResult(
-        int AcceptedCount,
-        LLamaToken? CorrectedToken,
-        IReadOnlyList<LLamaToken> AcceptedTokens);
-
-    /// <summary>
-    /// Single-pass batched candidate evaluation using native LLamaBatch.
-    /// Evaluates target model logits for all candidate tokens in a single batched decode pass.
-    /// </summary>
-    public static BatchedVerificationResult VerifyCandidateBatch(
-        LLamaContext targetContext,
-        IReadOnlyList<LLamaToken> candidateTokens,
-        LLamaPos currentPos)
+    private void CompleteDraftIdleWaitIfNeeded()
     {
-        if (targetContext == null || candidateTokens == null || candidateTokens.Count == 0)
+        TaskCompletionSource<bool>? tcs = null;
+        lock (_draftStateLock)
         {
-            return new BatchedVerificationResult(0, null, Array.Empty<LLamaToken>());
-        }
-
-        try
-        {
-            var batch = NativeApi.llama_batch_init(candidateTokens.Count, 0, 1);
-            try
+            if (_activeDraftCount == 0 && _draftZeroActiveTcs != null)
             {
-                var accepted = new List<LLamaToken>();
-                LLamaToken? corrected = null;
-
-                for (int i = 0; i < candidateTokens.Count; i++)
-                {
-                    var logitsSpan = targetContext.NativeHandle.GetLogitsIth(i);
-                    int topTokenVal = GetArgMax(logitsSpan);
-                    LLamaToken predictedToken = (LLamaToken)topTokenVal;
-
-                    if (predictedToken.Equals(candidateTokens[i]))
-                    {
-                        accepted.Add(candidateTokens[i]);
-                    }
-                    else
-                    {
-                        corrected = predictedToken;
-                        break;
-                    }
-                }
-
-                return new BatchedVerificationResult(accepted.Count, corrected, accepted);
-            }
-            finally
-            {
-                NativeApi.llama_batch_free(batch);
+                tcs = _draftZeroActiveTcs;
+                _draftZeroActiveTcs = null;
             }
         }
-        catch
-        {
-            return new BatchedVerificationResult(0, null, Array.Empty<LLamaToken>());
-        }
-    }
-
-    private static int GetArgMax(ReadOnlySpan<float> logits)
-    {
-        if (logits.Length == 0) return 0;
-        int maxIdx = 0;
-        float maxVal = logits[0];
-        for (int i = 1; i < logits.Length; i++)
-        {
-            if (logits[i] > maxVal)
-            {
-                maxVal = logits[i];
-                maxIdx = i;
-            }
-        }
-        return maxIdx;
+        tcs?.TrySetResult(true);
     }
 
     internal async IAsyncEnumerable<string> SpeculateAndVerifyCoreAsync(
@@ -498,13 +475,31 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
         int totalRejections = 0;
         int totalFallbacks = 0;
 
-        int targetSpeculation = Math.Clamp(draftCount, 2, 10);
+        int targetSpeculation = Math.Clamp(draftCount, 2, MaxDraftCandidateCount);
+
+        // The draft and target streams sample concurrently, so the draft MUST NOT share the
+        // target's sampling pipeline instance: DefaultSamplingPipeline keeps mutable RNG state
+        // and is not safe for concurrent sampling from two executors. Build a fresh pipeline
+        // with the same sampling parameters (props are init-only, hence the initializer).
+        var targetPipeline = targetInferenceParams.SamplingPipeline as LLama.Sampling.DefaultSamplingPipeline;
+        var draftPipeline = new LLama.Sampling.DefaultSamplingPipeline
+        {
+            Temperature = targetPipeline?.Temperature ?? 0.7f,
+            TopP = targetPipeline?.TopP ?? 0.9f,
+            TopK = targetPipeline?.TopK ?? 40,
+            MinP = targetPipeline?.MinP ?? 0.05f,
+            TypicalP = targetPipeline?.TypicalP ?? 1.0f,
+            RepeatPenalty = targetPipeline?.RepeatPenalty ?? 1.1f,
+            FrequencyPenalty = targetPipeline?.FrequencyPenalty ?? 0.0f,
+            PresencePenalty = targetPipeline?.PresencePenalty ?? 0.0f,
+            Seed = targetPipeline?.Seed ?? 0
+        };
 
         var draftInferenceParams = new InferenceParams
         {
             MaxTokens = targetSpeculation,
             AntiPrompts = targetInferenceParams.AntiPrompts,
-            SamplingPipeline = targetInferenceParams.SamplingPipeline ?? new LLama.Sampling.DefaultSamplingPipeline()
+            SamplingPipeline = draftPipeline
         };
 
         var draftTokens = new List<string>();
@@ -633,7 +628,9 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
                     currentContext = currentContext + string.Concat(acceptedTokens);
                 }
 
-                int nextSpeculationCount = CurrentCandidateWindow;
+                // Adaptive window from the measured acceptance rate, capped by the user's
+                // configured draft candidate count (targetSpeculation is already clamped to [2,32]).
+                int nextSpeculationCount = Math.Clamp(CurrentCandidateWindow, 2, Math.Max(2, targetSpeculation));
                 draftInferenceParams.MaxTokens = nextSpeculationCount;
 
                 var nextDraftTokens = new List<string>();
@@ -674,14 +671,18 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await UnloadAsync().ConfigureAwait(false);
+        if (_isDisposed) return;
+        _isDisposed = true;
+        try { await UnloadAsync().ConfigureAwait(false); } catch { }
         _draftLock.Dispose();
         GC.SuppressFinalize(this);
     }
 
     public void Dispose()
     {
-        Unload();
+        if (_isDisposed) return;
+        _isDisposed = true;
+        try { Unload(); } catch { }
         _draftLock.Dispose();
         GC.SuppressFinalize(this);
     }

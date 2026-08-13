@@ -143,18 +143,24 @@ public sealed class ModelPool : IDisposable, IAsyncDisposable
 
             // Read GGUF metadata for dynamic sizing
             var metadata = GgufMetadataReader.Parse(modelFilePath);
-            int totalLayers = metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32;
+            int totalLayers = Math.Max(1, metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32);
             long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
-            
+
+            // Hybrid/recurrent archs (Qwen3.5/3.6 Gated DeltaNet, mamba, rwkv, jamba) have tiny KV
+            // caches, so they can use the model's native context (up to 256K) instead of the
+            // dense-transformer 128K ceiling. The KV clamp below still bounds it by VRAM.
+            string archLower = (metadata?.Architecture ?? "").ToLowerInvariant();
+            bool isHybridSsm = archLower is "qwen35" or "qwen3next" or "qwen35moe" or "mamba" or "rwkv" or "jamba";
+            int contextCeiling = isHybridSsm ? 262144 : 131072;
             int rawContextLength = (int)(metadata?.ContextLength ?? 65536);
-            int contextLength = Math.Clamp(rawContextLength < 65536 ? 65536 : rawContextLength, 65536, 131072);
+            int contextLength = Math.Clamp(rawContextLength < 65536 ? 65536 : rawContextLength, 65536, contextCeiling);
             
             // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
             // Klydis enforces Q4_0 4-bit quantized KV cache (configured in InferenceEngine), so sizeof = 0.5 bytes.
             long kvCachePerLayerBytes = 1024; // Safe default: 2 * 8 * 128 * 0.5 = 1024
             if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCountKv.HasValue)
             {
-                long headDim = metadata.EmbeddingLength.Value / metadata.HeadCount.Value;
+                long headDim = metadata.EmbeddingLength.Value / Math.Max(1, metadata.HeadCount.Value);
                 // K + V (2) * HeadCountKv * headDim * 0.5 bytes (Q4_0 4-bit quantized KV cache)
                 kvCachePerLayerBytes = (long)(2 * metadata.HeadCountKv.Value * headDim * 0.5);
             }
@@ -166,7 +172,8 @@ public sealed class ModelPool : IDisposable, IAsyncDisposable
                 contextLength, 
                 gpuInfo, 
                 systemInfo, 
-                OffloadStrategyType.FullGpu);
+                OffloadStrategyType.FullGpu,
+                isHybridSsm: isHybridSsm);
             
             var engineLogger = _loggerFactory.CreateLogger<InferenceEngine>();
             var engine = new InferenceEngine(engineLogger, _nativeResourceDisposer);

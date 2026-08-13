@@ -251,6 +251,29 @@ namespace Klydis.Core.Memory
                 _logger.LogWarning(ex, "Failed to write pre-compaction transcript archive to disk.");
             }
 
+            // Mark the archived overflow messages as consolidated so the deferred
+            // ConsolidateWorldStateAsync does not re-summarize them into WorldState on
+            // later turns. Without this, a long goal run re-consolidates the same messages
+            // after every rolling compression and WorldState grows unboundedly with
+            // duplicate summaries, which then eats the system-prompt budget every turn.
+            try
+            {
+                var storeMessages = await _store.GetMessagesAsync(sessionId, null);
+                var overflowKeys = new HashSet<(ChatRole Role, string Content)>(overflow.Select(m => (m.Role, m.Content)));
+                var archivedIds = storeMessages
+                    .Where(r => overflowKeys.Contains((r.Role, r.Content)))
+                    .Select(r => r.Id)
+                    .ToList();
+                if (archivedIds.Count > 0)
+                {
+                    await _store.MarkMessagesAsConsolidatedAsync(archivedIds);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to mark archived messages as consolidated after rolling compression.");
+            }
+
             string summaryText;
             if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
             {

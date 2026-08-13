@@ -70,7 +70,8 @@ public class OffloadStrategy
         GpuInfo? gpuInfo,
         SystemInfo systemInfo,
         OffloadStrategyType strategyType = OffloadStrategyType.BalancedSplit,
-        int customLayers = 0)
+        int customLayers = 0,
+        bool isHybridSsm = false)
     {
         if (strategyType == OffloadStrategyType.CpuOnly)
         {
@@ -133,8 +134,12 @@ public class OffloadStrategy
         double totalModelSizeMb = (totalLayers * layerSizeBytes) / 1048576.0;
         double layerSizeMb = totalLayers > 0 ? totalModelSizeMb / totalLayers : 1.0;
 
-        // Target requested context length (clamped to 2,048 to 131,072)
-        int desiredContext = Math.Clamp(contextLength, 2048, 131072);
+        // Target requested context length. Hybrid/recurrent archs (Qwen3.5/3.6 Gated DeltaNet,
+        // mamba, rwkv, jamba) have tiny KV caches — only their attention layers grow with context —
+        // so they can use the model's native context (up to 262K) instead of the dense-transformer
+        // 128K ceiling. Dense transformers keep the 128K cap.
+        int contextCeiling = isHybridSsm ? 262144 : 131072;
+        int desiredContext = Math.Clamp(contextLength, 2048, contextCeiling);
 
         // Dynamically calculate max context that fits in VRAM headroom (reserving 15% VRAM headroom for CUDA L2 cache, graph execution & OS display)
         double targetMaxVramMb = totalVramMb > 0 ? (totalVramMb * 0.85) : Math.Max(4000, netAvailableVramMb);
@@ -144,11 +149,13 @@ public class OffloadStrategy
             ? (int)((availableForKvCacheMb * 1048576.0) / kvCacheBytesPerTokenAllLayers)
             : 32768;
 
-        // Clamp recommended context based on GPU VRAM ceiling (min 2,048 to max 131,072)
-        int recommendedContext = Math.Clamp(Math.Min(desiredContext, safeVramContext), 2048, 131072);
-        if (totalVramMb > 0 && totalVramMb <= 16384 && recommendedContext > 32768)
+        // Clamp recommended context based on GPU VRAM ceiling (min 2,048 to max context ceiling)
+        int recommendedContext = Math.Clamp(Math.Min(desiredContext, safeVramContext), 2048, contextCeiling);
+        if (totalVramMb > 0 && totalVramMb <= 16384 && recommendedContext > 32768 && !isHybridSsm)
         {
-            // On 16GB GPUs, target 32,768 (32K) tokens to keep VRAM at ~9.5 GB (60% saturation) for peak 60+ tok/s generation throughput
+            // On 16GB GPUs, target 32,768 (32K) tokens to keep VRAM at ~9.5 GB (60% saturation) for peak 60+ tok/s generation throughput.
+            // Skipped for hybrid/recurrent archs: their KV cache is tiny (Gated DeltaNet layers have constant-size state), so
+            // the full native context fits in VRAM without squeezing out the weights — and the user explicitly wants the window.
             recommendedContext = 32768;
         }
 

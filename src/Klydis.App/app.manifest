@@ -2,11 +2,14 @@
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <assemblyIdentity version="1.0.0.0" name="Klydis.App"/>
 
-  <!-- Request administrator elevation so Klydis has full system-level access -->
+  <!-- Run with the invoker's privileges (no UAC prompt). Klydis performs
+       elevated operations on demand via runas / UAC for specific actions
+       instead of forcing the whole process to run as administrator, which
+       breaks dotnet run from a normal terminal (error 740). -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>

@@ -99,18 +99,24 @@
                                  Command="{Binding NavigateCommand}" CommandParameter="Models">
                         <Path Data="M 2,14 L 2,4 C 2,2 14,2 14,4 L 14,14 Z M 5,7 L 11,7" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}" StrokeThickness="1.5" Fill="Transparent"/>
                     </RadioButton>
+
+                    <!-- Active model download indicator: sits under the Models icon where the
+                         download actually happens (was previously placed between Skills and
+                         Monitor, under the wrong icon). -->
+                    <StackPanel Margin="0,-5,0,5" Visibility="{Binding ModelLibraryViewModel.HasActiveDownloads, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                ToolTip="Downloading model files…">
+                        <ProgressBar Minimum="0" Maximum="100" Value="{Binding ModelLibraryViewModel.TotalDownloadProgress}" 
+                                     Height="4" Margin="8,0,8,2" Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" BorderThickness="0" />
+                        <TextBlock Text="{Binding ModelLibraryViewModel.TotalDownloadProgress, StringFormat={}{0:F0}%}" 
+                                   Foreground="{DynamicResource AccentPrimaryBrush}" FontSize="9" HorizontalAlignment="Center" FontWeight="SemiBold" />
+                    </StackPanel>
+
                     <RadioButton Style="{DynamicResource ActivityTabStyle}" GroupName="ActivityBar" 
                                  IsChecked="{Binding ActivePanel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Skills}"
                                  Command="{Binding NavigateCommand}" CommandParameter="Skills"
                                  ToolTip="Skill Library &amp; Brain">
                         <Path Data="M 12 2 L 2 7 L 12 12 L 22 7 Z M 2 17 L 12 22 L 22 17 M 2 12 L 12 17 L 22 12" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}" StrokeThickness="1.5" Fill="Transparent"/>
                     </RadioButton>
-                    <StackPanel Margin="0,-5,0,5" Visibility="{Binding ModelLibraryViewModel.HasActiveDownloads, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <ProgressBar Minimum="0" Maximum="100" Value="{Binding ModelLibraryViewModel.TotalDownloadProgress}" 
-                                     Height="4" Margin="8,0,8,2" Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" BorderThickness="0" />
-                        <TextBlock Text="{Binding ModelLibraryViewModel.TotalDownloadProgress, StringFormat={}{0:F0}%}" 
-                                   Foreground="{DynamicResource AccentPrimaryBrush}" FontSize="9" HorizontalAlignment="Center" FontWeight="SemiBold" />
-                    </StackPanel>
                     <RadioButton Style="{DynamicResource ActivityTabStyle}" GroupName="ActivityBar" 
                                  IsChecked="{Binding ActivePanel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Monitor}"
                                  Command="{Binding NavigateCommand}" CommandParameter="Monitor"
@@ -283,7 +289,35 @@
                     </TextBlock>
                     <TextBlock Text="{Binding SystemMonitorViewModel.VramTotalMb, StringFormat='{}{0} MB'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0"/>
                     <TextBlock Text="{Binding SystemMonitorViewModel.ModelMemoryMb, StringFormat='Model Mem: {0:F1} MB'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0"/>
-                    <TextBlock Text="{Binding SystemMonitorViewModel.CurrentTokensPerSecond, StringFormat='{}{0:F1} t/s'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" ToolTip="Token generation throughput (live and last generation run)"/>
+                    <TextBlock Text="{Binding SystemMonitorViewModel.CurrentTokensPerSecond, StringFormat='{}{0:F1} t/s'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0" ToolTip="Token generation throughput (live and last generation run)"/>
+
+                    <TextBlock Text="{Binding SystemMonitorViewModel.TokenUsageSummary}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12">
+                        <TextBlock.ToolTip>
+                            <ToolTip>
+                                <TextBlock Text="{Binding SystemMonitorViewModel.TokenUsageTooltip}" TextWrapping="Wrap" MaxWidth="340" />
+                            </ToolTip>
+                        </TextBlock.ToolTip>
+                    </TextBlock>
+
+                    <!-- Background dependency-update notification (driven by DependencyUpdateChecker).
+                         Clickable: opens the update dialog where the user can apply the updates. -->
+                    <Button Margin="16,0,8,0" Padding="0" Background="Transparent" BorderThickness="0"
+                            Cursor="Hand" HorizontalContentAlignment="Left"
+                            Command="{Binding OpenDependencyUpdateCommand}"
+                            Visibility="{Binding DependencyUpdatesAvailable, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#x26A0; " FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource WarningBrush}"/>
+                            <TextBlock Text="{Binding DependencyUpdateSummary}" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource WarningBrush}"/>
+                        </StackPanel>
+                        <Button.ToolTip>
+                            <ToolTip>
+                                <StackPanel>
+                                    <TextBlock Text="Newer dependency versions are available on NuGet. Click to review and update." FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                    <TextBlock Text="{Binding DependencyUpdateDetails}" TextWrapping="Wrap" MaxWidth="420"/>
+                                </StackPanel>
+                            </ToolTip>
+                        </Button.ToolTip>
+                    </Button>
                 </StackPanel>
             </Grid>
         </Border>

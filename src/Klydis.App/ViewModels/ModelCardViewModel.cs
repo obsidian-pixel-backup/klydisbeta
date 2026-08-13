@@ -56,6 +56,19 @@ public partial class ModelCardViewModel : ObservableObject
     [ObservableProperty]
     private bool _canFitInVram;
 
+    /// <summary>
+    /// Whether the bundled native engine is expected to load this model.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isCompatible = true;
+
+    /// <summary>
+    /// Human-readable reason when <see cref="IsCompatible"/> is false (e.g. a tokenizer
+    /// pre-type the bundled native backend doesn't support).
+    /// </summary>
+    [ObservableProperty]
+    private string? _compatibilityWarning;
+
     [ObservableProperty]
     private string? _role;
 

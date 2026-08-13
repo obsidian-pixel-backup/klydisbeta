@@ -35,6 +35,17 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _statusText = "Ready";
 
+    [ObservableProperty]
+    private bool _dependencyUpdatesAvailable;
+
+    [ObservableProperty]
+    private string _dependencyUpdateSummary = string.Empty;
+
+    [ObservableProperty]
+    private string _dependencyUpdateDetails = string.Empty;
+
+    private IReadOnlyList<Klydis.Core.Updates.DependencyUpdateInfo>? _dependencyUpdates;
+
     public ChatViewModel ChatViewModel { get; }
     public ModelLibraryViewModel ModelLibraryViewModel { get; }
     public SkillLibraryViewModel SkillLibraryViewModel { get; }
@@ -74,6 +85,71 @@ public partial class MainViewModel : ObservableObject
  
         CurrentView = ChatViewModel;
         ActivePanel = ActivePanel.Chat;
+
+        // Background dependency update check (throttled to once per day, never blocks startup).
+        StartDependencyUpdateCheck();
+    }
+
+    /// <summary>
+    /// Kicks off a background NuGet check for newer versions of the app's dependencies and
+    /// surfaces a status-bar notification when updates are available.
+    /// </summary>
+    private async void StartDependencyUpdateCheck()
+    {
+        try
+        {
+            var updates = await Task.Run(() =>
+                Klydis.Core.Updates.DependencyUpdateChecker.CheckForUpdatesAsync());
+
+            var available = updates
+                .Where(u => u.IsUpdateAvailable)
+                .OrderBy(u => u.PackageId)
+                .ToList();
+
+            if (available.Count == 0) return;
+
+            _dependencyUpdates = available;
+
+            await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                DependencyUpdatesAvailable = true;
+                DependencyUpdateSummary = available.Count == 1
+                    ? "1 dependency update available"
+                    : $"{available.Count} dependency updates available";
+                DependencyUpdateDetails = string.Join(Environment.NewLine,
+                    available.Select(u => $"{u.PackageId}: {u.InstalledVersion} \u2192 {u.LatestVersion}"));
+            });
+        }
+        catch
+        {
+            // Background check failures are non-fatal; the daily throttle retries next launch.
+        }
+    }
+
+    /// <summary>
+    /// Opens the dependency-update dialog where the user can review the available updates and
+    /// apply them (rewrites the pinned versions in the project files and runs dotnet restore).
+    /// </summary>
+    [RelayCommand]
+    private void OpenDependencyUpdate()
+    {
+        if (_dependencyUpdates == null || _dependencyUpdates.Count == 0) return;
+
+        var window = new Klydis.App.Views.DependencyUpdateWindow(_dependencyUpdates)
+        {
+            Owner = System.Windows.Application.Current.MainWindow
+        };
+        window.ShowDialog();
+
+        // If every update was applied, the next daily check (against the new manifest pins) will
+        // find nothing — clear the banner now so it does not linger until the app restarts.
+        if (window.UpdatesApplied)
+        {
+            DependencyUpdatesAvailable = false;
+            DependencyUpdateSummary = string.Empty;
+            DependencyUpdateDetails = string.Empty;
+            _dependencyUpdates = null;
+        }
     }
 
     [RelayCommand]
