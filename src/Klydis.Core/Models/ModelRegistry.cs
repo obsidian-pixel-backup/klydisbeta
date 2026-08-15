@@ -37,11 +37,18 @@ public class ModelRegistry
     /// </summary>
     /// <param name="logger">The logger instance.</param>
     public ModelRegistry(ILogger<ModelRegistry> logger)
+        : this(logger, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".klydis", "models"))
+    {
+    }
+
+    /// <summary>
+    /// Test seam: points the registry at an arbitrary models directory instead of the user's
+    /// real ~/.klydis/models.
+    /// </summary>
+    internal ModelRegistry(ILogger<ModelRegistry> logger, string modelsDirectory)
     {
         _logger = logger;
-        
-        string userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        _modelsDirectory = Path.Combine(userHome, ".klydis", "models");
+        _modelsDirectory = modelsDirectory;
         _registryFilePath = Path.Combine(_modelsDirectory, "registry.json");
         
         Directory.CreateDirectory(_modelsDirectory);
@@ -179,6 +186,14 @@ public class ModelRegistry
         }
     }
 
+    /// <summary>
+    /// Resume records older than this are dropped: a download that has been failing for a week
+    /// (e.g. the file was removed from the repo) would otherwise be retried on every app start
+    /// forever. The partial .download file is left in place, so a manual re-download still
+    /// resumes from it.
+    /// </summary>
+    private static readonly TimeSpan ActiveDownloadMaxAge = TimeSpan.FromDays(7);
+
     private async Task<List<ActiveDownloadRecord>> GetActiveDownloadsInternalAsync()
     {
         string path = Path.Combine(_modelsDirectory, "active_downloads.json");
@@ -187,7 +202,18 @@ public class ModelRegistry
         try
         {
             string json = await File.ReadAllTextAsync(path);
-            return JsonSerializer.Deserialize<List<ActiveDownloadRecord>>(json) ?? new List<ActiveDownloadRecord>();
+            var list = JsonSerializer.Deserialize<List<ActiveDownloadRecord>>(json) ?? new List<ActiveDownloadRecord>();
+
+            var fresh = list
+                .Where(d => d.StartedAt >= DateTime.UtcNow - ActiveDownloadMaxAge)
+                .ToList();
+            if (fresh.Count != list.Count)
+            {
+                _logger.LogInformation("Dropping {Count} stale active-download record(s) older than {Days} days.",
+                    list.Count - fresh.Count, ActiveDownloadMaxAge.TotalDays);
+                await File.WriteAllTextAsync(path, JsonSerializer.Serialize(fresh, new JsonSerializerOptions { WriteIndented = true }));
+            }
+            return fresh;
         }
         catch (Exception ex)
         {
@@ -299,7 +325,11 @@ public class ModelRegistry
             
             if (Directory.Exists(_modelsDirectory))
             {
-                var ggufFiles = Directory.EnumerateFiles(_modelsDirectory, "*.gguf", SearchOption.TopDirectoryOnly);
+                // Recursive scan: downloads are scoped to per-repo subdirectories (see
+                // HuggingFaceClient.SanitizeRepoIdForPath) to avoid filename collisions, so the
+                // registry must find .gguf files at any depth. The flat top-level files from
+                // older layouts are still picked up.
+                var ggufFiles = Directory.EnumerateFiles(_modelsDirectory, "*.gguf", SearchOption.AllDirectories);
                 
                 foreach (var file in ggufFiles)
                 {

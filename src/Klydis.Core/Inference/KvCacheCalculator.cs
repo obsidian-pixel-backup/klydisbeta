@@ -40,15 +40,19 @@ public static class KvCacheCalculator
 {
     /// <summary>
     /// Gets bytes per element for the given KV quantization precision type.
+    /// Values match the actual GGML block-quantized layouts (block size 32 with block
+    /// scale/offset metadata): Q4_0 = 18 bytes/32 elts, Q4_1 = 20/32, Q8_0 = 34/32.
+    /// These feed VRAM planning, so using the real on-disk/in-memory sizes (not the
+    /// naive bit width) keeps the offload plan and KV estimates accurate.
     /// </summary>
     public static double GetBytesPerElement(KvCacheQuantizationType quantType) => quantType switch
     {
         KvCacheQuantizationType.F16 => 2.0,
-        KvCacheQuantizationType.Q8_0 => 1.0,
-        KvCacheQuantizationType.Q4_0 => 0.5,
-        KvCacheQuantizationType.Q4_1 => 0.5625, // 4.5 bits per weight with block scale/min
+        KvCacheQuantizationType.Q8_0 => 34.0 / 32.0, // 1.0625
+        KvCacheQuantizationType.Q4_0 => 18.0 / 32.0, // 0.5625
+        KvCacheQuantizationType.Q4_1 => 20.0 / 32.0, // 0.625
         KvCacheQuantizationType.TurboQuant3Bit => 0.375, // 3 bits per value (PolarQuant + QJL residual)
-        _ => 0.5
+        _ => 18.0 / 32.0
     };
 
     /// <summary>

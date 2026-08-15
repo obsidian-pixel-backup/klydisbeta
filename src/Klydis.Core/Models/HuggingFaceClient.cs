@@ -61,11 +61,14 @@ public record HfModelInfo(
 /// <param name="SizeBytes">The size of the file in bytes.</param>
 /// <param name="QuantType">The quantization type parsed from the filename (e.g., Q4_K_M).</param>
 /// <param name="ParameterSize">The parameter size parsed from the filename (e.g., 7B, 13B).</param>
+/// <param name="Sha256">The LFS SHA-256 published by the Hub for this file, used to verify
+/// downloads. Empty when the API did not expose it (e.g. non-LFS files).</param>
 public record HfFileInfo(
     string Filename,
     long SizeBytes,
     string QuantType,
-    string ParameterSize
+    string ParameterSize,
+    string Sha256 = ""
 );
 
 /// <summary>
@@ -90,6 +93,7 @@ public record DownloadProgress(
 public partial class HuggingFaceClient
 {
     private readonly HttpClient _httpClient;
+    private readonly HttpClient _downloadClient;
     private readonly ILogger<HuggingFaceClient> _logger;
 
     private const int MaxRetries = 3;
@@ -116,16 +120,30 @@ public partial class HuggingFaceClient
     /// <param name="httpClient">The HTTP client to use for requests.</param>
     /// <param name="logger">The logger instance.</param>
     public HuggingFaceClient(HttpClient httpClient, ILogger<HuggingFaceClient> logger)
+        : this(httpClient, CreateDownloadClient(), logger)
+    {
+    }
+
+    /// <summary>
+    /// Test seam: accepts a dedicated download client (e.g. backed by a stub handler) instead
+    /// of the real network client used for large downloads.
+    /// </summary>
+    internal HuggingFaceClient(HttpClient httpClient, HttpClient downloadClient, ILogger<HuggingFaceClient> logger)
     {
         _httpClient = httpClient;
+        _downloadClient = downloadClient;
         _logger = logger;
 
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Klydis/1.0");
+        _downloadClient.DefaultRequestHeaders.UserAgent.ParseAdd("Klydis/1.0");
 
         var token = Environment.GetEnvironmentVariable("HF_TOKEN");
         if (!string.IsNullOrWhiteSpace(token))
         {
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            var auth = new AuthenticationHeaderValue("Bearer", token);
+            _httpClient.DefaultRequestHeaders.Authorization = auth;
+            // Mirror the bearer token onto the dedicated download client so gated models work.
+            _downloadClient.DefaultRequestHeaders.Authorization = auth;
         }
     }
 
@@ -233,6 +251,7 @@ public partial class HuggingFaceClient
             var filename = element.GetProperty("rfilename").GetString()!;
 
             long sizeBytes = 0;
+            string sha256 = string.Empty;
             if (element.TryGetProperty("size", out var sizeProp) && sizeProp.ValueKind == JsonValueKind.Number)
             {
                 sizeBytes = sizeProp.GetInt64();
@@ -241,6 +260,14 @@ public partial class HuggingFaceClient
                      lfsProp.TryGetProperty("size", out var lfsSizeProp) && lfsSizeProp.ValueKind == JsonValueKind.Number)
             {
                 sizeBytes = lfsSizeProp.GetInt64();
+            }
+
+            // LFS files publish a SHA-256; capture it so downloads can be verified for
+            // integrity (catches truncated/corrupted partial files on resume).
+            if (element.TryGetProperty("lfs", out var lfsShaProp) && lfsShaProp.ValueKind == JsonValueKind.Object &&
+                lfsShaProp.TryGetProperty("sha256", out var shaProp) && shaProp.ValueKind == JsonValueKind.String)
+            {
+                sha256 = shaProp.GetString() ?? string.Empty;
             }
 
             if (sizeBytes <= 0)
@@ -254,7 +281,7 @@ public partial class HuggingFaceClient
             var paramMatch = ParameterSizeRegex().Match(repoId + "/" + filename);
             var paramSize = paramMatch.Success ? paramMatch.Value : "Unknown";
 
-            files.Add(new HfFileInfo(filename, sizeBytes, quantType, paramSize));
+            files.Add(new HfFileInfo(filename, sizeBytes, quantType, paramSize, sha256));
         }
 
         return files;
@@ -367,19 +394,24 @@ public partial class HuggingFaceClient
     }
 
     /// <summary>
-    /// Downloads a model file with progress reporting and resume capability.
+    /// Downloads a model file with progress reporting, resume capability, mid-stream retry,
+    /// and (when the Hub publishes one) SHA-256 integrity verification.
     /// </summary>
     /// <param name="repoId">The repository ID.</param>
     /// <param name="filename">The filename to download.</param>
     /// <param name="destinationPath">The full path where the file should be saved.</param>
     /// <param name="progress">Progress reporter.</param>
     /// <param name="ct">Cancellation token.</param>
+    /// <param name="expectedSha256">The LFS SHA-256 published by the Hub (hex). When provided,
+    /// the completed file is verified against it and a mismatch is treated as a failed,
+    /// re-downloadable download instead of silently shipping a corrupted model.</param>
     public async Task DownloadModelAsync(
         string repoId, 
         string filename, 
         string destinationPath, 
         IProgress<DownloadProgress> progress, 
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? expectedSha256 = null)
     {
         var url = $"{BaseUrl}/{repoId}/resolve/main/{filename}";
         
@@ -391,32 +423,100 @@ public partial class HuggingFaceClient
 
         if (File.Exists(destinationPath))
         {
-            _logger.LogInformation("File already fully downloaded at {Path}.", destinationPath);
-            var fi = new FileInfo(destinationPath);
-            progress?.Report(new DownloadProgress(fi.Length, fi.Length, 0, 0, 100));
-            return;
+            if (string.IsNullOrWhiteSpace(expectedSha256) ||
+                await VerifySha256Async(destinationPath, expectedSha256, ct))
+            {
+                _logger.LogInformation("File already fully downloaded at {Path}.", destinationPath);
+                var fi = new FileInfo(destinationPath);
+                progress?.Report(new DownloadProgress(fi.Length, fi.Length, 0, 0, 100));
+                return;
+            }
+
+            // An existing file that fails verification is corrupt (truncated or tampered) —
+            // discard it and download afresh rather than silently loading a broken model.
+            _logger.LogWarning("Existing file at {Path} failed SHA-256 verification; re-downloading.", destinationPath);
+            File.Delete(destinationPath);
         }
 
         string tempFilePath = destinationPath + ".download";
-        var fileInfo = new FileInfo(tempFilePath);
-        long existingBytes = fileInfo.Exists ? fileInfo.Length : 0;
+        long completedBytes = File.Exists(tempFilePath) ? new FileInfo(tempFilePath).Length : 0;
 
         _logger.LogInformation("Starting download of {Filename} from {RepoId} to {Path}. Resuming from {Bytes} bytes.", 
-            filename, repoId, tempFilePath, existingBytes);
+            filename, repoId, tempFilePath, completedBytes);
 
-        using var response = await SendWithRetryAsync(() => 
+        // Mid-stream retry: long downloads routinely drop connections. Each attempt re-opens the
+        // request with a Range header from the current on-disk offset, so a partial write is
+        // never duplicated and progress is continuous. The inner SendWithRetryAsync already
+        // handles 429/HTTP-level errors before the body starts.
+        int attempt = 0;
+        while (true)
+        {
+            attempt++;
+            try
+            {
+                completedBytes = await DownloadChunkAsync(url, tempFilePath, completedBytes, filename, progress, ct);
+                break;
+            }
+            catch (Exception ex) when (
+                (ex is IOException || ex is HttpRequestException) &&
+                attempt < MaxRetries && !ct.IsCancellationRequested)
+            {
+                // Resume from wherever the file actually ended up (the failed attempt may have
+                // written some complete chunks before the connection dropped).
+                completedBytes = File.Exists(tempFilePath) ? new FileInfo(tempFilePath).Length : 0;
+                _logger.LogWarning(ex, "Download of {Filename} interrupted at {Bytes} bytes (attempt {Attempt}/{Max}). Resuming from current offset.",
+                    filename, completedBytes, attempt, MaxRetries);
+                await Task.Delay(TimeSpan.FromSeconds(BaseDelay.TotalSeconds * Math.Pow(2, attempt - 1)), ct);
+            }
+        }
+
+        if (File.Exists(destinationPath)) File.Delete(destinationPath);
+        File.Move(tempFilePath, destinationPath);
+
+        if (!string.IsNullOrWhiteSpace(expectedSha256))
+        {
+            if (!await VerifySha256Async(destinationPath, expectedSha256, ct))
+            {
+                _logger.LogError("SHA-256 verification failed for {Filename} after download. Discarding the file.", filename);
+                try { File.Delete(destinationPath); } catch { }
+                throw new InvalidOperationException($"SHA-256 verification failed for {filename}. The downloaded file was discarded and will be re-downloaded on the next attempt.");
+            }
+        }
+
+        progress?.Report(new DownloadProgress(completedBytes, completedBytes, 0, 0, 100));
+        _logger.LogInformation("Download of {Filename} completed successfully.", filename);
+    }
+
+    /// <summary>
+    /// Streams one chunk of a download into <paramref name="tempFilePath"/>, resuming from
+    /// <paramref name="startOffset"/> via a Range header. Returns the total number of bytes on
+    /// disk after a complete chunk. Throws <see cref="IOException"/> when the response ends
+    /// prematurely (the caller retries from the current offset).
+    /// </summary>
+    private async Task<long> DownloadChunkAsync(
+        string url,
+        string tempFilePath,
+        long startOffset,
+        string filename,
+        IProgress<DownloadProgress> progress,
+        CancellationToken ct)
+    {
+        long existingBytes = startOffset;
+
+        using var response = await SendWithRetryAsync(() =>
         {
             var req = new HttpRequestMessage(HttpMethod.Get, url);
             if (existingBytes > 0) req.Headers.Range = new RangeHeaderValue(existingBytes, null);
             return req;
-        }, ct, HttpCompletionOption.ResponseHeadersRead);
+        }, ct, HttpCompletionOption.ResponseHeadersRead, useDownloadClient: true);
 
         if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
-            // The file is already fully downloaded
-            _logger.LogInformation("File already fully downloaded based on range check.");
-            progress?.Report(new DownloadProgress(existingBytes, existingBytes, 0, 0, 100));
-            return;
+            // The server has nothing beyond our offset: the temp file already holds the whole
+            // payload (a previous run finished writing but crashed before the rename). Finalize
+            // it instead of leaving the download stuck at ~100% forever.
+            _logger.LogInformation("Range check indicates {Filename} is already complete ({Bytes} bytes); finalizing temp file.", filename, existingBytes);
+            return existingBytes;
         }
 
         response.EnsureSuccessStatusCode();
@@ -431,7 +531,26 @@ public partial class HuggingFaceClient
         else
         {
             existingBytes = 0; // Server doesn't support resume, restart from 0
-            fileInfo.Delete();
+            if (File.Exists(tempFilePath)) File.Delete(tempFilePath);
+        }
+
+        // Refuse to start a multi-GB write when the disk cannot hold the remaining payload.
+        if (totalBytes > 0)
+        {
+            try
+            {
+                var root = Path.GetPathRoot(Path.GetFullPath(tempFilePath)) ?? Path.GetTempPath();
+                var drive = new DriveInfo(root);
+                if (drive.IsReady && drive.AvailableFreeSpace < totalBytes - existingBytes)
+                {
+                    throw new IOException($"Insufficient disk space on {drive.Name}: need {totalBytes - existingBytes} bytes but only {drive.AvailableFreeSpace} are available for {filename}.");
+                }
+            }
+            catch (IOException) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not inspect disk space before download; continuing.");
+            }
         }
 
         using var contentStream = await response.Content.ReadAsStreamAsync(ct);
@@ -479,15 +598,53 @@ public partial class HuggingFaceClient
         
         if (totalBytes > 0 && totalDownloaded < totalBytes)
         {
-            _logger.LogError("Download of {Filename} ended prematurely: received {Downloaded} of {Total} bytes.", filename, totalDownloaded, totalBytes);
-            throw new InvalidOperationException($"Download terminated prematurely. Downloaded {totalDownloaded} bytes out of {totalBytes} total bytes for {filename}.");
+            // Premature end-of-stream: resumable, so signal via IOException for the caller's
+            // bounded retry loop rather than failing the whole download.
+            _logger.LogWarning("Download of {Filename} ended prematurely: received {Downloaded} of {Total} bytes.", filename, totalDownloaded, totalBytes);
+            throw new IOException($"Download terminated prematurely. Downloaded {totalDownloaded} bytes out of {totalBytes} total bytes for {filename}.");
         }
 
-        if (File.Exists(destinationPath)) File.Delete(destinationPath);
-        File.Move(tempFilePath, destinationPath);
+        return totalDownloaded;
+    }
 
-        progress?.Report(new DownloadProgress(totalDownloaded, totalBytes > 0 ? totalBytes : totalDownloaded, 0, 0, 100));
-        _logger.LogInformation("Download of {Filename} completed successfully.", filename);
+    /// <summary>
+    /// Computes the SHA-256 of a file and compares it (case-insensitively) to the expected hex
+    /// digest published by the Hub. Returns false for any failure — verification errors are
+    /// treated as corruption by the caller.
+    /// </summary>
+    private static async Task<bool> VerifySha256Async(string filePath, string expectedSha256, CancellationToken ct)
+    {
+        try
+        {
+            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true);
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var hash = await sha.ComputeHashAsync(stream, ct);
+            var actual = Convert.ToHexString(hash);
+            return string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"SHA-256 verification failed for {filePath}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Converts a repository ID (e.g. 'TheBloke/Llama-2-7B-Chat-GGUF') into a safe, single
+    /// directory name for scoping downloaded files per repository, preventing filename
+    /// collisions between repos that publish identically named GGUF files.
+    /// </summary>
+    public static string SanitizeRepoIdForPath(string repoId)
+    {
+        if (string.IsNullOrWhiteSpace(repoId)) return "unknown-repo";
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(repoId.Length);
+        foreach (var ch in repoId)
+        {
+            sb.Append(ch == '/' || Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
+        }
+        var result = sb.ToString().Trim('_', ' ');
+        return string.IsNullOrEmpty(result) ? "unknown-repo" : result;
     }
 
     private async Task<long> GetFileSizeAsync(string repoId, string filename, CancellationToken ct)
@@ -495,7 +652,6 @@ public partial class HuggingFaceClient
         var url = $"{BaseUrl}/{repoId}/resolve/main/{filename}";
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Head, url);
             using var response = await SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Head, url), ct);
             if (response.IsSuccessStatusCode)
             {
@@ -509,18 +665,41 @@ public partial class HuggingFaceClient
         return 0;
     }
 
+    /// <summary>
+    /// Dedicated client for large downloads. The DI-registered singleton HttpClient keeps the
+    /// framework default 100-second timeout, which a multi-GB model download would blow through;
+    /// the download client disables that timeout (cancellation is driven solely by the caller's
+    /// CancellationToken) and mirrors the user agent / bearer token.
+    /// </summary>
+    private static HttpClient CreateDownloadClient()
+    {
+        var client = new HttpClient(new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+            AutomaticDecompression = DecompressionMethods.None
+        })
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Klydis/1.0");
+        return client;
+    }
+
     private async Task<HttpResponseMessage> SendWithRetryAsync(
         Func<HttpRequestMessage> requestFactory, 
         CancellationToken ct,
-        HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead)
+        HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead,
+        bool useDownloadClient = false)
     {
+        var client = useDownloadClient ? _downloadClient : _httpClient;
+
         for (int i = 0; i < MaxRetries; i++)
         {
             var request = requestFactory();
             HttpResponseMessage response = null!;
             try
             {
-                response = await _httpClient.SendAsync(request, completionOption, ct);
+                response = await client.SendAsync(request, completionOption, ct);
 
                 if (response.StatusCode != HttpStatusCode.TooManyRequests)
                 {
@@ -541,6 +720,6 @@ public partial class HuggingFaceClient
         }
 
         // Final attempt without catching
-        return await _httpClient.SendAsync(requestFactory(), completionOption, ct);
+        return await client.SendAsync(requestFactory(), completionOption, ct);
     }
 }

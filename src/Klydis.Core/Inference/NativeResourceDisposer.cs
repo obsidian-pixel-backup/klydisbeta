@@ -43,6 +43,12 @@ public sealed class NativeResourceDisposer : INativeResourceDisposer
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _processingTask;
     private int _pendingCount;
+
+    // Signaled on every completed disposal so DrainAsync wakes exactly when items finish
+    // instead of polling on a 10ms timer. One release per completion (not only at zero)
+    // keeps concurrent DrainAsync callers from missing a signal: each drains re-checks
+    // _pendingCount after waking, and surplus tokens are consumed harmlessly later.
+    private readonly SemaphoreSlim _disposalSignal = new(0, int.MaxValue);
     private bool _isDisposed;
 
     public NativeResourceDisposer(ILogger<NativeResourceDisposer>? logger = null)
@@ -87,9 +93,12 @@ public sealed class NativeResourceDisposer : INativeResourceDisposer
 
     public async Task DrainAsync(CancellationToken ct = default)
     {
-        while (Volatile.Read(ref _pendingCount) > 0 && !ct.IsCancellationRequested)
+        // Wake on each completed disposal and re-check the count. The re-check loop makes
+        // this immune to missed-signal races: an item that finished between the count read
+        // and the WaitAsync left a token in the semaphore, so the wait returns immediately.
+        while (Volatile.Read(ref _pendingCount) > 0)
         {
-            await Task.Delay(10, ct).ConfigureAwait(false);
+            await _disposalSignal.WaitAsync(ct).ConfigureAwait(false);
         }
     }
 
@@ -133,6 +142,8 @@ public sealed class NativeResourceDisposer : INativeResourceDisposer
         finally
         {
             Interlocked.Decrement(ref _pendingCount);
+            // Always release so a DrainAsync that is waiting (or about to wait) wakes up.
+            try { _disposalSignal.Release(); } catch (ObjectDisposedException) { }
         }
     }
 
@@ -144,6 +155,7 @@ public sealed class NativeResourceDisposer : INativeResourceDisposer
         _queue.Writer.TryComplete();
         _cts.Cancel();
         _ = DisposeAsync();
+        _disposalSignal.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -161,6 +173,7 @@ public sealed class NativeResourceDisposer : INativeResourceDisposer
         catch { }
 
         _cts.Dispose();
+        _disposalSignal.Dispose();
         GC.SuppressFinalize(this);
     }
 }

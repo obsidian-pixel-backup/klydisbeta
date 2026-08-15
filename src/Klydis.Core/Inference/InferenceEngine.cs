@@ -59,6 +59,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public SpeculativeEngine SpeculativeEngine { get; } = new();
     public SpeculativeDecodingService? SpeculativeDecodingService { get; set; }
     public bool IsSpeculativeDecodingEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Opt-in (default off): constrains sampling to a GBNF grammar from the moment the model
+    /// begins a qwen-native tool-call block, so malformed/abandoned calls cannot reach the
+    /// regex parser (each failed parse costs a full prompt rebuild + re-prefill + re-inference).
+    /// Kept off by default until validated against a real qwen model — see
+    /// <see cref="ToolCallConstrainedSamplingPipeline"/> for the safety rails.
+    /// </summary>
+    public bool EnableToolGrammarConstrainedDecoding { get; set; }
     public int SpeculativeDraftCount { get; set; } = 24;
     private string _selectedDraftModelPath = "auto";
     private Klydis.Core.Hardware.OffloadPlan? _lastOffloadPlan;
@@ -334,7 +343,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     _pCoreAffinityApplied = true;
                 }
 
-                var metadata = Models.GgufMetadataReader.Parse(modelPath);
+                var metadata = Models.GgufMetadataReader.ParseCached(modelPath);
                 if (metadata != null)
                 {
                     CurrentKvCacheEstimate = KvCacheCalculator.Calculate(metadata, offloadPlan.RecommendedContextSize, TargetKvQuantization);
@@ -818,13 +827,20 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             // frequent mid-stream failures the status bar showed "out" climbing to millions while
             // "in" stayed near zero (the observed in/out swap). Firing at start means every
             // generation contributes its prompt tokens even if it later fails.
+            //
+            // Compute the speculation flag up front so the start event reports the mode the
+            // generation will actually use (previously it always read false, so the UI showed
+            // speculative runs as plain inference until completion).
+            bool speculationWillBeActive = IsSpeculativeDecodingEnabled &&
+                                           !_speculationDisabledAfterDecodeFailure &&
+                                           (SpeculativeEngine.IsLoaded || SpeculativeEngine.IsNGramFallbackEnabled);
             if (triggerEvents && InferenceStarted != null)
             {
                 InferenceStarted?.Invoke(new InferenceTelemetry(
                     RequestId: Guid.NewGuid().ToString("N"),
                     TargetModelPath: CurrentModelPath ?? "Unknown",
                     DraftModelPath: SpeculativeEngine.LoadedDraftPath,
-                    IsSpeculativeEnabled: false,
+                    IsSpeculativeEnabled: speculationWillBeActive,
                     PromptLengthChars: prompt.Length,
                     PromptTokenCount: promptTokenCount,
                     GeneratedTokenCount: 0,
@@ -1114,12 +1130,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         var handlers = TokenGenerated;
                         double totalElapsedMs = requestStopwatch.Elapsed.TotalMilliseconds;
                         double genDurationMs = genStopwatch.Elapsed.TotalMilliseconds;
-                        int totalGeneratedTokens = isFirstToken ? 0 : tokenCount + 1;
+                        int totalGeneratedTokens = isFirstToken ? 0 : tokenCount;
                         // Prefer the live EMA reading so the counter does not snap back to the
                         // flat lifetime average when the final per-token event fires.
                         double genTokSec = tokenSpeed.Current > 0
                             ? tokenSpeed.Current
-                            : (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
+                            : (genDurationMs > 0 && totalGeneratedTokens > 0) ? (totalGeneratedTokens / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
                         eventChannel.Writer.TryWrite(() => handlers.Invoke(string.Empty, (float)genTokSec));
                     }
                 }
@@ -1260,8 +1276,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         genStopwatch.Stop();
                         double totalElapsedMs = requestStopwatch.Elapsed.TotalMilliseconds;
                         double genDurationMs = genStopwatch.Elapsed.TotalMilliseconds;
-                        int totalGeneratedTokens = isFirstToken ? 0 : tokenCount + 1;
-                        double genTokSec = (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
+                        int totalGeneratedTokens = isFirstToken ? 0 : tokenCount;
+                        double genTokSec = (genDurationMs > 0 && totalGeneratedTokens > 0) ? (totalGeneratedTokens / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
                         double e2eTokSec = totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0;
 
                         var telemetry = new InferenceTelemetry(
@@ -1278,7 +1294,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                             GenerationTokensPerSecond: Math.Round(genTokSec, 2),
                             EndToEndTokensPerSecond: Math.Round(e2eTokSec, 2),
                             SpeculativeMetrics: isSpeculationActive ? SpeculativeEngine.LastTelemetry : null,
-                            IsIsolated: isIsolated
+                            IsIsolated: isIsolated,
+                            PromptPrefillTokensPerSecond: ttftMs > 0 && promptTokenCount > 0
+                                ? Math.Round(promptTokenCount / (ttftMs / 1000.0), 2)
+                                : 0
                         );
                         LastTelemetry = telemetry;
                         InferenceCompleted?.Invoke(telemetry);
@@ -1353,9 +1372,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         // Control/special tokens (e.g. qwen's <channel|> control token) must never stream to
         // the user; llama.cpp's sampler chain does not exclude them. See
         // SpecialTokenFilterPipeline.
-        if (IsMixtureOfExperts)
-        {
-            return new SpecialTokenFilterPipeline(new LLama.Sampling.DefaultSamplingPipeline
+        LLama.Sampling.DefaultSamplingPipeline profile = IsMixtureOfExperts
+            ? new LLama.Sampling.DefaultSamplingPipeline
             {
                 Temperature = 0.6f,
                 TopP = 0.9f,
@@ -1363,20 +1381,53 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 RepeatPenalty = 1.25f,
                 FrequencyPenalty = 0.15f,
                 PresencePenalty = 0.15f
-            });
+            }
+            : new LLama.Sampling.DefaultSamplingPipeline
+            {
+                Temperature = 0.7f,
+                TopP = 0.9f,
+                MinP = 0.05f,
+                // 1.15 (was 1.1): thinking models in production stuttered "The The The..." on a
+                // cold first generation; a slightly stronger repeat penalty breaks that attractor
+                // without harming long-form quality.
+                RepeatPenalty = 1.15f
+            };
+
+        if (!EnableToolGrammarConstrainedDecoding || !IsQwenNativeToolCallModel)
+        {
+            return new SpecialTokenFilterPipeline(profile);
         }
 
-        return new SpecialTokenFilterPipeline(new LLama.Sampling.DefaultSamplingPipeline
+        // Grammar-constrained twin with the identical sampling profile: from the moment the
+        // model opens a <tool_call> block, sampling is constrained to the native call grammar
+        // so malformed/abandoned calls cannot reach the regex parser.
+        var constrained = new LLama.Sampling.DefaultSamplingPipeline
         {
-            Temperature = 0.7f,
-            TopP = 0.9f,
-            MinP = 0.05f,
-            // 1.15 (was 1.1): thinking models in production stuttered "The The The..." on a
-            // cold first generation; a slightly stronger repeat penalty breaks that attractor
-            // without harming long-form quality.
-            RepeatPenalty = 1.15f
-        });
+            Temperature = profile.Temperature,
+            TopP = profile.TopP,
+            TopK = profile.TopK,
+            MinP = profile.MinP,
+            TypicalP = profile.TypicalP,
+            RepeatPenalty = profile.RepeatPenalty,
+            FrequencyPenalty = profile.FrequencyPenalty,
+            PresencePenalty = profile.PresencePenalty,
+            Seed = profile.Seed,
+            Grammar = new LLama.Sampling.Grammar(ToolCallGrammar.BuildQwenNativeGbnf(), "root")
+        };
+
+        return new SpecialTokenFilterPipeline(
+            new ToolCallConstrainedSamplingPipeline(profile, constrained, ToolCallGrammarFormat.QwenNative, _logger));
     }
+
+    /// <summary>
+    /// True when the loaded model uses the qwen native tool-call template
+    /// (<c>&lt;tool_call&gt;&lt;function=...&gt;</c>) — the only format the grammar gate
+    /// understands. Mirrors ChatEngine's isQwenThinkingModel detection.
+    /// </summary>
+    private bool IsQwenNativeToolCallModel =>
+        (Architecture ?? string.Empty).Contains("qwen35", StringComparison.OrdinalIgnoreCase) &&
+        !string.IsNullOrWhiteSpace(RawChatTemplate) &&
+        RawChatTemplate.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase);
 
     public async IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -1862,6 +1913,9 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         CurrentModelPath = null;
         RawChatTemplate = null;
         FineTuneName = null;
+        // Clear the model params so ContextSize stops reporting the previous model's window
+        // after an unload (it would otherwise go back to the 32768 fallback).
+        _modelParams = null;
 
         // A CPU-only load pinned the process to P-cores; release that so the rest of the app
         // (and later GPU loads) can use the full processor set again.

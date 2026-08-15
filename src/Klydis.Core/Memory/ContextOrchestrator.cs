@@ -26,35 +26,95 @@ namespace Klydis.Core.Memory
         /// <summary>
         /// Initializes a new instance of the <see cref="ContextOrchestrator"/> class.
         /// </summary>
-        public ContextOrchestrator(
-            MessageStore store, 
-            IInferenceEngine inferenceEngine, 
-            ILogger<ContextOrchestrator> logger)
+    /// <summary>
+    /// Bounded content-keyed token-count cache. Prompt building and compression call
+    /// GetTokenCount on the same message contents repeatedly (partitioning, rolling
+    /// compression, consolidation — up to 3× per message per turn); each call is a full
+    /// native tokenize pass plus an allocation. Keyed by content so re-loaded history and
+    /// identical tool outputs reuse counts. The cap bounds memory on huge sessions; a clear
+    /// at the cap is cheap because only the most recent messages are tokenized again.
+    /// </summary>
+    private readonly Dictionary<string, int> _tokenCountCache = new(StringComparer.Ordinal);
+    private const int TokenCountCacheCap = 4096;
+    private readonly object _tokenCountCacheLock = new();
+
+    public ContextOrchestrator(
+        MessageStore store, 
+        IInferenceEngine inferenceEngine, 
+        ILogger<ContextOrchestrator> logger)
+    {
+        _store = store;
+        _inferenceEngine = inferenceEngine;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Maximum length of the persisted WorldState. Every rolling compression and deferred
+    /// consolidation appends a summary (up to ~512 tokens each), so without a cap WorldState
+    /// grows unboundedly and eventually consumes the entire system-prompt budget — the
+    /// WorldState header is injected into the prompt on EVERY turn. The full pre-compaction
+    /// history is archived to disk and indexed into the RAG memory collection, so trimming the
+    /// oldest portion is lossy only for the prompt-visible WorldState, not for retrieval.
+    /// Mirrors the cap applied to add_world_state_fact in ToolExecutor.
+    /// </summary>
+    private const int MaxWorldStateChars = 8000;
+
+    /// <summary>
+    /// Appends a new section to the persisted WorldState, keeping the combined value within
+    /// <see cref="MaxWorldStateChars"/> characters. When the cap would be exceeded the newest
+    /// content wins and the oldest portion is trimmed (full history stays in the transcript
+    /// archive and the RAG memory index).
+    /// </summary>
+    private static string AppendWorldState(string? existing, string newSection)
+    {
+        if (string.IsNullOrWhiteSpace(existing)) return (newSection ?? string.Empty).Trim();
+        var combined = $"{existing}\n\n{newSection}";
+        if (combined.Length <= MaxWorldStateChars) return combined.Trim();
+
+        int excess = combined.Length - MaxWorldStateChars;
+        int firstNewline = combined.IndexOf('\n', excess);
+        return firstNewline >= 0
+            ? "[...older world-state entries trimmed...]\n" + combined[(firstNewline + 1)..]
+            : combined[^MaxWorldStateChars..];
+    }
+
+    /// <summary>
+    /// Estimates or computes exact token count for text using IInferenceEngine.GetTokenCount
+    /// if loaded. Results are cached per content string (see <see cref="_tokenCountCache"/>).
+    /// </summary>
+    public int EstimateTokens(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return 0;
+
+        lock (_tokenCountCacheLock)
         {
-            _store = store;
-            _inferenceEngine = inferenceEngine;
-            _logger = logger;
+            if (_tokenCountCache.TryGetValue(text, out var cached)) return cached;
         }
 
-        /// <summary>
-        /// Estimates or computes exact token count for text using IInferenceEngine.GetTokenCount if loaded.
-        /// </summary>
-        public int EstimateTokens(string text)
+        int count = EstimateTokensUncached(text);
+        lock (_tokenCountCacheLock)
         {
-            if (string.IsNullOrEmpty(text)) return 0;
-            if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
-            {
-                try
-                {
-                    return _inferenceEngine.GetTokenCount(text);
-                }
-                catch
-                {
-                    // Fallback to estimation if model tokenization fails
-                }
-            }
-            return (int)Math.Ceiling(text.Length / 3.5);
+            if (_tokenCountCache.Count >= TokenCountCacheCap) _tokenCountCache.Clear();
+            _tokenCountCache[text] = count;
         }
+        return count;
+    }
+
+    private int EstimateTokensUncached(string text)
+    {
+        if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded)
+        {
+            try
+            {
+                return _inferenceEngine.GetTokenCount(text);
+            }
+            catch
+            {
+                // Fallback to estimation if model tokenization fails
+            }
+        }
+        return (int)Math.Ceiling(text.Length / 3.5);
+    }
 
         /// <summary>
         /// Partitions messages into an active window and overflow based on the token budget.
@@ -189,9 +249,7 @@ namespace Klydis.Core.Memory
             int totalTokens = 0;
             foreach (var msg in history)
             {
-                totalTokens += (_inferenceEngine != null && _inferenceEngine.IsModelLoaded 
-                    ? _inferenceEngine.GetTokenCount(msg.Content) 
-                    : EstimateTokens(msg.Content)) + 25;
+                totalTokens += EstimateTokens(msg.Content) + 25;
             }
 
             if (totalTokens < thresholdTokens) return false;
@@ -203,8 +261,8 @@ namespace Klydis.Core.Memory
 
             // Preserve initial message goal (history[0]) if user message
             ChatMessage? initialMsg = history.Count > 0 ? history[0] : null;
-            int initialTokens = initialMsg != null 
-                ? ((_inferenceEngine != null && _inferenceEngine.IsModelLoaded ? _inferenceEngine.GetTokenCount(initialMsg.Content) : EstimateTokens(initialMsg.Content)) + 25) 
+            int initialTokens = initialMsg != null
+                ? EstimateTokens(initialMsg.Content) + 25
                 : 0;
 
             // Gather recent messages up to keepRecentTokens budget from the end
@@ -215,9 +273,7 @@ namespace Klydis.Core.Memory
             for (int i = history.Count - 1; i >= 1; i--)
             {
                 var msg = history[i];
-                int msgTokens = (_inferenceEngine != null && _inferenceEngine.IsModelLoaded 
-                    ? _inferenceEngine.GetTokenCount(msg.Content) 
-                    : EstimateTokens(msg.Content)) + 25;
+                int msgTokens = EstimateTokens(msg.Content) + 25;
 
                 if (recentTokens + msgTokens <= keepRecentTokens)
                 {
@@ -256,12 +312,16 @@ namespace Klydis.Core.Memory
             // later turns. Without this, a long goal run re-consolidates the same messages
             // after every rolling compression and WorldState grows unboundedly with
             // duplicate summaries, which then eats the system-prompt budget every turn.
+            // Matching is by (Role, Content) against the store, but rows whose content ALSO
+            // appears in the preserved recent tail must be excluded — marking those would
+            // erase a kept message from the session on the next reload.
             try
             {
                 var storeMessages = await _store.GetMessagesAsync(sessionId, null);
                 var overflowKeys = new HashSet<(ChatRole Role, string Content)>(overflow.Select(m => (m.Role, m.Content)));
+                var preservedKeys = new HashSet<(ChatRole Role, string Content)>(preservedRecent.Select(m => (m.Role, m.Content)));
                 var archivedIds = storeMessages
-                    .Where(r => overflowKeys.Contains((r.Role, r.Content)))
+                    .Where(r => overflowKeys.Contains((r.Role, r.Content)) && !preservedKeys.Contains((r.Role, r.Content)))
                     .Select(r => r.Id)
                     .ToList();
                 if (archivedIds.Count > 0)
@@ -280,8 +340,18 @@ namespace Klydis.Core.Memory
                 try
                 {
                     var overflowText = string.Join("\n", overflow.Select(m => $"{m.Role}: {m.Content}"));
-                    var summaryPrompt = $"Summarize key facts, user preferences, technical requirements, and decisions from the following conversation history into concise bullet points:\n\n{overflowText}\n\nKey Points Summary:";
-                    summaryText = await _inferenceEngine.GenerateTextAsync(summaryPrompt, isIsolated: true, maxTokens: 512);
+                    if (EstimateTokens(overflowText) > 12000)
+                    {
+                        // The overflow can be tens of thousands of tokens — a single summary
+                        // prompt would overflow the model's own context during summarization.
+                        // Multi-pass summarize it in bounded chunks instead.
+                        summaryText = await ChunkAndSummarizeLargeInputAsync(overflowText, maxChunkSizeTokens: 12000);
+                    }
+                    else
+                    {
+                        var summaryPrompt = $"Summarize key facts, user preferences, technical requirements, and decisions from the following conversation history into concise bullet points:\n\n{overflowText}\n\nKey Points Summary:";
+                        summaryText = await _inferenceEngine.GenerateTextAsync(summaryPrompt, isIsolated: true, maxTokens: 512);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -296,11 +366,12 @@ namespace Klydis.Core.Memory
             var archiveNotice = !string.IsNullOrEmpty(archivePath) ? $"\n[Full pre-compaction history archive saved at: {archivePath}]" : "";
             var existingState = session.WorldState ?? "";
 
-            var newWorldState = string.IsNullOrWhiteSpace(existingState)
-                ? $"Archived Context Summary:{archiveNotice}\n{summaryText}"
-                : $"{existingState}\n\nArchived Context Summary:{archiveNotice}\n{summaryText}";
+            // Cap the combined WorldState so repeated compressions cannot grow it past the
+            // system-prompt budget (see AppendWorldState).
+            var newSection = $"Archived Context Summary:{archiveNotice}\n{summaryText}";
+            var newWorldState = AppendWorldState(existingState, newSection);
 
-            await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
+            await _store.UpdateSessionAsync(sessionId, null, newWorldState, null);
 
             // RAGged Memory Indexing: Index summarized memory chunk into VectorStore for on-demand RAG retrieval
             if (VectorStore != null && !string.IsNullOrWhiteSpace(summaryText))
@@ -360,8 +431,16 @@ namespace Klydis.Core.Memory
                 try
                 {
                     var overflowText = string.Join("\n", overflow.Select(m => $"{m.Role}: {m.Content}"));
-                    var summaryPrompt = $"Extract concise key facts and decisions from the following archived conversation turns:\n\n{overflowText}\n\nConsolidated Key Facts:";
-                    summaryText = await _inferenceEngine.GenerateTextAsync(summaryPrompt, isIsolated: true, maxTokens: 512);
+                    if (EstimateTokens(overflowText) > 12000)
+                    {
+                        // Same bounded multi-pass guard as rolling compression (see above).
+                        summaryText = await ChunkAndSummarizeLargeInputAsync(overflowText, maxChunkSizeTokens: 12000);
+                    }
+                    else
+                    {
+                        var summaryPrompt = $"Extract concise key facts and decisions from the following archived conversation turns:\n\n{overflowText}\n\nConsolidated Key Facts:";
+                        summaryText = await _inferenceEngine.GenerateTextAsync(summaryPrompt, isIsolated: true, maxTokens: 512);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -375,11 +454,10 @@ namespace Klydis.Core.Memory
             }
             var existingState = session.WorldState ?? "";
             
-            var newWorldState = string.IsNullOrWhiteSpace(existingState)
-                ? $"Archived Context:\n{summaryText}"
-                : $"{existingState}\n{summaryText}";
+            // Cap the combined WorldState (see AppendWorldState).
+            var newWorldState = AppendWorldState(existingState, $"Archived Context:\n{summaryText}");
 
-            await _store.UpdateSessionAsync(sessionId, null, newWorldState.Trim(), null);
+            await _store.UpdateSessionAsync(sessionId, null, newWorldState, null);
             await _store.MarkMessagesAsConsolidatedAsync(overflow.Select(m => m.Id));
         }
 

@@ -253,6 +253,7 @@ public class SystemPromptManager
         string queueNotice = "",
         string ragNotice = "",
         string skillHeader = "",
+        string lessonsHeader = "",
         string? customPath = null,
         string? personalityMode = null,
         bool isGoalMode = false)
@@ -364,6 +365,10 @@ public class SystemPromptManager
         {
             sb.Append(skillHeader);
         }
+        if (!string.IsNullOrWhiteSpace(lessonsHeader))
+        {
+            sb.Append(lessonsHeader);
+        }
 
         return sb.ToString();
     }
@@ -382,6 +387,7 @@ public class SystemPromptManager
         string queueNotice = "",
         string ragNotice = "",
         string skillHeader = "",
+        string lessonsHeader = "",
         string? personalityMode = null,
         bool isGoalMode = false)
     {
@@ -408,6 +414,25 @@ public class SystemPromptManager
         sb.AppendLine("- Do not invent custom tool names. Only use tools defined in the schema.");
         sb.AppendLine("- After 'search_web' or 'crawl_url', SUMMARIZE the key information concisely. Never paste raw search output.");
         sb.AppendLine("- For large tool output, summarize the key insight rather than re-quoting the full output.");
+
+        // The COMPACT prompt is used for MoE models of every family (mixtral, deepseek-v2/v3,
+        // qwen MoE, ...). The full master prompt teaches the <tool_call> JSON call format, but
+        // the compact path never did — MoE models were told WHAT tools exist (schema) but never
+        // HOW to invoke them, so they invented formats or emitted incomplete <tool_call> tags.
+        // For qwen thinking models ChatEngine passes an empty schema (the native <tools> prelude
+        // teaches the <function=> format instead), so this JSON format section only applies to
+        // the models that need it.
+        if (!string.IsNullOrWhiteSpace(toolsSchema))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### TOOL CALL FORMAT (CRITICAL)");
+            sb.AppendLine("- To call a tool, output EXACTLY this and NOTHING else (no surrounding text, no code fences, no thinking tags):");
+            sb.AppendLine($@"  <tool_call>{{""name"": ""tool_name"", ""arguments"": {{""arg1"": ""value1""}}}}</tool_call>");
+            sb.AppendLine($@"- For tools with no arguments: <tool_call>{{""name"": ""get_system_info"", ""arguments"": {{}}}}</tool_call>");
+            sb.AppendLine("- The tag pair <tool_call> and </tool_call> MUST both be present and the JSON inside must be valid.");
+            sb.AppendLine("- After the tool result is provided, analyze it and either call the next tool or answer the user.");
+            sb.AppendLine("- NEVER simulate a tool result in plain text — only real <tool_call> tags trigger execution.");
+        }
 
         if (isGoalMode)
         {
@@ -446,6 +471,7 @@ public class SystemPromptManager
         if (!string.IsNullOrWhiteSpace(queueNotice)) sb.Append(queueNotice);
         if (!string.IsNullOrWhiteSpace(ragNotice)) sb.Append(ragNotice);
         if (!string.IsNullOrWhiteSpace(skillHeader)) sb.Append(skillHeader);
+        if (!string.IsNullOrWhiteSpace(lessonsHeader)) sb.Append(lessonsHeader);
 
         return sb.ToString().Trim();
     }

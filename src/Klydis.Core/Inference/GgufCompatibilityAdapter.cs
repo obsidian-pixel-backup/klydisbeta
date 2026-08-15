@@ -79,7 +79,9 @@ public static class GgufCompatibilityAdapter
             );
         }
 
-        var metadata = GgufMetadataReader.Parse(modelPath);
+        // Cached: the same file was already header-parsed by InferenceEngine.LoadModelAsync
+        // and the structural walk below re-reads the header as well.
+        var metadata = GgufMetadataReader.ParseCached(modelPath);
         if (metadata == null)
         {
             return new GgufCompatibilityResult(
@@ -99,7 +101,7 @@ public static class GgufCompatibilityAdapter
         // overruns the file) is corrupt/truncated, NOT an unsupported model type. This runs
         // before any native load so the user gets a "re-download" message instead of a
         // misleading "architecture not supported" error.
-        var integrity = GgufMetadataReader.ValidateStructuralIntegrity(modelPath);
+        var integrity = GgufMetadataReader.ValidateStructuralIntegrityCached(modelPath);
         if (!integrity.IsValid)
         {
             return new GgufCompatibilityResult(

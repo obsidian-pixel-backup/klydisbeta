@@ -132,6 +132,7 @@ public partial class App : Application
         services.AddSingleton<MessageStore>();
         services.AddSingleton<ContextOrchestrator>();
         services.AddSingleton<ModelMessageQueue>();
+        services.AddSingleton<Klydis.Core.Learning.AdaptiveLearningService>();
         services.AddSingleton<Klydis.Core.Chat.CamoufoxManager>();
         services.AddSingleton<Klydis.Core.Chat.StealthBrowserService>();
         services.AddSingleton<ModelPool>();
@@ -158,7 +159,8 @@ public partial class App : Application
                 sp.GetService<Klydis.Core.Chat.StealthBrowserService>(),
                 sp.GetService<Klydis.Core.RAG.VectorStore>(),
                 sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
-                sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>()
+                sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>(),
+                sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>()
             );
             // Default to Standard (approval gate for risky/flagged tools). AutoPilot mode
             // executes arbitrary PowerShell with no approval gate, which combined with
@@ -177,7 +179,8 @@ public partial class App : Application
                 sp.GetRequiredService<ContextOrchestrator>(),
                 sp.GetRequiredService<ILogger<ChatEngine>>(),
                 sp.GetService<ModelMessageQueue>(),
-                sp.GetService<Klydis.Core.RAG.VectorStore>()
+                sp.GetService<Klydis.Core.RAG.VectorStore>(),
+                sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>()
             );
             var themeService = sp.GetService<ThemeService>();
             if (themeService != null)

@@ -22,6 +22,9 @@ public partial class HfFileViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _canFitInVram = true;
+
+    [ObservableProperty]
+    private string _sha256 = string.Empty;
 }
 
 /// <summary>

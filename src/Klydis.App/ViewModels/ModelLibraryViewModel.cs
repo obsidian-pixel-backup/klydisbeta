@@ -679,7 +679,8 @@ public partial class ModelLibraryViewModel : ObservableObject
                         Size = (file.SizeBytes / (1024.0 * 1024.0 * 1024.0)).ToString("F2") + " GB",
                         QuantType = file.QuantType,
                         RepoId = repoId,
-                        CanFitInVram = fitsInVram
+                        CanFitInVram = fitsInVram,
+                        Sha256 = file.Sha256
                     });
                 }
             });
@@ -855,13 +856,17 @@ public partial class ModelLibraryViewModel : ObservableObject
     private async Task DownloadModelAsync(HfFileViewModel file)
     {
         if (file == null) return;
+
+        // Repo-scoped destination: two repos can publish identically named GGUF files, and a
+        // flat models directory silently overwrites (or blocks) the second one. Scope by the
+        // sanitized repository ID, mirroring the Hub's own cache layout.
+        string repoSubdir = Klydis.Core.Models.HuggingFaceClient.SanitizeRepoIdForPath(file.RepoId);
+        string destPath = System.IO.Path.Combine(_registry.ModelsDirectory, repoSubdir, file.FileName);
         
-        string destPath = System.IO.Path.Combine(_registry.ModelsDirectory, file.FileName);
-        
-        await StartDownloadAsync(file.RepoId, file.FileName, destPath);
+        await StartDownloadAsync(file.RepoId, file.FileName, destPath, file.Sha256);
     }
 
-    private async Task StartDownloadAsync(string repoId, string fileName, string destPath)
+    private async Task StartDownloadAsync(string repoId, string fileName, string destPath, string? expectedSha256 = null)
     {
         lock (ActiveDownloads)
         {
@@ -904,7 +909,7 @@ public partial class ModelLibraryViewModel : ObservableObject
         {
             await Task.Run(async () =>
             {
-                await _hfClient.DownloadModelAsync(repoId, fileName, destPath, progress, downloadVm.CancellationTokenSource.Token);
+                await _hfClient.DownloadModelAsync(repoId, fileName, destPath, progress, downloadVm.CancellationTokenSource.Token, expectedSha256);
             });
             downloadVm.Status = "Download complete.";
             await _registry.RemoveActiveDownloadAsync(repoId, fileName);
@@ -914,6 +919,10 @@ public partial class ModelLibraryViewModel : ObservableObject
         catch (OperationCanceledException)
         {
             downloadVm.Status = "Download cancelled.";
+            // An explicit cancel is a deliberate stop, unlike a crash: drop the resume record
+            // so the download does not silently restart on the next app launch. The partial
+            // .download file is kept, so a later manual download resumes from it.
+            await _registry.RemoveActiveDownloadAsync(repoId, fileName);
         }
         catch (Exception ex)
         {

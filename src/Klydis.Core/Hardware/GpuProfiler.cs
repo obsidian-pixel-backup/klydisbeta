@@ -73,6 +73,12 @@ public class GpuProfiler
 
         [System.Runtime.InteropServices.DllImport(NvmlDll, EntryPoint = "nvmlDeviceGetName", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
         public static extern int nvmlDeviceGetName(IntPtr device, System.Text.StringBuilder name, uint length);
+
+        [System.Runtime.InteropServices.DllImport(NvmlDll, EntryPoint = "nvmlDeviceGetCudaComputeCapability", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+        public static extern int nvmlDeviceGetCudaComputeCapability(IntPtr device, out int major, out int minor);
+
+        [System.Runtime.InteropServices.DllImport(NvmlDll, EntryPoint = "nvmlSystemGetDriverVersion", CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl)]
+        public static extern int nvmlSystemGetDriverVersion(System.Text.StringBuilder version, uint length);
     }
 
     /// <summary>
@@ -127,6 +133,29 @@ public class GpuProfiler
                 uint temp = 0;
                 try { NvmlNative.nvmlDeviceGetTemperature(_nvmlDeviceHandle, 0, out temp); } catch { }
 
+                // Real compute capability and driver version from NVML (previously hardcoded
+                // "8.0"/"NVML Native", which made the profiler UI show fabricated numbers).
+                string computeCapability = "8.0";
+                try
+                {
+                    if (NvmlNative.nvmlDeviceGetCudaComputeCapability(_nvmlDeviceHandle, out int major, out int minor) == 0)
+                    {
+                        computeCapability = $"{major}.{minor}";
+                    }
+                }
+                catch { }
+
+                string driverVersion = "NVML Native";
+                try
+                {
+                    var driverSb = new System.Text.StringBuilder(64);
+                    if (NvmlNative.nvmlSystemGetDriverVersion(driverSb, 64) == 0 && driverSb.Length > 0)
+                    {
+                        driverVersion = driverSb.ToString();
+                    }
+                }
+                catch { }
+
                 int totalMb = (int)(mem.Total / (1024 * 1024));
                 int freeMb = (int)(mem.Free / (1024 * 1024));
                 int usedMb = (int)(mem.Used / (1024 * 1024));
@@ -139,9 +168,9 @@ public class GpuProfiler
                     TotalVramMb: totalMb,
                     FreeVramMb: freeMb,
                     UsedVramMb: usedMb,
-                    ComputeCapability: "8.0",
+                    ComputeCapability: computeCapability,
                     Temperature: (int)temp,
-                    DriverVersion: "NVML Native",
+                    DriverVersion: driverVersion,
                     GpuUtilPercent: gpuUtil
                 );
             }

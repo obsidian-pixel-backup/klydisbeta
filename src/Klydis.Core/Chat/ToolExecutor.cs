@@ -14,7 +14,6 @@ using System.Net.Sockets;
 using HtmlAgilityPack;
 using Microsoft.Extensions.Logging;
 using System.Management;
-using System.IO;
 
 namespace Klydis.Core.Chat;
 
@@ -74,7 +73,8 @@ public class ToolExecutor(
     StealthBrowserService? stealthBrowserService = null,
     Klydis.Core.RAG.VectorStore? vectorStore = null,
     Klydis.Core.RAG.HybridRetriever? hybridRetriever = null,
-    Klydis.Core.RAG.DocumentIngestionEngine? ingestionEngine = null)
+    Klydis.Core.RAG.DocumentIngestionEngine? ingestionEngine = null,
+    Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null)
 {
     private static readonly HttpClient _httpClient = new HttpClient();
     private readonly StealthBrowserService? _stealthBrowserService = stealthBrowserService;
@@ -84,11 +84,18 @@ public class ToolExecutor(
     public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
     public Klydis.Core.RAG.HybridRetriever? HybridRetriever { get; set; } = hybridRetriever;
     public Klydis.Core.RAG.DocumentIngestionEngine? IngestionEngine { get; set; } = ingestionEngine;
+    public Klydis.Core.Learning.AdaptiveLearningService? AdaptiveLearning { get; set; } = adaptiveLearning;
 
     /// <summary>
     /// Gets or sets the current risk level mode.
     /// </summary>
     public RiskLevel CurrentRiskLevel { get; set; } = RiskLevel.Standard;
+
+    // Custom tool definitions are re-queried from SQLite on EVERY tool execution and prompt
+    // build (2+ DB roundtrips per tool call in the generation loop). Cache them and invalidate
+    // on create/delete — ToolExecutor is a singleton, so the cache is safe.
+    private List<ToolDefinition>? _customToolDefinitionsCache;
+    private readonly object _customToolsCacheLock = new();
 
     /// <summary>
     /// Gets or sets whether automatic tool output offloading to disk is enabled for large results.
@@ -210,6 +217,15 @@ public class ToolExecutor(
             new("folder_path", "string", "Absolute directory path of the project or folder to index", true),
             new("collection_name", "string", "Optional custom collection name (defaults to folder name)", false)
         }, false),
+        new ToolDefinition("learn_lesson", "Persists a lesson learned during this task into the model's cross-session learning store. Use when you discovered something important: a workflow that worked, a tool behavior quirk, a useful approach, or a mistake to avoid. Future sessions with this model will see these lessons.", new List<ToolParameter>
+        {
+            new("lesson", "string", "The lesson content: what was learned and why it matters", true),
+            new("category", "string", "Optional category, e.g. 'workflow', 'tool-behavior', 'pitfall' (default 'general')", false)
+        }, false),
+        new ToolDefinition("recall_lessons", "Retrieves lessons previously recorded for this model (from this or past sessions) so you can apply accumulated knowledge to the current task.", new List<ToolParameter>
+        {
+            new("limit", "integer", "Optional maximum number of lessons to return (default 8)", false)
+        }, false),
         new ToolDefinition("task_complete", "Signals that the current user goal or multi-step task has been fully completed. Call this ONLY when the goal is 100% accomplished. Provide a clear, detailed summary of what was completed.", new List<ToolParameter>
         {
             new("summary", "string", "Summary of what was accomplished to complete the goal", true)
@@ -242,31 +258,54 @@ public class ToolExecutor(
     public async Task<IList<ToolDefinition>> GetToolDefinitionsAsync()
     {
         var allTools = new List<ToolDefinition>(_tools);
-        if (messageStore != null)
-        {
-            var customTools = await messageStore.GetCustomToolsAsync();
-            
-            foreach (var ct in customTools)
-            {
-                var parameters = new List<ToolParameter>();
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(ct.ParametersJson))
-                    {
-                        parameters = JsonSerializer.Deserialize<List<ToolParameter>>(ct.ParametersJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<ToolParameter>();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Failed to parse parameters for custom tool {ToolName}", ct.Name);
-                }
+        if (messageStore == null) return allTools;
 
-                // Custom tools are now allowed by default, subject to risky request detection
-                allTools.Add(new ToolDefinition(ct.Name, ct.Description, parameters, RequiresApproval: false));
+        lock (_customToolsCacheLock)
+        {
+            if (_customToolDefinitionsCache != null)
+            {
+                allTools.AddRange(_customToolDefinitionsCache);
+                return allTools;
             }
         }
 
+        var customTools = await messageStore.GetCustomToolsAsync();
+        var customDefinitions = new List<ToolDefinition>(customTools.Count);
+
+        foreach (var ct in customTools)
+        {
+            var parameters = new List<ToolParameter>();
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(ct.ParametersJson))
+                {
+                    parameters = JsonSerializer.Deserialize<List<ToolParameter>>(ct.ParametersJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<ToolParameter>();
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to parse parameters for custom tool {ToolName}", ct.Name);
+            }
+
+            // Custom tools are now allowed by default, subject to risky request detection
+            customDefinitions.Add(new ToolDefinition(ct.Name, ct.Description, parameters, RequiresApproval: false));
+        }
+
+        lock (_customToolsCacheLock)
+        {
+            _customToolDefinitionsCache ??= customDefinitions;
+            allTools.AddRange(_customToolDefinitionsCache);
+        }
+
         return allTools;
+    }
+
+    private void InvalidateCustomToolsCache()
+    {
+        lock (_customToolsCacheLock)
+        {
+            _customToolDefinitionsCache = null;
+        }
     }
 
     /// <summary>
@@ -299,9 +338,17 @@ public class ToolExecutor(
     /// <summary>
     /// Executes a tool request asynchronously.
     /// </summary>
-    public async Task<ToolResult> ExecuteToolAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
+    public async Task<ToolResult> ExecuteToolAsync(ToolCallRequest request, string sessionId, CancellationToken ct, string? modelPath = null)
     {
         logger.LogInformation("Executing tool: {ToolName}", request.Name);
+
+        // Propagate cancellation immediately instead of letting the per-tool catch swallow it
+        // and feeding a bogus "error" result back into the generation loop.
+        if (ct.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(ct);
+        }
+
         var tools = await GetToolDefinitionsAsync();
         var toolDef = tools.FirstOrDefault(t => t.Name == request.Name);
         
@@ -314,7 +361,7 @@ public class ToolExecutor(
                                   request.Name.Equals("bash", StringComparison.OrdinalIgnoreCase) ||
                                   request.Name.Equals("sh", StringComparison.OrdinalIgnoreCase) ||
                                   request.Name.Equals("exec", StringComparison.OrdinalIgnoreCase))
-                ? $"\nAction Required: You attempted to call '{request.Name}' as a tool name. To run command line commands or launch processes, call tool 'run_command' with argument {{\"CommandLine\": \"...\"}}."
+                ? $"\nAction Required: You attempted to call '{request.Name}' as a tool name. To run command line commands or launch processes, call tool 'run_command' with argument {{\"command\": \"...\"}}."
                 : "";
 
             var guidance = $"Tool '{request.Name}' does not exist in available system tools.{commandHint}\n" +
@@ -391,6 +438,8 @@ public class ToolExecutor(
                 "search_rag" => await SearchRagAsync(request, ct),
                 "list_rag_collections" => await ListRagCollectionsAsync(ct),
                 "index_folder_rag" => await IndexFolderRagAsync(request, ct),
+                "learn_lesson" => await LearnLessonAsync(request, ct, modelPath),
+                "recall_lessons" => await RecallLessonsAsync(request, ct, modelPath),
                 "task_complete" => ExecuteTaskComplete(request),
                 "task_progress" => ExecuteTaskProgress(request),
                 _ => await ExecuteCustomToolAsync(request, ct)
@@ -499,8 +548,20 @@ public class ToolExecutor(
         return unwrapped?.ToString();
     }
 
+    /// <summary>
+    /// True when a request would EXECUTE potentially destructive operations. Risk detection is
+    /// deliberately scoped to execution-capable tools (run_command, create_custom_tool,
+    /// delete_custom_tool) — scanning every argument of every tool produced false positives that
+    /// blocked legitimate use (e.g. a search_web query containing "curl" or a write_file whose
+    /// content mentions "Remove-Item" got flagged and denied). Content that is only read,
+    /// written, or searched is never risky by itself.
+    /// </summary>
     private bool IsRiskyRequest(ToolCallRequest request)
     {
+        // Only tools that spawn processes or persist executable scripts can be risky.
+        if (request.Name is not ("run_command" or "create_custom_tool" or "delete_custom_tool"))
+            return false;
+
         var contentToCheck = "";
         if (request.Arguments != null)
         {
@@ -549,22 +610,32 @@ public class ToolExecutor(
 
         if (startLine.HasValue || endLine.HasValue || path.Contains("offload_") || path.Contains("tool_outputs"))
         {
-            var lines = await File.ReadAllLinesAsync(path, ct);
-            int start = (startLine ?? 1) - 1;
-            if (start < 0) start = 0;
-            if (start >= lines.Length) return new ToolResult(request.Name, true, "", null);
-
-            int count = lines.Length - start;
+            // Stream lines lazily instead of materializing the whole file: offloaded tool
+            // outputs can be tens of MB, and ReadAllLinesAsync would spike memory to hold them.
+            int start = Math.Max((startLine ?? 1) - 1, 0);
+            int count = int.MaxValue;
             if (endLine.HasValue)
             {
-                int end = endLine.Value;
-                if (end < startLine.GetValueOrDefault(1)) end = startLine.GetValueOrDefault(1);
-                count = Math.Min(count, end - start + 1);
+                int end = Math.Max(endLine.Value, startLine.GetValueOrDefault(1));
+                count = end - start + 1;
             }
 
-            var slicedLines = lines.Skip(start).Take(count);
-            var slicedContent = string.Join("\n", slicedLines);
-            return new ToolResult(request.Name, true, slicedContent, null);
+            var sb = new StringBuilder();
+            int lineIndex = 0;
+            int remaining = count;
+            await foreach (var line in File.ReadLinesAsync(path, ct))
+            {
+                if (lineIndex < start)
+                {
+                    lineIndex++;
+                    continue;
+                }
+                if (remaining <= 0) break;
+                if (sb.Length > 0) sb.Append('\n');
+                sb.Append(line);
+                remaining--;
+            }
+            return new ToolResult(request.Name, true, sb.ToString(), null);
         }
 
         var content = await File.ReadAllTextAsync(path, ct);
@@ -987,6 +1058,21 @@ public class ToolExecutor(
 
         string? lastError = null;
 
+        // SSRF + scheme guard for the browser tiers: FetchPageViaHttpAsync validates http/https
+        // and rejects private hosts, but the browser paths below accept ANY URL — a prompt-
+        // injected model could otherwise bypass the guard entirely by falling through to a
+        // browser fetch of file:// URLs or internal/cloud-metadata hosts.
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var crawlUri) ||
+            (crawlUri.Scheme != Uri.UriSchemeHttp && crawlUri.Scheme != Uri.UriSchemeHttps))
+        {
+            return new ToolResult(request.Name, false, "", "Only http/https URLs are supported.");
+        }
+        if (await IsPrivateHostAsync(crawlUri.Host))
+        {
+            return new ToolResult(request.Name, false, "",
+                $"Host '{crawlUri.Host}' resolves to a private or internal address, which cannot be crawled.");
+        }
+
         // Tier 2: stealth browser (renders JavaScript, bypasses anti-bot checks). Auto-installs
         // Playwright Chromium on first use when the binaries are missing.
         if (_stealthBrowserService != null)
@@ -1222,12 +1308,12 @@ public class ToolExecutor(
 
         try
         {
-            var files = Directory.EnumerateFiles(path, pattern, SearchOption.AllDirectories);
             var results = new List<string>();
+            const int maxResults = 20;
 
-            foreach (var file in files)
+            foreach (var file in EnumerateFilesResilient(path, pattern))
             {
-                if (results.Count >= 20)
+                if (results.Count >= maxResults)
                 {
                     results.Add("... [TRUNCATED 20+ RESULTS]");
                     break;
@@ -1235,16 +1321,20 @@ public class ToolExecutor(
 
                 if (!string.IsNullOrEmpty(contains))
                 {
-                    var content = await File.ReadAllTextAsync(file, ct);
-                    if (content.Contains(contains, StringComparison.OrdinalIgnoreCase))
+                    try
                     {
-                        results.Add(file);
+                        // Skip binary files and cap per-file reads so a binary blob or an
+                        // enormous log cannot stall the search or blow up memory.
+                        if (!await FileContainsTextAsync(file, contains, ct))
+                            continue;
+                    }
+                    catch
+                    {
+                        continue; // unreadable/binary file: skip, don't kill the whole search
                     }
                 }
-                else
-                {
-                    results.Add(file);
-                }
+
+                results.Add(file);
             }
 
             return new ToolResult(request.Name, true, results.Count > 0 ? string.Join("\n", results) : "No files matched.", null);
@@ -1253,6 +1343,76 @@ public class ToolExecutor(
         {
             return new ToolResult(request.Name, false, "", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Recursively enumerates files without letting one unreadable subdirectory abort the whole
+    /// search (EnumerateFiles with AllDirectories throws mid-iteration on the first denied dir).
+    /// </summary>
+    private static IEnumerable<string> EnumerateFilesResilient(string root, string pattern)
+    {
+        IEnumerable<string> files;
+        IEnumerable<string> dirs;
+        try
+        {
+            files = Directory.EnumerateFiles(root, pattern);
+        }
+        catch
+        {
+            files = Array.Empty<string>();
+        }
+        try
+        {
+            dirs = Directory.EnumerateDirectories(root);
+        }
+        catch
+        {
+            dirs = Array.Empty<string>();
+        }
+
+        foreach (var file in files)
+        {
+            yield return file;
+        }
+        foreach (var dir in dirs)
+        {
+            foreach (var file in EnumerateFilesResilient(dir, pattern))
+            {
+                yield return file;
+            }
+        }
+    }
+
+    /// <summary>
+    /// True when <paramref name="file"/> is a text file containing <paramref name="needle"/>
+    /// (case-insensitive). Reads at most the first 5 MB and rejects NUL-heavy binary content.
+    /// </summary>
+    private static async Task<bool> FileContainsTextAsync(string file, string needle, CancellationToken ct)
+    {
+        const int maxReadBytes = 5 * 1024 * 1024;
+        var fileInfo = new FileInfo(file);
+        if (fileInfo.Length > maxReadBytes * 4)
+        {
+            // Very large file: still searchable, but only inspect the head to keep the search bounded.
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            var buffer = new byte[maxReadBytes];
+            int read = await stream.ReadAsync(buffer.AsMemory(0, maxReadBytes), ct);
+            if (ContainsNulByte(buffer.AsSpan(0, read))) return false;
+            return Encoding.UTF8.GetString(buffer, 0, read).Contains(needle, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var content = await File.ReadAllTextAsync(file, ct);
+        if (content.Length > 0 && content.IndexOf('\0') >= 0) return false;
+        return content.Contains(needle, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsNulByte(ReadOnlySpan<byte> span)
+    {
+        foreach (var b in span)
+        {
+            if (b == 0) return true;
+        }
+        return false;
     }
 
     private async Task<ToolResult> StoreMemoryAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
@@ -1414,6 +1574,12 @@ public class ToolExecutor(
             return new ToolResult(request.Name, false, "", "Language must be 'powershell', 'python', or 'csharp'.");
         }
 
+        var nameError = ValidateCustomToolName(name, _tools.Select(t => t.Name));
+        if (nameError != null)
+        {
+            return new ToolResult(request.Name, false, "", nameError);
+        }
+
         // Validate schema is parseable
         try { JsonSerializer.Deserialize<List<ToolParameter>>(schema, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }); }
         catch (Exception ex) { return new ToolResult(request.Name, false, "", $"Invalid parameters_schema JSON: {ex.Message}"); }
@@ -1438,10 +1604,28 @@ public class ToolExecutor(
                 using var validateProc = Process.Start(validatePsi);
                 if (validateProc != null)
                 {
-                    await validateProc.WaitForExitAsync(ct);
+                    // Read both streams concurrently (a long parse-error list can exceed the
+                    // stderr pipe buffer and deadlock a sequential read) and bound the wait.
+                    var validateOutTask = validateProc.StandardOutput.ReadToEndAsync(ct);
+                    var validateErrTask = validateProc.StandardError.ReadToEndAsync(ct);
+
+                    using var validateTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    using var validateLinked = CancellationTokenSource.CreateLinkedTokenSource(ct, validateTimeoutCts.Token);
+                    try
+                    {
+                        await validateProc.WaitForExitAsync(validateLinked.Token);
+                    }
+                    catch (OperationCanceledException) when (validateTimeoutCts.IsCancellationRequested)
+                    {
+                        try { validateProc.Kill(); } catch { /* ignore */ }
+                        logger.LogWarning("PowerShell syntax validation timed out for custom tool '{ToolName}'", name);
+                    }
+
+                    // Drain both streams (they hit EOF once the process exits).
+                    await validateOutTask;
+                    var syntaxErr = await validateErrTask;
                     if (validateProc.ExitCode != 0)
                     {
-                        var syntaxErr = await validateProc.StandardError.ReadToEndAsync(ct);
                         return new ToolResult(request.Name, false, "", 
                             $"PowerShell syntax validation failed — tool NOT created.\nError: {syntaxErr.Trim()}\nFix the script and try again.");
                     }
@@ -1456,8 +1640,29 @@ public class ToolExecutor(
 
         var record = new Klydis.Core.Memory.CustomToolRecord(name, desc, schema, script, lang, DateTime.UtcNow);
         await messageStore.CreateCustomToolAsync(record);
+        InvalidateCustomToolsCache();
 
         return new ToolResult(request.Name, true, $"Custom tool '{name}' created successfully. It is now available for use.", null);
+    }
+
+    /// <summary>
+    /// Validates a custom tool name. Names must be callable by the model (the qwen-native parser
+    /// only accepts [a-zA-Z0-9_.-]) and must not collide with a built-in tool — a shadowed
+    /// custom tool would never execute because dispatch always routes to the built-in.
+    /// Returns an error message, or null when the name is valid.
+    /// </summary>
+    internal static string? ValidateCustomToolName(string? name, IEnumerable<string> builtInNames)
+    {
+        if (string.IsNullOrEmpty(name)) return "Name is required";
+        if (!Regex.IsMatch(name, @"^[a-zA-Z0-9_.\-]+$"))
+        {
+            return "Invalid tool name. Use only letters, digits, underscores, dots, and dashes (no spaces).";
+        }
+        if (builtInNames.Any(b => b.Equals(name, StringComparison.OrdinalIgnoreCase)))
+        {
+            return $"Tool name '{name}' conflicts with a built-in system tool. Choose a different name.";
+        }
+        return null;
     }
 
     private async Task<ToolResult> DeleteCustomToolAsync(ToolCallRequest request, CancellationToken ct)
@@ -1466,6 +1671,7 @@ public class ToolExecutor(
         if (string.IsNullOrEmpty(name)) return new ToolResult(request.Name, false, "", "Name is required");
 
         await messageStore.DeleteCustomToolAsync(name);
+        InvalidateCustomToolsCache();
         return new ToolResult(request.Name, true, $"Custom tool '{name}' deleted.", null);
     }
 
@@ -1479,6 +1685,8 @@ public class ToolExecutor(
 
         return await Task.Run(async () =>
         {
+            string tempDir = string.Empty;
+            string tempFile = string.Empty;
             try
             {
                 var psi = new ProcessStartInfo
@@ -1486,16 +1694,15 @@ public class ToolExecutor(
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
                 };
-
-                string tempDir = string.Empty;
-                string tempFile = string.Empty;
 
                 if (tool.Language == "python")
                 {
                     tempFile = Path.GetTempFileName() + ".py";
-                    File.WriteAllText(tempFile, tool.ScriptContent);
+                    await File.WriteAllTextAsync(tempFile, tool.ScriptContent, ct);
                     psi.FileName = "python";
                     psi.Arguments = $"\"{tempFile}\"";
                 }
@@ -1503,57 +1710,79 @@ public class ToolExecutor(
                 {
                     tempDir = Path.Combine(Path.GetTempPath(), "KlydisCustomTool_" + Guid.NewGuid().ToString("N"));
                     Directory.CreateDirectory(tempDir);
-                    
-                    var csproj = @"<Project Sdk=""Microsoft.NET.Sdk""><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup></Project>";
-                    File.WriteAllText(Path.Combine(tempDir, "Tool.csproj"), csproj);
-                    
+
+                    // Target the SAME TFM as the host app (net10.0). A net9.0 console app fails to
+                    // run on machines with only the .NET 10 runtime installed (no major roll-forward
+                    // by default), so custom C# tools silently failed at runtime.
+                    var csproj = @"<Project Sdk=""Microsoft.NET.Sdk""><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup></Project>";
+                    await File.WriteAllTextAsync(Path.Combine(tempDir, "Tool.csproj"), csproj, ct);
+
                     var code = tool.ScriptContent;
                     // If no namespace/class is defined, wrap it in a top-level statement or just use it if they wrote one.
                     // We'll assume the model writes a valid Program.cs
-                    File.WriteAllText(Path.Combine(tempDir, "Program.cs"), code);
+                    await File.WriteAllTextAsync(Path.Combine(tempDir, "Program.cs"), code, ct);
 
                     psi.FileName = "dotnet";
-                    psi.Arguments = $"run --project \"{tempDir}\"";
+                    psi.Arguments = $"run --project \"{tempDir}\" --nologo";
                 }
                 else // powershell
                 {
                     tempFile = Path.GetTempFileName() + ".ps1";
-                    File.WriteAllText(tempFile, tool.ScriptContent);
+                    await File.WriteAllTextAsync(tempFile, tool.ScriptContent, ct);
                     psi.FileName = "powershell.exe";
                     psi.Arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{tempFile}\"";
                 }
 
                 foreach (var arg in request.Arguments)
                 {
-                    if (arg.Value != null)
+                    if (arg.Value == null) continue;
+                    // Env var names must not contain '=' or NUL; skip malformed keys instead of
+                    // failing the whole tool with a confusing ArgumentException.
+                    if (string.IsNullOrEmpty(arg.Key) || arg.Key.Contains('=') || arg.Key.Contains('\0'))
+                        continue;
+
+                    var stringVal = arg.Value.ToString() ?? "";
+                    if (arg.Value is JsonElement jsonElement)
                     {
-                        var stringVal = arg.Value.ToString() ?? "";
-                        if (arg.Value is JsonElement jsonElement)
-                        {
-                            if (jsonElement.ValueKind == JsonValueKind.String) stringVal = jsonElement.GetString() ?? "";
-                            else stringVal = jsonElement.GetRawText();
-                        }
-                        psi.EnvironmentVariables[arg.Key] = stringVal;
+                        if (jsonElement.ValueKind == JsonValueKind.String) stringVal = jsonElement.GetString() ?? "";
+                        else stringVal = jsonElement.GetRawText();
                     }
+                    psi.EnvironmentVariables[arg.Key] = stringVal;
                 }
 
                 using var process = Process.Start(psi);
                 if (process == null) return new ToolResult(request.Name, false, "", "Failed to start process");
 
-                // Windows Python asyncio subprocess bug wrapper not needed here as this is C# spawning the process, not Python.
+                // Read stdout/stderr CONCURRENTLY with process execution. Reading after
+                // WaitForExit deadlocks once the child fills a pipe buffer (typically ~4KB) —
+                // custom tools that print more than a few KB of output were killed at the 120s
+                // timeout every time. This is the same pattern RunCommandAsync uses.
+                var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+                var stderrTask = process.StandardError.ReadToEndAsync(ct);
 
-                if (!process.WaitForExit(120000)) // 2 min timeout to allow for dotnet run compilation
+                using var timeoutCts = new CancellationTokenSource(120000); // 2 min to allow for dotnet run compilation
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+                try
                 {
-                    process.Kill();
-                    return new ToolResult(request.Name, false, "", "Custom tool timed out after 120 seconds");
+                    await process.WaitForExitAsync(linkedCts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    try { process.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                    if (timeoutCts.IsCancellationRequested)
+                    {
+                        return new ToolResult(request.Name, false, "", "Custom tool timed out after 120 seconds");
+                    }
+                    throw;
                 }
 
-                var stdout = await process.StandardOutput.ReadToEndAsync();
-                var stderr = await process.StandardError.ReadToEndAsync();
-                
-                try 
-                { 
-                    if (!string.IsNullOrEmpty(tempFile)) File.Delete(tempFile); 
+                var stdout = await stdoutTask;
+                var stderr = await stderrTask;
+
+                try
+                {
+                    if (!string.IsNullOrEmpty(tempFile)) File.Delete(tempFile);
                     if (!string.IsNullOrEmpty(tempDir)) Directory.Delete(tempDir, true);
                 } catch { /* ignore */ }
 
@@ -1564,6 +1793,11 @@ public class ToolExecutor(
             }
             catch (Exception ex)
             {
+                try
+                {
+                    if (!string.IsNullOrEmpty(tempFile)) File.Delete(tempFile);
+                    if (!string.IsNullOrEmpty(tempDir)) Directory.Delete(tempDir, true);
+                } catch { /* ignore */ }
                 return new ToolResult(request.Name, false, "", ex.Message);
             }
         }, ct);
@@ -1832,6 +2066,55 @@ public class ToolExecutor(
             logger.LogError(ex, "Error indexing folder for RAG");
             return new ToolResult(request.Name, false, string.Empty, ex.Message);
         }
+    }
+
+    private async Task<ToolResult> LearnLessonAsync(ToolCallRequest request, CancellationToken ct, string? modelPath)
+    {
+        if (AdaptiveLearning == null)
+        {
+            return new ToolResult(request.Name, false, string.Empty, "Adaptive learning service is not configured.");
+        }
+
+        var lesson = GetStringArg(request.Arguments, "lesson");
+        if (string.IsNullOrWhiteSpace(lesson))
+        {
+            return new ToolResult(request.Name, false, string.Empty, "Lesson content is required.");
+        }
+        if (lesson.Length > 2000)
+        {
+            lesson = lesson[..2000];
+        }
+
+        var category = GetStringArg(request.Arguments, "category") ?? "general";
+        await AdaptiveLearning.RecordLessonAsync(
+            modelPath,
+            Klydis.Core.Learning.AdaptiveLearningService.TypeExplicit,
+            lesson,
+            source: $"explicit:{category.Trim()}",
+            ct: ct);
+
+        return new ToolResult(request.Name, true, $"Lesson recorded for future sessions: {lesson}", null);
+    }
+
+    private async Task<ToolResult> RecallLessonsAsync(ToolCallRequest request, CancellationToken ct, string? modelPath)
+    {
+        if (AdaptiveLearning == null)
+        {
+            return new ToolResult(request.Name, false, string.Empty, "Adaptive learning service is not configured.");
+        }
+
+        int limit = 8;
+        if (request.Arguments != null && request.Arguments.TryGetValue("limit", out var limObj))
+        {
+            var unwrapped = UnwrapJsonElement(limObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int l) && l > 0)
+            {
+                limit = Math.Clamp(l, 1, 20);
+            }
+        }
+
+        var text = await AdaptiveLearning.RecallLessonsTextAsync(modelPath, limit, ct);
+        return new ToolResult(request.Name, true, text, null);
     }
 
     private static ToolResult ExecuteTaskComplete(ToolCallRequest request)

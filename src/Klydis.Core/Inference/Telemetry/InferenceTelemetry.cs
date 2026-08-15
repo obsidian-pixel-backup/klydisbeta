@@ -19,5 +19,13 @@ public record InferenceTelemetry(
     double GenerationTokensPerSecond = 0,
     double EndToEndTokensPerSecond = 0,
     SpeculativeTelemetry? SpeculativeMetrics = null,
-    bool IsIsolated = false
+    bool IsIsolated = false,
+
+    /// <summary>
+    /// Prompt tokens processed per second during the prefill phase (prompt token count
+    /// divided by time-to-first-token). Estimated: TTFT includes the first decode, so this
+    /// slightly understates true prefill throughput; it is still the only prefill signal
+    /// available without native llama_perf hooks and lets the UI track TTFT regressions.
+    /// </summary>
+    double PromptPrefillTokensPerSecond = 0
 );

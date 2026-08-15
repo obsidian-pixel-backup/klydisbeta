@@ -15,6 +15,7 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer _timer;
     private readonly Klydis.Core.Hardware.SystemProfiler _systemProfiler;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
+    private readonly Klydis.Core.Chat.ChatEngine? _chatEngine;
     private bool _refreshing;
     private bool _isDisposed;
 
@@ -125,13 +126,18 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _vramSeverity = "Normal";
 
-    public SystemMonitorViewModel(Klydis.Core.Hardware.SystemProfiler systemProfiler, Klydis.Core.Inference.InferenceEngine inferenceEngine)
+    public SystemMonitorViewModel(
+        Klydis.Core.Hardware.SystemProfiler systemProfiler,
+        Klydis.Core.Inference.InferenceEngine inferenceEngine,
+        Klydis.Core.Chat.ChatEngine? chatEngine = null)
     {
         _systemProfiler = systemProfiler;
         _inferenceEngine = inferenceEngine;
+        _chatEngine = chatEngine;
         _inferenceEngine.TokenGenerated += OnTokenGenerated;
         _inferenceEngine.InferenceStarted += OnInferenceStarted;
         _inferenceEngine.InferenceCompleted += OnInferenceCompleted;
+        _inferenceEngine.ModelStateChanged += OnModelStateChanged;
         // 2s interval: system monitors don't need 1Hz updates, and each tick previously paid
         // WMI + nvidia-smi probes (SystemProfiler now caches the static half of those).
         _timer = new DispatcherTimer
@@ -140,6 +146,10 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
         };
         _timer.Tick += OnTimerTick;
         _timer.Start();
+
+        // Establish the correct initial state (a model may already be loaded when this VM is
+        // created — the gauge must not sit on the "no model loaded" default).
+        UpdateContextWindow();
     }
 
     /// <summary>
@@ -157,6 +167,25 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
         _inferenceEngine.TokenGenerated -= OnTokenGenerated;
         _inferenceEngine.InferenceStarted -= OnInferenceStarted;
         _inferenceEngine.InferenceCompleted -= OnInferenceCompleted;
+        _inferenceEngine.ModelStateChanged -= OnModelStateChanged;
+    }
+
+    private void OnModelStateChanged(bool loaded, string? modelPath)
+    {
+        // The gauge must react to model load/unload IMMEDIATELY (the 2s timer also catches it,
+        // but the tooltip otherwise showed the stale "no model loaded" default until the first
+        // generation).
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            if (loaded)
+            {
+                _ = RefreshContextWindowEstimateAsync();
+            }
+            else
+            {
+                UpdateContextWindow();
+            }
+        });
     }
 
     private void OnTokenGenerated(string token, float tokensPerSecond)
@@ -237,6 +266,19 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
 
     private void UpdateContextWindow()
     {
+        // Gate on IsModelLoaded FIRST: ContextSize falls back to 32768 when no model is loaded
+        // (and only clears its params on unload), so checking ContextSize > 0 alone would show a
+        // phantom "32K context" for an unloaded state.
+        if (!_inferenceEngine.IsModelLoaded)
+        {
+            ContextWindowUsedTokens = 0;
+            ContextWindowTotalTokens = 0;
+            ContextWindowRemainingPercent = 100;
+            ContextWindowSummary = "Context window: no model loaded";
+            ContextWindowSeverity = "Normal";
+            return;
+        }
+
         // Total context can change (model load / ReapplyModelParametersAsync) — read it fresh.
         ContextWindowTotalTokens = _inferenceEngine.ContextSize;
         long used = Math.Max(0, (long)_currentPromptTokens + _currentGeneratedTokens);
@@ -250,9 +292,13 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
             return;
         }
 
+        string modelLabel = string.IsNullOrWhiteSpace(_inferenceEngine.CurrentModelPath)
+            ? "model"
+            : System.IO.Path.GetFileNameWithoutExtension(_inferenceEngine.CurrentModelPath);
+
         long remaining = Math.Max(0, ContextWindowTotalTokens - used);
         ContextWindowRemainingPercent = Math.Round(remaining * 100.0 / ContextWindowTotalTokens, 1);
-        ContextWindowSummary = $"Context window: {FormatTokens(used)} used · {FormatTokens(remaining)} remaining of {FormatTokens(ContextWindowTotalTokens)}";
+        ContextWindowSummary = $"Context window ({modelLabel}): {FormatTokens(used)} used · {FormatTokens(remaining)} remaining of {FormatTokens(ContextWindowTotalTokens)}";
         ContextWindowSeverity = ContextWindowRemainingPercent < 10 ? "Critical" : ContextWindowRemainingPercent < 30 ? "Warning" : "Normal";
     }
 
@@ -350,6 +396,38 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
             {
                 ModelMemoryMb = 0;
             }
+
+            // Keep the ring accurate even when no generation is running: catches model load /
+            // unload (if the event was missed) and ContextSize changes from
+            // ReapplyModelParametersAsync. While idle, the gauge reflects the CURRENT session's
+            // context usage (system prompt + existing chat history) so opening an old chat shows
+            // its true occupancy immediately — the old behavior only updated on generation, so
+            // the ring sat at "0 used" until the user sent a message.
+            if (_chatEngine == null || !_chatEngine.IsGenerating)
+            {
+                _ = RefreshContextWindowEstimateAsync();
+            }
+            else
+            {
+                UpdateContextWindow();
+            }
         });
+    }
+
+    private async Task RefreshContextWindowEstimateAsync()
+    {
+        try
+        {
+            long estimate = _chatEngine != null
+                ? await _chatEngine.EstimateCurrentContextTokensAsync()
+                : 0;
+            _currentPromptTokens = (int)estimate;
+            _currentGeneratedTokens = 0;
+        }
+        catch
+        {
+            // Best-effort estimate; keep the previous reading on failure.
+        }
+        UpdateContextWindow();
     }
 }

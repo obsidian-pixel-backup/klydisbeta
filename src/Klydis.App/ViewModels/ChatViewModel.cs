@@ -47,6 +47,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private bool _isProcessingQueue;
     private EventHandler? _queueChangedHandler;
 
+    // Session switching is serialized: rapid chat clicks cannot interleave two loads, a stale
+    // (superseded) load never becomes the engine's active session, and a message sent right
+    // after selecting a chat is guaranteed to land in THAT chat (see EnsureEngineSessionAsync).
+    private readonly System.Threading.SemaphoreSlim _sessionLoadGate = new(1, 1);
+    private long _sessionLoadSeq;
+
     [ObservableProperty]
     private string _inputText = string.Empty;
 
@@ -796,6 +802,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         if (string.IsNullOrWhiteSpace(userMessage) && (attachments == null || attachments.Count == 0))
             return;
+
+        // The engine's active session must be the chat the user is looking at — otherwise the
+        // message (and its response) would persist into whichever session was last loaded.
+        await EnsureEngineSessionAsync();
 
         string promptMessagePayload = userMessage;
 
@@ -1565,58 +1575,115 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private async Task SelectSessionAsync(SessionInfo session)
     {
         if (session == null) return;
+        long seqId = Interlocked.Increment(ref _sessionLoadSeq);
+        await _sessionLoadGate.WaitAsync();
+        try
+        {
+            await LoadSessionAsync(session, seqId);
+        }
+        finally
+        {
+            _sessionLoadGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Loads one session's transcript + engine history. Serialized via <see cref="_sessionLoadGate"/>
+    /// so rapid chat clicks cannot interleave two loads, and guarded by <paramref name="seqId"/>
+    /// so a superseded (stale) load never clobbers the engine's active session — only the most
+    /// recent selection may call LoadHistory.
+    /// </summary>
+    private async Task LoadSessionAsync(SessionInfo session, long seqId)
+    {
         SessionTitle = session.Title;
         Messages.Clear();
         
-        var dbMessages = await _messageStore.GetMessagesAsync(session.Id, null);
-        var chatEngineMessages = new List<ChatMessage>();
-        
-        foreach (var msg in dbMessages)
+        List<ChatMessage> chatEngineMessages;
+        try
         {
-            var roleStr = msg.Role.ToString().ToLowerInvariant();
-            if (roleStr == "assistant")
+            var dbMessages = await _messageStore.GetMessagesAsync(session.Id, null);
+            chatEngineMessages = new List<ChatMessage>();
+            
+            foreach (var msg in dbMessages)
             {
-                var (thinking, content) = SplitThinkingContent(msg.Content);
-                if (!string.IsNullOrEmpty(thinking))
+                var roleStr = msg.Role.ToString().ToLowerInvariant();
+                if (roleStr == "assistant")
                 {
-                    Messages.Add(new ChatMessageViewModel
+                    var (thinking, content) = SplitThinkingContent(msg.Content);
+                    if (!string.IsNullOrEmpty(thinking))
                     {
-                        Role = "thought",
-                        Content = thinking,
-                        IsThinkingExpanded = string.IsNullOrWhiteSpace(StripToolCallBlocks(content)),
-                        Timestamp = msg.Timestamp
-                    });
-                }
+                        Messages.Add(new ChatMessageViewModel
+                        {
+                            Role = "thought",
+                            Content = thinking,
+                            IsThinkingExpanded = string.IsNullOrWhiteSpace(StripToolCallBlocks(content)),
+                            Timestamp = msg.Timestamp
+                        });
+                    }
 
-                // Raw tool-call JSON is engine plumbing; keep it out of the transcript view.
-                content = StripToolCallBlocks(content);
-                if (!string.IsNullOrWhiteSpace(content))
+                    // Raw tool-call JSON is engine plumbing; keep it out of the transcript view.
+                    content = StripToolCallBlocks(content);
+                    if (!string.IsNullOrWhiteSpace(content))
+                    {
+                        Messages.Add(new ChatMessageViewModel
+                        {
+                            Role = "assistant",
+                            Content = content,
+                            Timestamp = msg.Timestamp
+                        });
+                    }
+                }
+                else
                 {
                     Messages.Add(new ChatMessageViewModel
                     {
-                        Role = "assistant",
-                        Content = content,
+                        Role = roleStr,
+                        Content = msg.Content,
                         Timestamp = msg.Timestamp
                     });
                 }
-            }
-            else
-            {
-                Messages.Add(new ChatMessageViewModel
+                if (!msg.IsConsolidated)
                 {
-                    Role = roleStr,
-                    Content = msg.Content,
-                    Timestamp = msg.Timestamp
-                });
-            }
-            if (!msg.IsConsolidated)
-            {
-                chatEngineMessages.Add(new ChatMessage(msg.Role, msg.Content));
+                    chatEngineMessages.Add(new ChatMessage(msg.Role, msg.Content));
+                }
             }
         }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to load session {session.Id}: {ex.Message}");
+            return;
+        }
         
+        // Stale load: the user has since selected a different session — let that newer load win.
+        if (seqId != Interlocked.Read(ref _sessionLoadSeq)) return;
+
         _chatEngine?.LoadHistory(chatEngineMessages, session.Id);
         RefreshQueueUI();
+    }
+
+    /// <summary>
+    /// Guarantees the engine's active session matches the currently selected chat before a
+    /// message is sent. SelectSessionAsync is async (and can be slow on big sessions), so a
+    /// message typed immediately after clicking a chat could otherwise land in the PREVIOUS
+    /// session's history and store rows. Serialized on the same gate as session loads.
+    /// </summary>
+    private async Task EnsureEngineSessionAsync()
+    {
+        var targetId = SelectedSession?.Id;
+        if (targetId == null) return;
+        if (_chatEngine == null || _chatEngine.CurrentSessionId == targetId) return;
+
+        await _sessionLoadGate.WaitAsync();
+        try
+        {
+            // Re-check under the gate: a session load may have completed while we waited.
+            if (_chatEngine == null || _chatEngine.CurrentSessionId == targetId || SelectedSession?.Id != targetId) return;
+            await LoadSessionAsync(SelectedSession!, Interlocked.Increment(ref _sessionLoadSeq));
+        }
+        finally
+        {
+            _sessionLoadGate.Release();
+        }
     }
 
     [RelayCommand]

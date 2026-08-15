@@ -401,11 +401,14 @@ public static class NativeEngineManager
 
     /// <summary>
     /// Resolves direct release asset download URLs dynamically from GitHub API or release redirects.
-    /// Returns the release tag name alongside the asset URLs.
+    /// Returns the release tag name, the asset URLs, and each asset's published SHA-256 digest
+    /// (the GitHub releases API exposes it as "sha256:&lt;hex&gt;"; absent on older responses or
+    /// custom URLs). The digest is used to verify archives before they are extracted and deployed.
     /// </summary>
-    private static async Task<(string? Tag, List<string> Urls)> ResolveLatestReleaseDownloadUrlsAsync(HttpClient httpClient, ILogger? logger, CancellationToken ct = default)
+    private static async Task<(string? Tag, List<string> Urls, Dictionary<string, string> DigestByUrl)> ResolveLatestReleaseDownloadUrlsAsync(HttpClient httpClient, ILogger? logger, CancellationToken ct = default)
     {
         var urls = new List<string>();
+        var digestByUrl = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string? tag = null;
         try
         {
@@ -460,6 +463,22 @@ public static class NativeEngineManager
                                 name.Contains("x64", StringComparison.OrdinalIgnoreCase))
                             {
                                 candidates.Add((name, url));
+                                // GitHub publishes each asset's SHA-256 as "sha256:<hex>"; keep it
+                                // keyed by download URL so the downloader can verify before deploying.
+                                if (asset.TryGetProperty("digest", out var digestProp) &&
+                                    digestProp.ValueKind == JsonValueKind.String)
+                                {
+                                    string digest = (digestProp.GetString() ?? string.Empty).Trim();
+                                    const string Sha256Prefix = "sha256:";
+                                    if (digest.StartsWith(Sha256Prefix, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        digest = digest.Substring(Sha256Prefix.Length);
+                                    }
+                                    if (!string.IsNullOrWhiteSpace(digest))
+                                    {
+                                        digestByUrl[url] = digest;
+                                    }
+                                }
                             }
                         }
                     }
@@ -492,7 +511,7 @@ public static class NativeEngineManager
                                 logger?.LogInformation("Also fetching CPU release asset as fallback: {Name}", cpuFallback.name);
                                 urls.Add(cpuFallback.url);
                             }
-                            return (tag, urls);
+                            return (tag, urls, digestByUrl);
                         }
                     }
 
@@ -501,7 +520,7 @@ public static class NativeEngineManager
                     {
                         logger?.LogInformation("Selected Vulkan release asset: {Name}", vulkanAsset.name);
                         urls.Add(vulkanAsset.url);
-                        return (tag, urls);
+                        return (tag, urls, digestByUrl);
                     }
 
                     var cpuAsset = candidates.FirstOrDefault(a => a.name.Contains("cpu", StringComparison.OrdinalIgnoreCase) || a.name.Contains("avx2", StringComparison.OrdinalIgnoreCase));
@@ -509,13 +528,13 @@ public static class NativeEngineManager
                     {
                         logger?.LogInformation("Selected CPU release asset: {Name}", cpuAsset.name);
                         urls.Add(cpuAsset.url);
-                        return (tag, urls);
+                        return (tag, urls, digestByUrl);
                     }
 
                     var fallbackAsset = candidates.First();
                     logger?.LogInformation("Selected fallback release asset: {Name}", fallbackAsset.name);
                     urls.Add(fallbackAsset.url);
-                    return (tag, urls);
+                    return (tag, urls, digestByUrl);
                 }
                 catch (Exception ex)
                 {
@@ -528,7 +547,17 @@ public static class NativeEngineManager
             logger?.LogError(ex, "Failed to resolve latest release URL from GitHub API.");
         }
 
-        return (tag, urls);
+        return (tag, urls, digestByUrl);
+    }
+
+    /// <summary>
+    /// Computes the lowercase-hex SHA-256 of a file.
+    /// </summary>
+    private static string ComputeFileSha256(string filePath)
+    {
+        using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var hash = System.Security.Cryptography.SHA256.Create();
+        return Convert.ToHexStringLower(hash.ComputeHash(stream));
     }
 
     /// <summary>
@@ -548,6 +577,7 @@ public static class NativeEngineManager
         httpClient.Timeout = TimeSpan.FromMinutes(5);
 
         List<string> urlsToDownload = new();
+        var digestByUrl = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string? resolvedTag = null;
         downloadUrl ??= Environment.GetEnvironmentVariable("LLAMA_CPP_RELEASE_URL");
         if (!string.IsNullOrWhiteSpace(downloadUrl))
@@ -556,7 +586,7 @@ public static class NativeEngineManager
         }
         else
         {
-            (resolvedTag, urlsToDownload) = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger, ct);
+            (resolvedTag, urlsToDownload, digestByUrl) = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger, ct);
         }
 
         if (urlsToDownload.Count == 0)
@@ -586,6 +616,27 @@ public static class NativeEngineManager
                     {
                         await contentStream.CopyToAsync(fileStream, ct).ConfigureAwait(false);
                     }
+                }
+
+                // Security: verify the archive against the GitHub-published SHA-256 digest BEFORE
+                // extracting anything. The extracted .dll/.exe files are executed in-process, so
+                // an unverified download (MITM, compromised asset, truncated transfer) is arbitrary
+                // code execution. Custom URLs (env override) have no published digest and are
+                // logged as unverified rather than silently trusted.
+                if (digestByUrl.TryGetValue(url, out var expectedDigest) && !string.IsNullOrWhiteSpace(expectedDigest))
+                {
+                    string actualDigest = ComputeFileSha256(tempZipPath);
+                    if (!string.Equals(actualDigest, expectedDigest, StringComparison.OrdinalIgnoreCase))
+                    {
+                        logger?.LogError("SHA-256 mismatch for {Url}: expected {Expected}, got {Actual}. Refusing to deploy the package.", url, expectedDigest, actualDigest);
+                        try { File.Delete(tempZipPath); } catch { }
+                        continue;
+                    }
+                    logger?.LogInformation("Verified SHA-256 digest for {Url}.", url);
+                }
+                else
+                {
+                    logger?.LogWarning("No SHA-256 digest available for {Url}; skipping integrity verification.", url);
                 }
 
                 var tempExtractDir = Path.Combine(Path.GetTempPath(), $"llama_extracted_{Guid.NewGuid():N}");
@@ -658,7 +709,7 @@ public static class NativeEngineManager
             httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("KlydisApp/1.0");
             httpClient.Timeout = TimeSpan.FromSeconds(15);
 
-            var (latestTag, _) = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger, ct);
+            var (latestTag, _, _) = await ResolveLatestReleaseDownloadUrlsAsync(httpClient, logger, ct);
             if (string.IsNullOrWhiteSpace(latestTag))
             {
                 return false;

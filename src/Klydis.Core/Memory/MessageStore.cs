@@ -50,6 +50,19 @@ public record CustomToolRecord(
 );
 
 /// <summary>
+/// A persistent lesson learned by the system or the model, shared across sessions.
+/// </summary>
+public record LessonRecord(
+    string LessonKey,
+    string ModelName,
+    string Type,
+    string Content,
+    string? Source,
+    string CreatedAt,
+    int UseCount
+);
+
+/// <summary>
 /// SQLite-based persistence for chat sessions and messages.
 /// </summary>
 public class MessageStore
@@ -80,14 +93,31 @@ public class MessageStore
     }
 
     /// <summary>
+    /// Opens a pooled connection with the per-connection pragmas this store relies on.
+    /// <c>journal_mode=WAL</c> is set once at initialize (it is persistent in the database
+    /// header), but <c>synchronous</c> and <c>busy_timeout</c> are per-connection, so every
+    /// open re-applies them. <c>synchronous=NORMAL</c> is the recommended durability level
+    /// for WAL mode — it removes the per-transaction fsync that <c>FULL</c> performs, which
+    /// matters here because AddMessageAsync commits inside the generation loop.
+    /// </summary>
+    private async Task<SqliteConnection> CreateConnectionAsync()
+    {
+        var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;";
+        await pragma.ExecuteNonQueryAsync();
+        return connection;
+    }
+
+    /// <summary>
     /// Creates the database and tables if they do not exist.
     /// </summary>
     public async Task InitializeAsync()
     {
         _logger.LogInformation("Initializing MessageStore SQLite database.");
         
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         // Enable Write-Ahead Logging for concurrent reads
         await using var pragmaCommand = connection.CreateCommand();
@@ -127,6 +157,17 @@ public class MessageStore
                 script_content TEXT NOT NULL,
                 language TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS lessons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lesson_key TEXT NOT NULL UNIQUE,
+                model_name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source TEXT,
+                created_at TEXT NOT NULL,
+                use_count INTEGER DEFAULT 0
             );
 
             -- FTS5 Virtual Table for full-text search
@@ -191,8 +232,7 @@ public class MessageStore
         string sessionId = string.IsNullOrEmpty(customSessionId) ? Guid.NewGuid().ToString() : customSessionId;
         string now = DateTime.UtcNow.ToString("o");
         
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -216,8 +256,7 @@ public class MessageStore
     {
         var sessions = new List<SessionRecord>();
         
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM sessions ORDER BY is_pinned DESC, updated_at DESC";
@@ -236,8 +275,7 @@ public class MessageStore
     /// </summary>
     public async Task<SessionRecord?> GetSessionAsync(string sessionId)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM sessions WHERE id = @id";
@@ -257,8 +295,7 @@ public class MessageStore
     /// </summary>
     public async Task UpdateSessionAsync(string sessionId, string? title, string? worldState, string? systemPrompt, bool? isPinned = null)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         
@@ -296,8 +333,7 @@ public class MessageStore
     /// </summary>
     public async Task DeleteSessionAsync(string sessionId)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         // Ensure foreign key constraints are enforced for the cascading delete
         await using var pragmaCommand = connection.CreateCommand();
@@ -316,8 +352,7 @@ public class MessageStore
     /// </summary>
     public async Task AddMessageAsync(string sessionId, ChatRole role, string content, int tokenCount, string? toolCallsJson)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -347,8 +382,7 @@ public class MessageStore
     {
         var messages = new List<MessageRecord>();
         
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM messages WHERE session_id = @sessionId ORDER BY id ASC" + (limit.HasValue ? " LIMIT @limit" : "");
@@ -371,8 +405,7 @@ public class MessageStore
     /// </summary>
     public async Task<int> GetMessageCountAsync(string sessionId)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM messages WHERE session_id = @sessionId";
@@ -386,8 +419,7 @@ public class MessageStore
     /// </summary>
     public async Task DeleteMessageAsync(int messageId)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM messages WHERE id = @id";
@@ -403,8 +435,7 @@ public class MessageStore
     {
         var results = new List<(MessageRecord Message, double Rank)>();
         
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -437,8 +468,7 @@ public class MessageStore
     {
         var tools = new List<CustomToolRecord>();
         
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT * FROM custom_tools ORDER BY name ASC";
@@ -464,8 +494,7 @@ public class MessageStore
     /// </summary>
     public async Task CreateCustomToolAsync(CustomToolRecord tool)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -492,14 +521,88 @@ public class MessageStore
     /// </summary>
     public async Task DeleteCustomToolAsync(string name)
     {
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM custom_tools WHERE name = @name";
         command.Parameters.AddWithValue("@name", name);
         
         await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Persists a lesson learned (auto-correction event, tool failure, or explicit model learning).
+    /// Deduplicates by (model, type, normalized content): a repeated identical lesson increments
+    /// its use_count instead of creating new rows, so the recurrence signal survives.
+    /// </summary>
+    public async Task AddLessonAsync(string modelName, string type, string content, string? source = null)
+    {
+        var normalized = content.Trim().ToLowerInvariant();
+        var hashBytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(normalized));
+        string key = $"{modelName}|{type}|{Convert.ToHexString(hashBytes)[..16]}";
+
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT INTO lessons (lesson_key, model_name, type, content, source, created_at, use_count)
+            VALUES (@key, @model, @type, @content, @source, @created, 1)
+            ON CONFLICT(lesson_key) DO UPDATE SET use_count = use_count + 1";
+        command.Parameters.AddWithValue("@key", key);
+        command.Parameters.AddWithValue("@model", modelName);
+        command.Parameters.AddWithValue("@type", type);
+        command.Parameters.AddWithValue("@content", content.Trim());
+        command.Parameters.AddWithValue("@source", (object?)source ?? DBNull.Value);
+        command.Parameters.AddWithValue("@created", DateTime.UtcNow.ToString("o"));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Returns the most recent lessons, newest first, optionally filtered by model and type.
+    /// </summary>
+    public async Task<List<LessonRecord>> GetRecentLessonsAsync(string? modelName = null, string? type = null, int limit = 20)
+    {
+        var results = new List<LessonRecord>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT lesson_key, model_name, type, content, source, created_at, use_count
+            FROM lessons
+            WHERE (@model IS NULL OR model_name = @model)
+              AND (@type IS NULL OR type = @type)
+            ORDER BY use_count DESC, created_at DESC
+            LIMIT @limit";
+        command.Parameters.AddWithValue("@model", (object?)modelName ?? DBNull.Value);
+        command.Parameters.AddWithValue("@type", (object?)type ?? DBNull.Value);
+        command.Parameters.AddWithValue("@limit", limit);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            results.Add(new LessonRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.GetString(5),
+                reader.GetInt32(6)));
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Counts lessons of a given type for a model — used for adaptive behavior decisions
+    /// (e.g. switching a model off the native tool-call format after repeated failures).
+    /// </summary>
+    public async Task<int> GetLessonCountAsync(string modelName, string type)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COALESCE(SUM(use_count), 0) FROM lessons WHERE model_name = @model AND type = @type";
+        command.Parameters.AddWithValue("@model", modelName);
+        command.Parameters.AddWithValue("@type", type);
+        var result = await command.ExecuteScalarAsync();
+        return Convert.ToInt32(result ?? 0);
     }
 
     /// <summary>
@@ -626,8 +729,7 @@ public class MessageStore
     {
         if (messageIds == null || !messageIds.Any()) return;
 
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync();
+        await using var connection = await CreateConnectionAsync();
         
         // One batched UPDATE instead of one round-trip per row (the old N+1). Ids come from the
         // database itself (AUTOINCREMENT integers), so inlining them is injection-safe.

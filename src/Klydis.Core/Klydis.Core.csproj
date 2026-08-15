@@ -25,19 +25,19 @@
     <PackageReference Include="LLamaSharp.Backend.Cpu" Version="0.27.0" />
     
     <!-- SQLite for message/session storage -->
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
     
     <!-- Structured logging -->
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
     
     <!-- WMI for system profiling (Windows) -->
-    <PackageReference Include="System.Management" Version="10.0.10" />
+    <PackageReference Include="System.Management" Version="10.0.11" />
 
     <!-- Playwright for local web crawling -->
-    <PackageReference Include="Microsoft.Playwright" Version="1.61.0" />
+    <PackageReference Include="Microsoft.Playwright" Version="1.62.0" />
     <PackageReference Include="ManagedCode.Playwright.Stealth" Version="1.0.1" />
-    <PackageReference Include="ReverseMarkdown" Version="6.1.1" />
+    <PackageReference Include="ReverseMarkdown" Version="6.2.1" />
   </ItemGroup>
 
 </Project>

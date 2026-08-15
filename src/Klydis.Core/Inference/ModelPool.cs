@@ -179,8 +179,8 @@ public sealed class ModelPool : IDisposable, IAsyncDisposable
             availableVram = newGpuInfo != null ? newGpuInfo.FreeVramMb * 1024L * 1024L : 0;
         }
 
-        // Read GGUF metadata for dynamic sizing
-        var metadata = GgufMetadataReader.Parse(modelFilePath);
+        // Read GGUF metadata for dynamic sizing (cached — InferenceEngine already parsed it)
+        var metadata = GgufMetadataReader.ParseCached(modelFilePath);
         int totalLayers = Math.Max(1, metadata != null && metadata.BlockCount.HasValue ? (int)metadata.BlockCount.Value : 32);
         long layerSizeBytes = modelInfo.FileSizeBytes / totalLayers; // Approximation
 
@@ -193,14 +193,17 @@ public sealed class ModelPool : IDisposable, IAsyncDisposable
         int rawContextLength = (int)(metadata?.ContextLength ?? 65536);
         int contextLength = Math.Clamp(rawContextLength < 65536 ? 65536 : rawContextLength, 65536, contextCeiling);
 
-        // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * sizeof(element)
-        // Klydis enforces Q4_0 4-bit quantized KV cache (configured in InferenceEngine), so sizeof = 0.5 bytes.
-        long kvCachePerLayerBytes = 1024; // Safe default: 2 * 8 * 128 * 0.5 = 1024
+        // KV cache per layer per token: 2 (K+V) * HeadCountKv * HeadDim * bytesPerElement
+        // Klydis enforces Q4_0 quantized KV cache (configured in InferenceEngine); the byte
+        // cost comes from KvCacheCalculator so the GGML block layout (18 bytes / 32 elements)
+        // stays in one place instead of a duplicated magic constant.
+        double kvBytesPerElement = KvCacheCalculator.GetBytesPerElement(KvCacheQuantizationType.Q4_0);
+        long kvCachePerLayerBytes = 1152; // Safe default: 2 * 8 * 128 * 0.5625 = 1152
         if (metadata != null && metadata.EmbeddingLength.HasValue && metadata.HeadCount.HasValue && metadata.HeadCountKv.HasValue)
         {
             long headDim = metadata.EmbeddingLength.Value / Math.Max(1, metadata.HeadCount.Value);
-            // K + V (2) * HeadCountKv * headDim * 0.5 bytes (Q4_0 4-bit quantized KV cache)
-            kvCachePerLayerBytes = (long)(2 * metadata.HeadCountKv.Value * headDim * 0.5);
+            // K + V (2) * HeadCountKv * headDim * bytesPerElement (Q4_0 quantized KV cache)
+            kvCachePerLayerBytes = (long)(2 * metadata.HeadCountKv.Value * headDim * kvBytesPerElement);
         }
 
         var offloadPlan = _offloadStrategy.CalculatePlan(

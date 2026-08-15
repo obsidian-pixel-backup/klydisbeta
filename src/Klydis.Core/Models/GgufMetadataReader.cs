@@ -37,6 +37,49 @@ public static class GgufMetadataReader
 {
     private const uint GgufMagic = 0x46554747; // 'GGUF' in little endian
 
+    /// <summary>
+    /// Cached parse result keyed by file path + last-write-time + length. Model loading
+    /// parses the same GGUF header several times (InferenceEngine, GgufCompatibilityAdapter
+    /// + its integrity walk, ModelPool), so a multi-GB model used to pay 3-4 full header
+    /// reads per cold load. Bounded by a simple cap: metadata entries are tiny (a few dozen
+    /// KV pairs), so clearing beyond the cap costs almost nothing.
+    /// </summary>
+    private sealed record CachedGguf(DateTime LastWriteTimeUtc, long Length, GgufMetadata? Metadata);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CachedGguf> ParseCache = new();
+
+    private const int ParseCacheCap = 64;
+
+    /// <summary>
+    /// Parses GGUF metadata with a file-keyed cache (path + last-write-time + length), so
+    /// repeated parses of the same unchanged file are free. Falls back to an uncached parse
+    /// on any cache failure.
+    /// </summary>
+    public static GgufMetadata? ParseCached(string filePath)
+    {
+        try
+        {
+            var info = new FileInfo(filePath);
+            if (!info.Exists) return null;
+
+            if (ParseCache.TryGetValue(info.FullName, out var cached) &&
+                cached.LastWriteTimeUtc == info.LastWriteTimeUtc &&
+                cached.Length == info.Length)
+            {
+                return cached.Metadata;
+            }
+
+            var parsed = Parse(filePath);
+            if (ParseCache.Count > ParseCacheCap) ParseCache.Clear();
+            ParseCache[info.FullName] = new CachedGguf(info.LastWriteTimeUtc, info.Length, parsed);
+            return parsed;
+        }
+        catch
+        {
+            return Parse(filePath);
+        }
+    }
+
     private enum GgufValueType : uint
     {
         Uint8 = 0, Int8 = 1, Uint16 = 2, Int16 = 3,
@@ -251,6 +294,46 @@ public static class GgufMetadataReader
     }
 
     /// <summary>
+    /// Cached variant of <see cref="ValidateStructuralIntegrity"/>, keyed like
+    /// <see cref="ParseCached"/>. The integrity walk reads the whole header plus the tensor
+    /// table, so caching it avoids repeating that work when the same model is evaluated
+    /// repeatedly (e.g. per load, per model-library refresh).
+    /// </summary>
+    private sealed record CachedIntegrity(DateTime LastWriteTimeUtc, long Length, GgufIntegrityResult Result);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CachedIntegrity> IntegrityCache = new();
+
+    private const int IntegrityCacheCap = 64;
+
+    public static GgufIntegrityResult ValidateStructuralIntegrityCached(string filePath)
+    {
+        try
+        {
+            var info = new FileInfo(filePath);
+            if (!info.Exists)
+            {
+                return new GgufIntegrityResult(false, "Model file not found.");
+            }
+
+            if (IntegrityCache.TryGetValue(info.FullName, out var cached) &&
+                cached.LastWriteTimeUtc == info.LastWriteTimeUtc &&
+                cached.Length == info.Length)
+            {
+                return cached.Result;
+            }
+
+            var result = ValidateStructuralIntegrity(filePath);
+            if (IntegrityCache.Count > IntegrityCacheCap) IntegrityCache.Clear();
+            IntegrityCache[info.FullName] = new CachedIntegrity(info.LastWriteTimeUtc, info.Length, result);
+            return result;
+        }
+        catch
+        {
+            return ValidateStructuralIntegrity(filePath);
+        }
+    }
+
+    /// <summary>
     /// Validates the structural integrity of a GGUF file WITHOUT any architecture assumptions:
     /// (1) the tensor-info table must contain exactly tensor_count entries (i.e. the header is
     ///     not truncated mid-table), (2) every transformer block the metadata declares
@@ -339,7 +422,7 @@ public static class GgufMetadataReader
                 }
             }
 
-            var metadata = Parse(filePath);
+            var metadata = ParseCached(filePath);
             long declaredBlocks = metadata?.BlockCount ?? 0;
 
             if (anyBlockTensors && declaredBlocks > 0 && maxBlockSeen >= 0 && maxBlockSeen < declaredBlocks - 1)

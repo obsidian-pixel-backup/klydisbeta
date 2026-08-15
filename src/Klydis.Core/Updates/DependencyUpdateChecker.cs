@@ -78,27 +78,27 @@ public static class DependencyUpdateChecker
     {
         // Klydis.Core
         ("HtmlAgilityPack", "1.12.4"),
-        ("ReverseMarkdown", "6.1.1"),
+        ("ReverseMarkdown", "6.2.1"),
         ("LLamaSharp.Backend.Cpu", "0.27.0"),
         ("LLamaSharp.Backend.Cuda12", "0.27.0"),
         ("LLamaSharp.Backend.Vulkan", "0.27.0"),
-        ("Microsoft.Data.Sqlite", "10.0.10"),
-        ("Microsoft.Extensions.Logging.Abstractions", "10.0.10"),
+        ("Microsoft.Data.Sqlite", "10.0.11"),
+        ("Microsoft.Extensions.Logging.Abstractions", "10.0.11"),
         ("SQLitePCLRaw.lib.e_sqlite3", "3.53.3"),
-        ("System.Management", "10.0.10"),
-        ("Microsoft.Playwright", "1.61.0"),
+        ("System.Management", "10.0.11"),
+        ("Microsoft.Playwright", "1.62.0"),
         ("ManagedCode.Playwright.Stealth", "1.0.1"),
         // Klydis.App
         ("MdXaml", "1.27.0"),
         ("CommunityToolkit.Mvvm", "8.4.2"),
-        ("Microsoft.Extensions.DependencyInjection", "10.0.10"),
-        ("Microsoft.Extensions.Logging", "10.0.10"),
-        ("Microsoft.Extensions.Logging.Console", "10.0.10"),
+        ("Microsoft.Extensions.DependencyInjection", "10.0.11"),
+        ("Microsoft.Extensions.Logging", "10.0.11"),
+        ("Microsoft.Extensions.Logging.Console", "10.0.11"),
         // Klydis.McpServer
-        ("Microsoft.Extensions.Hosting", "10.0.10"),
-        ("ModelContextProtocol", "2.1.0"),
+        ("Microsoft.Extensions.Hosting", "10.0.11"),
+        ("ModelContextProtocol", "2.2.0"),
         // Tests
-        ("Microsoft.NET.Test.Sdk", "18.8.1"),
+        ("Microsoft.NET.Test.Sdk", "18.9.0"),
         ("NUnit", "4.6.1"),
         ("NUnit3TestAdapter", "6.2.0")
     };
