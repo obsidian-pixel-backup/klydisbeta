@@ -203,7 +203,7 @@
                     </RadioButton>
                     <RadioButton Style="{StaticResource SidePanelTabStyle}" GroupName="SidePanelTabs"
                                  IsChecked="{Binding SidePanel.SelectedTab, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Terminal}"
-                                 ToolTip="Live tail of the Klydis log files">
+                                 ToolTip="The model's shell commands and their outputs — its terminal usage, not debug logs">
                         <TextBlock Text="Terminal"/>
                     </RadioButton>
                     <RadioButton Style="{StaticResource SidePanelTabStyle}" GroupName="SidePanelTabs"
@@ -231,6 +231,12 @@
                         <TextBlock Text="{Binding SidePanel.QueueSummaryText}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}"
                                    TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <ComboBox Width="118" Height="24" FontSize="11" Margin="0,0,6,0" VerticalAlignment="Center"
+                                      ItemsSource="{Binding QueueSortOptions}" SelectedItem="{Binding SelectedQueueSortOption}"
+                                      DisplayMemberPath="Label"
+                                      ToolTip="Sort the queued messages (display only — processing stays oldest-first)"
+                                      Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
+                                      BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"/>
                             <Button Style="{DynamicResource GhostButton}" Command="{Binding SendAllQueuedNowCommand}"
                                     Content="Send all" FontSize="11" Padding="8,3" Margin="0,0,6,0"
                                     ToolTip="Send ALL queued messages now, one after another (cancels any running generation)"/>
@@ -241,10 +247,59 @@
                 </Border>
 
                 <Grid Grid.Row="1">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <ItemsControl ItemsSource="{Binding SidePanel.QueuedMessages}" Margin="10">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
+                    <!-- Drag-and-drop reordering lives in code-behind (QueuedMessagesList_* handlers).
+                         Dragging only works from the item body — not the edit TextBox or buttons. -->
+                    <ListBox x:Name="QueuedMessagesList"
+                             ItemsSource="{Binding SidePanel.QueuedMessages}"
+                             Margin="10"
+                             AllowDrop="True"
+                             Background="Transparent" BorderThickness="0" Padding="0"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             VirtualizingPanel.IsVirtualizing="False"
+                             PreviewMouseLeftButtonDown="QueuedMessagesList_PreviewMouseLeftButtonDown"
+                             PreviewMouseMove="QueuedMessagesList_PreviewMouseMove"
+                             DragOver="QueuedMessagesList_DragOver"
+                             DragLeave="QueuedMessagesList_DragLeave"
+                             Drop="QueuedMessagesList_Drop"
+                             ToolTip="Drag a queued message to change its processing order (Manual order)">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                <Setter Property="Padding" Value="0"/>
+                                <Setter Property="Margin" Value="0"/>
+                                <Setter Property="Focusable" Value="False"/>
+                                <Setter Property="Background" Value="Transparent"/>
+                                <Setter Property="BorderBrush" Value="Transparent"/>
+                                <Setter Property="BorderThickness" Value="0"/>
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="ListBoxItem">
+                                            <Border x:Name="Bd"
+                                                    Background="{TemplateBinding Background}"
+                                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                                    SnapsToDevicePixels="True">
+                                                <ContentPresenter/>
+                                            </Border>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                                <Style.Triggers>
+                                    <!-- Drop-position indicator: a 2px accent line on the top or
+                                         bottom edge of the target item (set via Tag by code-behind). -->
+                                    <Trigger Property="Tag" Value="drop-before">
+                                        <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                        <Setter Property="BorderThickness" Value="0,2,0,0"/>
+                                    </Trigger>
+                                    <Trigger Property="Tag" Value="drop-after">
+                                        <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                        <Setter Property="BorderThickness" Value="0,0,0,2"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
                                     <Border Background="{DynamicResource InputBackgroundBrush}"
                                             BorderBrush="{DynamicResource BorderBrush}"
                                             BorderThickness="1" CornerRadius="6" Margin="0,0,0,6" Padding="6,5">
@@ -297,9 +352,8 @@
                                         </DataTrigger>
                                     </DataTemplate.Triggers>
                                 </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
 
                     <TextBlock Text="Nothing queued." FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
                                HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -691,6 +745,9 @@
             </Grid>
 
             <!-- ============ TERMINAL ============ -->
+            <!-- The model's terminal usage: every run_command the model executed, rendered as a
+                 bracketed input/output transcript. NOT debug logs — the transcript is rebuilt
+                 from this session's recorded tool activity on the 2s tick. -->
             <Grid Grid.Row="1" Style="{StaticResource SidePanelTabVisibilityTerminal}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -698,33 +755,58 @@
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" Padding="12,8,12,6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel>
-                            <ComboBox Width="170" Height="26" HorizontalAlignment="Left" FontSize="11"
-                                      ItemsSource="{Binding SidePanel.LogSources}" SelectedItem="{Binding SidePanel.SelectedLogSource}"
-                                      Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
-                                      BorderThickness="1" BorderBrush="{DynamicResource BorderBrush}"/>
-                            <TextBlock Text="{Binding SidePanel.LogSourceHint}" FontSize="10" Foreground="{DynamicResource TextMutedBrush}"
-                                       Margin="0,4,0,0" TextWrapping="Wrap"/>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Style="{DynamicResource GhostButton}" Command="{Binding SidePanel.OpenLogFolderCommand}"
-                                    Content="Open folder" FontSize="11" Padding="8,3" Margin="0,0,6,0"/>
-                            <Button Style="{DynamicResource GhostButton}" Command="{Binding SidePanel.RefreshLogCommand}"
-                                    Content="Refresh" FontSize="11" Padding="8,3"/>
-                        </StackPanel>
-                    </Grid>
+                    <TextBlock Text="{Binding SidePanel.TerminalStatusText}" FontSize="10"
+                               Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap"/>
                 </Border>
 
-                <TextBox x:Name="LogBox" Grid.Row="1" IsReadOnly="True" FontFamily="Consolas" FontSize="11"
-                         Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextSecondaryBrush}"
-                         BorderThickness="0" TextWrapping="NoWrap" AcceptsReturn="True" Padding="10,8"
-                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                         Text="{Binding SidePanel.LogContent, Mode=OneWay}"/>
+                <ListBox x:Name="TerminalList" Grid.Row="1" ItemsSource="{Binding SidePanel.TerminalEntries}"
+                         Background="Transparent" BorderThickness="0" Padding="10,8"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         VirtualizingPanel.ScrollUnit="Pixel"
+                         ScrollViewer.CanContentScroll="True">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <!-- Bracket: one bordered block per command, input on top, output below -->
+                            <Border Margin="0,0,0,8" Padding="10" CornerRadius="4"
+                                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                    Background="{DynamicResource InputBackgroundBrush}">
+                                <StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Prompt}" FontFamily="Consolas" FontSize="11"
+                                                   Foreground="{DynamicResource AccentPrimaryBrush}"
+                                                   TextWrapping="Wrap"/>
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                                    VerticalAlignment="Top" Margin="8,0,0,0">
+                                            <TextBlock Text="{Binding Timestamp, StringFormat=HH:mm:ss}" FontSize="10"
+                                                       Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,6,0"/>
+                                            <TextBlock Text="{Binding StatusBadge}" FontSize="9" FontWeight="SemiBold">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Success}" Value="False">
+                                                                <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </StackPanel>
+                                    </Grid>
+                                    <Border Margin="0,8,0,0" Padding="8" CornerRadius="3"
+                                            Background="{DynamicResource PanelBackgroundBrush}">
+                                        <TextBlock Text="{Binding Output}" FontFamily="Consolas" FontSize="11"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
             </Grid>
 
             <!-- ============ NOTES ============ -->

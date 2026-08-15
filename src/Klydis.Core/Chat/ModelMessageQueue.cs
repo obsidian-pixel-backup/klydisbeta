@@ -52,6 +52,14 @@ public record QueuedMessage
     public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
 
     /// <summary>
+    /// Explicit position in the session's processing order (0 = first). Set on enqueue and
+    /// renormalized by <see cref="ModelMessageQueue.Reorder"/>; persisted so a drag-and-drop
+    /// reordering survives restarts. Items with equal position fall back to CreatedAt (FIFO),
+    /// which keeps legacy rows without a meaningful position in their original order.
+    /// </summary>
+    public int Position { get; set; }
+
+    /// <summary>
     /// Number of times this message has been claimed for processing (lease renewals).
     /// Persisted so it survives restarts.
     /// </summary>
@@ -138,6 +146,8 @@ public class ModelMessageQueue
 
         lock (_lock)
         {
+            // Append at the end of the session's queued items (next free position).
+            msg.Position = _queue.Count(m => m.SessionId == msg.SessionId && m.Status == QueuedMessageStatus.Queued);
             _queue.Add(msg);
         }
 
@@ -167,14 +177,20 @@ public class ModelMessageQueue
     /// <summary>
     /// Gets all pending queued messages for a given session.
     /// </summary>
+    /// <summary>
+    /// Processing order for a session's queued messages: explicit <see cref="QueuedMessage.Position"/>
+    /// first (drag-and-drop reorder), then CreatedAt (FIFO tiebreak for equal positions).
+    /// </summary>
+    private static IEnumerable<QueuedMessage> InProcessingOrder(IEnumerable<QueuedMessage> items)
+        => items.OrderBy(m => m.Position).ThenBy(m => m.CreatedAt);
+
     public IReadOnlyList<QueuedMessage> GetPending(string sessionId)
     {
         EnsureLoaded();
         lock (_lock)
         {
-            return _queue
-                .Where(m => m.SessionId == sessionId && m.Status == QueuedMessageStatus.Queued)
-                .OrderBy(m => m.CreatedAt)
+            return InProcessingOrder(_queue
+                .Where(m => m.SessionId == sessionId && m.Status == QueuedMessageStatus.Queued))
                 .ToList();
         }
     }
@@ -187,9 +203,8 @@ public class ModelMessageQueue
         EnsureLoaded();
         lock (_lock)
         {
-            return _queue
-                .Where(m => m.SessionId == sessionId && m.Mode == QueuedMessageMode.Steer && m.Status == QueuedMessageStatus.Queued)
-                .OrderBy(m => m.CreatedAt)
+            return InProcessingOrder(_queue
+                .Where(m => m.SessionId == sessionId && m.Mode == QueuedMessageMode.Steer && m.Status == QueuedMessageStatus.Queued))
                 .ToList();
         }
     }
@@ -202,9 +217,8 @@ public class ModelMessageQueue
         EnsureLoaded();
         lock (_lock)
         {
-            return _queue
-                .Where(m => m.SessionId == sessionId && m.Mode == QueuedMessageMode.DirectSend && m.Status == QueuedMessageStatus.Queued)
-                .OrderBy(m => m.CreatedAt)
+            return InProcessingOrder(_queue
+                .Where(m => m.SessionId == sessionId && m.Mode == QueuedMessageMode.DirectSend && m.Status == QueuedMessageStatus.Queued))
                 .FirstOrDefault();
         }
     }
@@ -217,9 +231,8 @@ public class ModelMessageQueue
         EnsureLoaded();
         lock (_lock)
         {
-            return _queue
-                .Where(m => m.SessionId == sessionId && m.Status == QueuedMessageStatus.Queued)
-                .OrderBy(m => m.CreatedAt)
+            return InProcessingOrder(_queue
+                .Where(m => m.SessionId == sessionId && m.Status == QueuedMessageStatus.Queued))
                 .FirstOrDefault();
         }
     }
@@ -314,6 +327,56 @@ public class ModelMessageQueue
     }
 
     /// <summary>
+    /// Moves a queued message to a new position in its session's processing order (drag-and-drop
+    /// reorder). The session's queued items are re-sequenced 0..n-1 and every changed row is
+    /// persisted, so the order survives restarts. Returns false when the move is a no-op or the
+    /// message is not a pending queued item.
+    /// </summary>
+    public bool Reorder(Guid id, int newIndex)
+    {
+        EnsureLoaded();
+
+        bool updated = false;
+        List<QueuedMessage> changed = new();
+        lock (_lock)
+        {
+            var msg = _queue.FirstOrDefault(m => m.Id == id && m.Status == QueuedMessageStatus.Queued);
+            if (msg == null) return false;
+
+            var sessionItems = InProcessingOrder(_queue
+                .Where(m => m.SessionId == msg.SessionId && m.Status == QueuedMessageStatus.Queued))
+                .ToList();
+            if (sessionItems.Count < 2) return false;
+
+            int oldIndex = sessionItems.IndexOf(msg);
+            newIndex = Math.Clamp(newIndex, 0, sessionItems.Count - 1);
+            if (oldIndex == newIndex) return false;
+
+            sessionItems.RemoveAt(oldIndex);
+            sessionItems.Insert(newIndex, msg);
+            for (int i = 0; i < sessionItems.Count; i++)
+            {
+                if (sessionItems[i].Position != i)
+                {
+                    sessionItems[i].Position = i;
+                    changed.Add(sessionItems[i]);
+                }
+            }
+            updated = changed.Count > 0;
+        }
+
+        if (updated)
+        {
+            foreach (var item in changed)
+            {
+                Persist(item);
+            }
+            QueueChanged?.Invoke(this, EventArgs.Empty);
+        }
+        return updated;
+    }
+
+    /// <summary>
     /// Toggles the mode of a queued message between DirectSend and Steer.
     /// </summary>
     public bool ToggleMode(Guid id)
@@ -342,7 +405,10 @@ public class ModelMessageQueue
     }
 
     /// <summary>
-    /// Removes a queued message by ID.
+    /// Removes a queued message by ID — the delivery ACK. The in-memory entry is dropped and
+    /// the durable row is deleted so a delivered message can never be re-hydrated as stale
+    /// work after a restart (a previously observed orphan: items delivered and left in
+    /// Processing, resurrected on every launch and skipped by the sequencer's status filter).
     /// </summary>
     public bool Remove(Guid id)
     {
@@ -359,6 +425,17 @@ public class ModelMessageQueue
 
         if (removed)
         {
+            if (_store != null)
+            {
+                try
+                {
+                    _store.DeleteQueuedMessageAsync(id).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "Failed to delete durable queued message {Id}.", id);
+                }
+            }
             QueueChanged?.Invoke(this, EventArgs.Empty);
         }
         return removed;

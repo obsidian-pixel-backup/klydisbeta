@@ -73,6 +73,19 @@ public partial class PlanItemVm : ObservableObject
 }
 
 /// <summary>
+/// One entry in the Terminal tab's transcript: the exact command the model asked the shell
+/// to run (input) and the result the harness received (output). Rendered as a bracketed
+/// terminal block — the model's terminal usage, not debug logs.
+/// </summary>
+public sealed record TerminalEntryItem(string Command, string Output, bool Success, DateTime Timestamp)
+{
+    public string StatusBadge => Success ? "ok" : "ERR";
+    public string Prompt => Command.Contains("\n", StringComparison.Ordinal)
+        ? "$ " + Command.Replace("\n", "\n> ")
+        : "$ " + Command;
+}
+
+/// <summary>
 /// A user-authored note pinned to the current chat. Notes are persisted per session and
 /// injected into the model's system prompt on every generation, so they act as durable
 /// steering context ("keep X read-only", "verify before claiming done") without re-sending
@@ -99,7 +112,6 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer _refreshTimer;
     private string? _currentSessionId;
     private string? _editingNoteId;
-    private string _lastLogTail = string.Empty;
 
     // Base directory used to render file paths relative. Resolved once; the panel data
     // itself is derived purely from this session's recorded tool activity, never from
@@ -174,8 +186,17 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
     public ObservableCollection<WorkspaceFileItem> WorkspaceFiles { get; } = new();
     public ObservableCollection<WorkspaceFileItem> ChangeItems { get; } = new();
     public ObservableCollection<PreviewArtifact> PreviewArtifacts { get; } = new();
-    public ObservableCollection<string> LogSources { get; } = new();
     public ObservableCollection<SessionNoteItem> Notes { get; } = new();
+
+    /// <summary>
+    /// The model's terminal usage in this chat: every run_command the model executed, rendered
+    /// as a bracketed input/output transcript (command + result). NOT debug logs — this is the
+    /// model's shell activity, rebuilt on the 2s tick while the tab is visible.
+    /// </summary>
+    public ObservableCollection<TerminalEntryItem> TerminalEntries { get; } = new();
+
+    [ObservableProperty]
+    private string _terminalStatusText = "No terminal activity in this chat yet — the model's shell commands (run_command) and their outputs will appear here.";
 
     /// <summary>Raised when a new HTML document should be rendered in the preview browser.</summary>
     public event Action<string>? HtmlPreviewRequested;
@@ -186,14 +207,7 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         _messageStore = messageStore;
         _toolExecutor = toolExecutor;
 
-        LogSources.Add("llama_native.log");
-        LogSources.Add("chat_debug.log");
-        LogSources.Add("hard_log.txt");
-        LogSources.Add("fatal_error.txt");
-        SelectedLogSource = LogSources[0];
-
         NotesStatusText = "Notes are injected into the model's context on every message.";
-        LogSourceHint = "Tails the Klydis log files in %LOCALAPPDATA%\\Klydis\\logs (auto-refreshes every 2s).";
 
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _refreshTimer.Tick += (_, _) => Tick();
@@ -219,7 +233,7 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         switch (SelectedTab)
         {
             case SidePanelTab.Terminal:
-                RefreshLogTail();
+                RefreshTerminalFeed();
                 break;
             case SidePanelTab.Plan:
                 RefreshPlan();
@@ -264,7 +278,7 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
                 await RefreshSessionArtifactsAsync();
                 break;
             case SidePanelTab.Terminal:
-                RefreshLogTail();
+                RefreshTerminalFeed();
                 break;
             case SidePanelTab.Notes:
                 await LoadNotesAsync();
@@ -623,68 +637,58 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
 
     #endregion
 
-    #region Terminal logs
+    #region Terminal feed
 
-    private void RefreshLogTail()
+    /// <summary>
+    /// The model's terminal usage in the current session: run_command inputs (command) and
+    /// outputs (result), rendered as a bracketed transcript. Derived from this session's
+    /// recorded tool activity — never from debug logs. Called on tab switch and on the 2s
+    /// tick while the tab is visible, so commands stream in live as the model works.
+    /// </summary>
+    private void RefreshTerminalFeed()
     {
-        var path = SelectedLogSource switch
-        {
-            "chat_debug.log" => KlydisLog.ChatDebugLogPath,
-            "hard_log.txt" => KlydisLog.HardLogPath,
-            "fatal_error.txt" => KlydisLog.FatalErrorPath,
-            _ => KlydisLog.NativeLogPath
-        };
+        TerminalEntries.Clear();
 
-        string tail = ReadTail(path, 16000);
-        if (tail != _lastLogTail)
+        string sessionId = _currentSessionId ?? string.Empty;
+        var records = _toolExecutor.GetSessionToolActivity(sessionId)
+            .Where(r => r.ToolName == "run_command")
+            .TakeLast(100);
+
+        foreach (var r in records)
         {
-            _lastLogTail = tail;
-            LogContent = tail;
+            TerminalEntries.Add(new TerminalEntryItem(
+                ExtractCommand(r.ArgsJson),
+                string.IsNullOrWhiteSpace(r.OutputPreview) ? "(no output)" : r.OutputPreview,
+                r.Success,
+                r.Timestamp));
         }
+
+        TerminalStatusText = TerminalEntries.Count == 0
+            ? "No terminal activity in this chat yet — the model's shell commands (run_command) and their outputs will appear here."
+            : $"{TerminalEntries.Count} shell command(s) run by the model in this chat · inputs and outputs below";
     }
 
-    private static string ReadTail(string path, int maxBytes)
+    /// <summary>
+    /// Pulls the command the model asked the shell to run out of the recorded arguments.
+    /// </summary>
+    private static string ExtractCommand(string argsJson)
     {
+        if (string.IsNullOrEmpty(argsJson)) return string.Empty;
         try
         {
-            if (!File.Exists(path)) return string.Empty;
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            if (fs.Length == 0) return string.Empty;
-            long offset = Math.Max(0, fs.Length - maxBytes);
-            fs.Seek(offset, SeekOrigin.Begin);
-            using var reader = new StreamReader(fs, Encoding.UTF8);
-            string text = reader.ReadToEnd();
-            return text.Replace("\r", "");
+            using var doc = JsonDocument.Parse(argsJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return string.Empty;
+            if (root.TryGetProperty("command", out var v) && v.ValueKind == JsonValueKind.String)
+            {
+                return v.GetString() ?? string.Empty;
+            }
+            return string.Empty;
         }
         catch
         {
             return string.Empty;
         }
-    }
-
-    partial void OnSelectedLogSourceChanged(string value)
-    {
-        _lastLogTail = string.Empty;
-        if (IsPanelOpen && SelectedTab == SidePanelTab.Terminal)
-        {
-            RefreshLogTail();
-        }
-    }
-
-    [RelayCommand]
-    private void RefreshLog() => RefreshLogTail();
-
-    [RelayCommand]
-    private void OpenLogFolder()
-    {
-        try
-        {
-            if (Directory.Exists(KlydisLog.LogDirectory))
-            {
-                Process.Start(new ProcessStartInfo(KlydisLog.LogDirectory) { UseShellExecute = true });
-            }
-        }
-        catch { /* explorer unavailable */ }
     }
 
     #endregion

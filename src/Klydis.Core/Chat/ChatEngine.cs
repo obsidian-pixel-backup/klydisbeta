@@ -2003,6 +2003,62 @@ public class ChatEngine(
             }
         }
 
+        // 5. Bare structural ending: the visible text stops on a markdown header, a bare
+        //    horizontal divider, or an empty list marker — a section was OPENED but never
+        //    written. The observed "terminates after ~2k tokens" failure: a qwen MoE model
+        //    writing an enumerated report EOS's right after "### 2. write_file (Text Writing)"
+        //    because the repeated section template is suppressed by the frequency/presence
+        //    sampling penalties (the cut looks like a natural stop — the line ends with a
+        //    closing paren, so rule 4 above misses it). Each auto-continuation rebuilds the
+        //    prompt with a fresh penalty state, so the model resumes and completes the
+        //    enumeration across chunks instead of the turn silently ending with a partial
+        //    answer. A genuinely completed response essentially never ends on a bare header.
+        if (EndsWithStructuralCut(cleanTrimmed))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when the visible (think-stripped) text ends on a bare structural marker — a
+    /// markdown header, a lone horizontal divider, or an empty numbered/bulleted list item —
+    /// with no body content after it. The marker must FOLLOW real content: a response that is
+    /// nothing but a header ("### Done") is a deliberate short answer, not a cut.
+    /// </summary>
+    internal static bool EndsWithStructuralCut(string cleanTrimmed)
+    {
+        if (cleanTrimmed.Length < 40) return false;
+
+        var lines = cleanTrimmed.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        string? last = lines.Length > 0 ? lines[^1].TrimEnd() : null;
+        if (string.IsNullOrWhiteSpace(last)) return false;
+
+        // The structural marker must terminate an existing section — a lone header (or a
+        // response that is only markers) is an intentional short reply.
+        bool hasPrecedingContent = lines.Take(lines.Length - 1).Any(l => !string.IsNullOrWhiteSpace(l));
+        if (!hasPrecedingContent) return false;
+
+        // 1. Markdown header as the last line ("# ", "## ", "### ", "#### " ...).
+        if (Regex.IsMatch(last, @"^#{1,6}\s+\S"))
+        {
+            return true;
+        }
+
+        // 2. Bare horizontal divider as the last line ("---", "***", "___" alone on a line).
+        if (Regex.IsMatch(last, @"^(?:-{3,}|\*{3,}|_{3,})$"))
+        {
+            return true;
+        }
+
+        // 3. Empty numbered/bulleted list marker as the last line ("3.", "- ", "* " with no
+        //    item text). A cut enumeration ends with the dangling marker before the next item.
+        if (Regex.IsMatch(last, @"^\s*(?:\d+[.)]\s*$|[-*+]\s*$)"))
+        {
+            return true;
+        }
+
         return false;
     }
 

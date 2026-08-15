@@ -454,6 +454,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     _logger.LogInformation("Hybrid SSM architecture '{Arch}' detected. Context configured to {MaxCtx} tokens (native ceiling {Ceiling}).", archLower, targetContextSize, autoContextCeiling);
                 }
 
+                // Load-time window diagnostics: the effective context must always be visible in
+                // the logs. A silent 4K window here is the observed root cause of "generation
+                // terminates after ~2k tokens" (recurrent cap = window − prompt − 512), so log
+                // every input that produced it — UserContextLimit, the offload plan's
+                // recommendation, and the architecture.
+                _logger.LogInformation(
+                    "Context sizing: UserContextLimit={UserLimit}, plan.RecommendedContextSize={PlanCtx}, architecture={Arch}, hybridSsm={Hybrid} -> effectiveContextSize={Target} (ceiling {Ceiling}).",
+                    UserContextLimit, offloadPlan.RecommendedContextSize, archLower, isHybridSsm, targetContextSize, autoContextCeiling);
+
                 uint safeBatchSize = UserBatchSize > 0
                     ? UserBatchSize
                     : (isHybridSsm ? 256u : (uint)Math.Max(2048, offloadPlan.RecommendedBatchSize));
@@ -1132,7 +1141,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     // self-correction path as a detected loop (LastGenerationLoopInfo). Tool-call
                     // content (which qwen models may emit inside the pre-opened think block) is
                     // exempt: it is short, and cutting it mid-way would corrupt the call.
-                    const int MaxThinkTokensPerGeneration = 4096;
+                    // The cap scales with the context window (25%, floor 4096) instead of being a
+                    // fixed 4096: long-horizon planning legitimately drafts large plans inside the
+                    // think block, and a fixed small cap cut those mid-reasoning. A degenerate
+                    // think-loop still trips the cap — just proportionally to the window.
+                    int maxThinkTokensPerGeneration = Math.Max(4096, (int)(ContextSize * 0.25));
                     bool thinkBlockWasOpen = startsInsideThink;
                     int thinkTokenCount = 0;
                     bool thinkCapFired = false;
@@ -1199,11 +1212,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                     else
                                     {
                                         thinkTokenCount++;
-                                        if (thinkTokenCount > MaxThinkTokensPerGeneration)
+                                        if (thinkTokenCount > maxThinkTokensPerGeneration)
                                         {
                                             thinkCapFired = true;
                                             _logger.LogWarning("Thinking block exceeded {Cap} tokens with no visible output and no tool call; stopping generation for self-correction (ThinkOverflow).",
-                                                MaxThinkTokensPerGeneration);
+                                                maxThinkTokensPerGeneration);
                                             LastGenerationLoopInfo = new GenerationLoopInfo("ThinkOverflow", 0, tokenCount);
                                             break;
                                         }
@@ -1320,13 +1333,16 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                 if (isFirstToken && _executor != null)
                                 {
                                     // Bounded retry: cap MaxTokens so a post-reset re-prefill of a
-                                    // huge prompt cannot stream unbounded output (StreamTokensAsync
-                                    // uses MaxTokens=-1). The retry must also fire TokenGenerated and
-                                    // count its tokens, otherwise "tokens out" and the completion
-                                    // telemetry silently miss entire recovered generations.
+                                    // huge prompt cannot stream unbounded output. The cap scales
+                                    // with the window (50%, floor 4096 — the same budget as
+                                    // StreamTokensAsync) so a recovered generation can still produce
+                                    // a full chunk; ChatEngine's continuation resumes it. The retry
+                                    // must also fire TokenGenerated and count its tokens, otherwise
+                                    // "tokens out" and the completion telemetry silently miss
+                                    // entire recovered generations.
                                     var retryParams = new InferenceParams
                                     {
-                                        MaxTokens = Math.Min(inferenceParams.MaxTokens < 0 ? int.MaxValue : inferenceParams.MaxTokens, 2048),
+                                        MaxTokens = Math.Min(inferenceParams.MaxTokens < 0 ? int.MaxValue : inferenceParams.MaxTokens, Math.Max(4096, (int)(ContextSize * 0.50))),
                                         TokensKeep = inferenceParams.TokensKeep,
                                         AntiPrompts = inferenceParams.AntiPrompts,
                                         OverflowStrategy = inferenceParams.OverflowStrategy,
@@ -1583,10 +1599,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         // Bound chat generations so a degenerate or over-ambitious model cannot stream
         // unboundedly (production logs show a 3-minute 10-chapter repetition and an 80-second
         // garbage run). The degenerate-loop detector already stops repetition attractors in
-        // the chat path, so this cap only guards the truly unbounded case: 50% of context,
-        // clamped to [4096, 65536]. ChatEngine's auto-continuation loop (bounded per turn,
-        // keyed on LastGenerationHitMaxTokens) resumes long responses across chunks.
-        int maxChatTokens = Math.Clamp((int)(ContextSize * 0.50), 4096, 65536);
+        // the chat path, so this cap only guards the truly unbounded case: 50% of the window,
+        // with NO fixed upper ceiling — the budget scales with the context size (a 128K window
+        // yields a 64K output chunk; 256K yields 128K). A fixed 65536 ceiling silently capped
+        // long-horizon output regardless of window size. ChatEngine's auto-continuation loop
+        // (bounded per turn, keyed on LastGenerationHitMaxTokens) resumes long responses
+        // across chunks, and the recurrent-architecture cap (window - prompt - 512) still
+        // prevents the window from ever filling.
+        int maxChatTokens = Math.Max(4096, (int)(ContextSize * 0.50));
 
         var inferenceParams = new InferenceParams 
         { 

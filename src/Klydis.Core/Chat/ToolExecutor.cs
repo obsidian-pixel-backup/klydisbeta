@@ -550,16 +550,24 @@ public class ToolExecutor(
     private ToolResult FinishToolCall(ToolCallRequest request, string sessionId, string argsJson, ToolResult result)
     {
         // Record the invocation for the right-side panel (session-scoped). Args are serialized
-        // so path-bearing tools can be surfaced as "files this chat worked with".
+        // so path-bearing tools can be surfaced as "files this chat worked with", and the
+        // output preview is sized for the Terminal tab's bracketed command/output transcript
+        // (a 220-char stub made run_command results useless to read).
         try
         {
             string outputPreview = string.Empty;
             if (!string.IsNullOrEmpty(result.Output))
             {
-                outputPreview = result.Output.Length > 220 ? result.Output.Substring(0, 220) : result.Output;
+                outputPreview = result.Output.Length > 6000 ? result.Output.Substring(0, 6000) : result.Output;
             }
-            _sessionToolActivity.GetOrAdd(sessionId ?? string.Empty, _ => new List<ToolActivityRecord>())
-                .Add(new ToolActivityRecord(request.Name, argsJson, result.Success, outputPreview, DateTime.Now));
+            var activityList = _sessionToolActivity.GetOrAdd(sessionId ?? string.Empty, _ => new List<ToolActivityRecord>());
+            activityList.Add(new ToolActivityRecord(request.Name, argsJson, result.Success, outputPreview, DateTime.Now));
+            // Bound the per-session activity history so long autonomous runs cannot grow it
+            // without limit (the panel only renders the most recent commands anyway).
+            if (activityList.Count > 500)
+            {
+                activityList.RemoveRange(0, activityList.Count - 500);
+            }
         }
         catch { /* recording must never break tool execution */ }
 

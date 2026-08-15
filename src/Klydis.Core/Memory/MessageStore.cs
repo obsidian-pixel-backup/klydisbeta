@@ -206,7 +206,8 @@ public class MessageStore
                 mode INTEGER NOT NULL,
                 status INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                attempt_count INTEGER NOT NULL DEFAULT 0
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0
             );
 
             -- FTS5 Virtual Table for full-text search
@@ -254,6 +255,19 @@ public class MessageStore
         {
             await using var alterCmd = connection.CreateCommand();
             alterCmd.CommandText = "ALTER TABLE sessions ADD COLUMN plan_json TEXT;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
+
+        // Manual drag-and-drop reorder of queued messages: position is the explicit processing
+        // order (0 = first). Defaults to 0 for pre-existing rows, so legacy queues keep FIFO.
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN position INTEGER NOT NULL DEFAULT 0;";
             await alterCmd.ExecuteNonQueryAsync();
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
@@ -478,8 +492,8 @@ public class MessageStore
 
         await using var command = connection.CreateCommand();
         command.CommandText = @"
-            INSERT OR REPLACE INTO queued_messages (id, session_id, content, mode, status, created_at, attempt_count)
-            VALUES (@id, @sessionId, @content, @mode, @status, @createdAt, @attemptCount);
+            INSERT OR REPLACE INTO queued_messages (id, session_id, content, mode, status, created_at, attempt_count, position)
+            VALUES (@id, @sessionId, @content, @mode, @status, @createdAt, @attemptCount, @position);
         ";
         command.Parameters.AddWithValue("@id", msg.Id.ToString());
         command.Parameters.AddWithValue("@sessionId", msg.SessionId);
@@ -488,6 +502,7 @@ public class MessageStore
         command.Parameters.AddWithValue("@status", (int)msg.Status);
         command.Parameters.AddWithValue("@createdAt", msg.CreatedAt.ToString("o"));
         command.Parameters.AddWithValue("@attemptCount", msg.AttemptCount);
+        command.Parameters.AddWithValue("@position", msg.Position);
 
         await command.ExecuteNonQueryAsync();
     }
@@ -518,7 +533,7 @@ public class MessageStore
         await using var connection = await CreateConnectionAsync();
 
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, session_id, content, mode, status, created_at, attempt_count FROM queued_messages ORDER BY created_at ASC;";
+        command.CommandText = "SELECT id, session_id, content, mode, status, created_at, attempt_count, position FROM queued_messages ORDER BY position ASC, created_at ASC;";
 
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -531,7 +546,8 @@ public class MessageStore
                 Mode = (QueuedMessageMode)reader.GetInt32(3),
                 Status = (QueuedMessageStatus)reader.GetInt32(4),
                 CreatedAt = DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                AttemptCount = reader.GetInt32(6)
+                AttemptCount = reader.GetInt32(6),
+                Position = reader.GetInt32(7)
             });
         }
 

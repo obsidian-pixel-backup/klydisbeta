@@ -468,8 +468,18 @@ public partial class ModelLibraryViewModel : ObservableObject
             int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
             long layerSizeBytes = modelInfo.FileSizeBytes / Math.Max(1, totalLayers); // Approximation
             
-            int rawContextLength = (int)(metadata?.ContextLength ?? 4096);
-            int contextLength = Math.Clamp(rawContextLength, 2048, 131072);
+            // Model's native context bounded by the architecture ceiling — never an arbitrary
+            // 4K/16K floor: the offload plan's VRAM math protects the GPU, and hybrid/recurrent
+            // models (tiny KV caches) run at 64K+ on a 16GB card. A tiny desired context here
+            // combined with a zero UserContextLimit loaded the model at a 4K window, capping
+            // every generation at window − prompt − 512 ≈ 2K tokens.
+            string archLower = (metadata?.Architecture ?? "").ToLowerInvariant();
+            bool isHybridSsm = archLower is "qwen35" or "qwen3next" or "qwen35moe" or "mamba" or "rwkv" or "jamba";
+            int archCeiling = isHybridSsm ? 262144 : 131072;
+            int rawContextLength = metadata?.ContextLength is > 0
+                ? (int)metadata.ContextLength.Value
+                : (isHybridSsm ? 262144 : 65536);
+            int contextLength = Math.Clamp(rawContextLength, 2048, archCeiling);
             
             long kvCachePerLayerBytes = 2048;
             if (metadata != null)

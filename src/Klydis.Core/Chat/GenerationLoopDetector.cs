@@ -138,6 +138,19 @@ public sealed class GenerationLoopDetector
     private const int NGramActiveTailTokens = 40;
 
     /// <summary>
+    /// Maximum token distance between the two MOST RECENT n-gram matches. A degenerate attractor
+    /// cycles TIGHTLY — the repeated phrase comes back within a few tokens ("yes no yes no yes
+    /// no"). Structured documents repeat formatting templates with tens of tokens of NEW content
+    /// between occurrences (a per-tool report that repeats "**Capabilities &amp; Limitations:**"
+    /// once per section). Firing on wide-spaced template repetition truncates legitimate
+    /// enumerated output mid-document and the self-correction loop then re-cuts it at the same
+    /// point until the turn ends with a partial response (observed: a 14-tool report killed at
+    /// tool #2 on every regeneration). This bound is what separates the two: 12 tokens is far
+    /// tighter than any legitimate section interval and far looser than a real cycle.
+    /// </summary>
+    private const int NGramMaxPeriodTokens = 12;
+
+    /// <summary>
     /// Character span scanned for semantic repetition (repeated sentences / lines). Must be
     /// large enough to hold THREE copies of a typical paragraph: the observed "10 chapter"
     /// failure repeated the same ~600-char paragraph per chapter, and a 900-char window only
@@ -480,7 +493,10 @@ public sealed class GenerationLoopDetector
             int secondLastFromEnd = window - secondLastMatchStart;
             bool loopBeginsInThink = secondLastMatchStart >= 0 &&
                                      IsCharInThink(_window[secondLastMatchStart].CharOffset);
-            if (!loopBeginsInThink && matches >= NGramMinMatches && secondLastMatchStart >= 0 && secondLastFromEnd <= NGramActiveTailTokens)
+            if (!loopBeginsInThink && matches >= NGramMinMatches && secondLastMatchStart >= 0 &&
+                secondLastFromEnd <= NGramActiveTailTokens &&
+                lastMatchStart - secondLastMatchStart <= NGramMaxPeriodTokens &&
+                !IsStructuralLoopStart(_window[secondLastMatchStart].CharOffset))
             {
                 return new GenerationLoopInfo("NGramLoop", _window[secondLastMatchStart].CharOffset, count);
             }
@@ -498,7 +514,8 @@ public sealed class GenerationLoopDetector
         int paraStart = Math.Max(0, _text.Length - ParagraphCopyScanChars);
         string paraText = _text.ToString(paraStart, _text.Length - paraStart);
         int paraCopyOffset = DetectParagraphCopy(paraText);
-        if (paraCopyOffset >= 0 && !IsCharInThink(paraStart + paraCopyOffset))
+        if (paraCopyOffset >= 0 && !IsCharInThink(paraStart + paraCopyOffset) &&
+            !IsStructuralLoopStart(paraStart + paraCopyOffset))
         {
             return new GenerationLoopInfo("ParagraphCopy", paraStart + paraCopyOffset, count);
         }
@@ -512,12 +529,42 @@ public sealed class GenerationLoopDetector
         int semStart = Math.Max(0, _text.Length - SemanticScanChars);
         string semText = _text.ToString(semStart, _text.Length - semStart);
         int semanticOffset = DetectSemanticRepetition(semText);
-        if (semanticOffset >= 0 && !IsCharInThink(semStart + semanticOffset))
+        if (semanticOffset >= 0 && !IsCharInThink(semStart + semanticOffset) &&
+            !IsStructuralLoopStart(semStart + semanticOffset))
         {
             return new GenerationLoopInfo("SemanticLoop", semStart + semanticOffset, count);
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// True when the character at <paramref name="charOffset"/> begins a line that looks like a
+    /// structural markdown boundary (heading, bold label, bullet, numbered item). The phrase-level
+    /// loop detectors must NOT fire when the repeated unit is a SHARED TEMPLATE between distinct
+    /// sections of a legitimate structured document — the model is following a requested format
+    /// (per-tool reports, tables, enumerated specs), not looping. A degenerate attractor repeats
+    /// content mid-line; a format template sits at line starts behind a marker. The offset must
+    /// itself begin the line (the token that matched starts at a line boundary) for this to apply.
+    /// </summary>
+    private bool IsStructuralLoopStart(int charOffset)
+    {
+        if (charOffset < 0 || charOffset >= _text.Length) return false;
+        // Must be at the very start of a line (or the start of the stream).
+        if (charOffset > 0 && _text[charOffset - 1] != '\n') return false;
+        int i = charOffset;
+        while (i < _text.Length && char.IsWhiteSpace(_text[i])) i++;
+        if (i >= _text.Length) return false;
+        char c = _text[i];
+        if (c == '#' || c == '*' || c == '-' || c == '+' || c == '>' || c == '|') return true;
+        // Numbered item: "1.", "1)" at line start.
+        if (char.IsDigit(c))
+        {
+            int j = i;
+            while (j < _text.Length && char.IsDigit(_text[j])) j++;
+            if (j < _text.Length && (_text[j] == '.' || _text[j] == ')')) return true;
+        }
+        return false;
     }
 
     /// <summary>

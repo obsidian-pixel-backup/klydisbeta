@@ -202,6 +202,34 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     public ObservableCollection<QueuedMessageViewModel> QueuedMessages { get; } = new();
     public ObservableCollection<AttachmentItemViewModel> PendingAttachments { get; } = new();
 
+    /// <summary>
+    /// Display order for the queued-messages panel. <see cref="QueueSortMode.Manual"/> (the
+    /// default) mirrors the queue's actual processing order — the order set by drag-and-drop
+    /// reordering. The other modes are presentation-only views over that same order.
+    /// </summary>
+    public enum QueueSortMode
+    {
+        Manual,
+        OldestFirst,
+        NewestFirst,
+        ModeThenAge,
+        Alphabetical
+    }
+
+    public sealed record QueueSortOption(QueueSortMode Mode, string Label);
+
+    public ObservableCollection<QueueSortOption> QueueSortOptions { get; } = new()
+    {
+        new(QueueSortMode.Manual, "Manual (drag)"),
+        new(QueueSortMode.OldestFirst, "Oldest first"),
+        new(QueueSortMode.NewestFirst, "Newest first"),
+        new(QueueSortMode.ModeThenAge, "Direct send first"),
+        new(QueueSortMode.Alphabetical, "A → Z")
+    };
+
+    [ObservableProperty]
+    private QueueSortOption _selectedQueueSortOption;
+
     private readonly Klydis.Core.Models.ModelRegistry _registry;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
 
@@ -241,6 +269,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         _themeService = themeService;
 
         SidePanel = new ChatSidePanelViewModel(this, _messageStore, _toolExecutor);
+
+        // Queue panel default: Manual order — the queue's actual processing order, which the
+        // user edits by dragging items. Other sort modes are presentation-only views.
+        SelectedQueueSortOption = QueueSortOptions[0];
 
         if (_messageQueue != null)
         {
@@ -544,8 +576,21 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     var metadata = Klydis.Core.Models.GgufMetadataReader.Parse(modelInfo.FilePath);
                     int totalLayers = metadata != null && metadata.BlockCount.HasValue && metadata.BlockCount.Value > 0 ? (int)metadata.BlockCount.Value : 32;
                     long layerSizeBytes = modelInfo.FileSizeBytes / Math.Max(1, totalLayers);
-                    int rawContextLength = (int)(metadata?.ContextLength ?? 4096);
-                    int contextLength = Math.Clamp(rawContextLength, 2048, 16384);
+                    // Use the model's native context (bounded by the architecture ceiling) instead
+                    // of an arbitrary 16K cap: the offload plan's VRAM math (safeVramContext)
+                    // already protects the GPU, and hybrid/recurrent models (tiny KV caches) run
+                    // fine at 64K+ on a 16GB card. The old `?? 4096` fallback + 16K clamp could
+                    // hand the plan a tiny desired context, which — combined with a zero
+                    // UserContextLimit on pooled/pre-settings engines — loaded the model at a 4K
+                    // window and capped every generation at window − prompt − 512 ≈ 2K tokens
+                    // (the observed long-horizon "terminates after ~2k tokens" failure).
+                    string archLower = (metadata?.Architecture ?? "").ToLowerInvariant();
+                    bool isHybridSsm = archLower is "qwen35" or "qwen3next" or "qwen35moe" or "mamba" or "rwkv" or "jamba";
+                    int archCeiling = isHybridSsm ? 262144 : 131072;
+                    int rawContextLength = metadata?.ContextLength is > 0
+                        ? (int)metadata.ContextLength.Value
+                        : (isHybridSsm ? 262144 : 65536);
+                    int contextLength = Math.Clamp(rawContextLength, 2048, archCeiling);
                     
                     long kvCachePerLayerBytes = 2048;
                     if (metadata != null)
@@ -1542,6 +1587,19 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 finally
                 {
                     _isProcessingQueue = false;
+                    // Drain the queue in sequence: while this queued turn was running the flag
+                    // above blocked the turn's own end-of-turn advancement, so after releasing
+                    // it we re-check and deliver the NEXT queued item (if any) instead of
+                    // stalling after a single item per manual turn. Each queued turn runs to
+                    // completion before the next is claimed, so this cannot overlap turns.
+                    if (System.Windows.Application.Current?.Dispatcher != null)
+                    {
+                        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() => ProcessNextQueuedMessageIfAvailable());
+                    }
+                    else
+                    {
+                        ProcessNextQueuedMessageIfAvailable();
+                    }
                 }
             };
 
@@ -1556,16 +1614,31 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
     }
 
+    partial void OnSelectedQueueSortOptionChanged(QueueSortOption value) => RefreshQueueUI();
+
     private void RefreshQueueUI()
     {
         Action update = () =>
         {
             var sessionId = SelectedSession?.Id ?? string.Empty;
             var pending = _messageQueue?.GetPending(sessionId) ?? Array.Empty<QueuedMessage>();
-            QueuedMessages.Clear();
-            foreach (var item in pending)
+            var viewModels = pending.Select(i => new QueuedMessageViewModel(i)).ToList();
+
+            // Manual mirrors the queue's actual processing order (Position, then FIFO tiebreak) —
+            // the order the user edits by dragging. Other modes are presentation-only views.
+            IEnumerable<QueuedMessageViewModel> ordered = SelectedQueueSortOption?.Mode switch
             {
-                QueuedMessages.Add(new QueuedMessageViewModel(item));
+                QueueSortMode.Manual => viewModels.OrderBy(v => v.Position).ThenBy(v => v.CreatedAt),
+                QueueSortMode.NewestFirst => viewModels.OrderByDescending(v => v.CreatedAt),
+                QueueSortMode.ModeThenAge => viewModels.OrderBy(v => v.Mode).ThenBy(v => v.CreatedAt),
+                QueueSortMode.Alphabetical => viewModels.OrderBy(v => v.Content, StringComparer.OrdinalIgnoreCase),
+                _ => viewModels.OrderBy(v => v.CreatedAt) // OldestFirst
+            };
+
+            QueuedMessages.Clear();
+            foreach (var item in ordered)
+            {
+                QueuedMessages.Add(item);
             }
             HasQueuedMessages = QueuedMessages.Count > 0;
         };
@@ -1577,6 +1650,31 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         else
         {
             update();
+        }
+    }
+
+    /// <summary>
+    /// Applies a drag-and-drop reorder: moves the item to <paramref name="newIndex"/> in the
+    /// session's processing order (persisted by the durable queue) and refreshes the panel.
+    /// Called from the queue panel's drag-drop code-behind.
+    /// </summary>
+    public void MoveQueuedItem(QueuedMessageViewModel item, int newIndex)
+    {
+        if (item == null) return;
+        var sessionId = SelectedSession?.Id ?? string.Empty;
+        var msg = _messageQueue?.GetById(item.Id, sessionId);
+        if (msg == null) return;
+
+        bool moved = _messageQueue!.Reorder(item.Id, newIndex);
+        if (moved && SelectedQueueSortOption?.Mode != QueueSortMode.Manual)
+        {
+            // The user is editing the real order — surface it in Manual mode so what they
+            // see matches what will be processed.
+            SelectedQueueSortOption = QueueSortOptions[0];
+        }
+        else if (moved)
+        {
+            RefreshQueueUI();
         }
     }
 
