@@ -364,6 +364,8 @@ public class PromptTemplateEngine
             "- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags",
             "- Required parameters MUST be specified",
             "- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after",
+            "- All listed tools are REAL and execute instantly on this machine with full system access. NEVER simulate, imagine, or fabricate a tool result in plain text — emit a real <tool_call> and wait for the actual returned output",
+            "- You have live access through these tools: web search (search_web), URL crawling (crawl_url), system commands (run_command), file operations, and live data tools. Never claim you lack access or that data is unavailable — call the tool and it will execute for you",
             "- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls",
             "</IMPORTANT>"
         });

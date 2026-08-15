@@ -559,7 +559,7 @@ public class ChatEngine(
         // then closes it — without the opener it degenerates into spamming <think>). Applying
         // both makes these models think and call tools correctly.
         bool isQwenThinkingModel = templateType == ChatTemplate.Qwen &&
-                                   inferenceEngine.Architecture?.Contains("qwen35", StringComparison.OrdinalIgnoreCase) == true &&
+                                   InferenceEngine.IsQwenThinkingArchitecture(inferenceEngine.Architecture) &&
                                    !string.IsNullOrWhiteSpace(inferenceEngine.RawChatTemplate) &&
                                    inferenceEngine.RawChatTemplate.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase);
 
@@ -633,6 +633,13 @@ public class ChatEngine(
         int consecutiveToolParseFailures = 0;
         bool toolsSuspendedForTurn = false;
         bool suspensionNoticeSent = false;
+
+        // Tracks whether ANY visible text reached the user across all iterations of this turn.
+        // A turn that ends with zero visible output (every correction, continuation and rescue
+        // attempt failed) must surface an error instead of silently delivering nothing — the
+        // "model stopped responding" failure mode (observed: minutes of re-prefill loops ending
+        // in an empty turn).
+        bool producedVisibleOutput = false;
 
         // Token-count cache: the per-iteration budget math below tokenizes the whole active
         // history over and over (rolling-compression check, backward budget pass, truncation
@@ -1035,6 +1042,11 @@ public class ChatEngine(
 
         var fullResponse = fullResponseBuilder.ToString();
 
+        if (visibleTextBuilder.Length > 0)
+        {
+            producedVisibleOutput = true;
+        }
+
             // ── Self-correction: degenerate-loop recovery (esp. MoE / thinking models) ──
             // MoE models (qwen3.6-14B-A3B / qwen35moe, mixtral, deepseek-v2/v3, ...) can fall
             // into repetition attractors: think-tag spam, token stutter, or n-gram loops.
@@ -1390,7 +1402,24 @@ public class ChatEngine(
                 // cascade (each re-injection rebuilds and re-prefills the whole prompt).
                 bool hitOutputCap = inferenceEngine.LastGenerationHitMaxTokens;
                 bool isTruncatedMidGeneration = IsTruncatedMidGeneration(fullResponse, visibleResponse);
-                if ((isTruncatedMidGeneration || hitOutputCap) && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn)
+                bool visibleEmpty = string.IsNullOrWhiteSpace(visibleTextBuilder.ToString());
+
+                // A qwen thinking model that never closed its think block produced reasoning
+                // only — all streamed content was ThinkingTokens, so there is nothing visible to
+                // continue. Continuing just reopens the same <think> block and the model keeps
+                // reasoning (each continuation rebuilds and re-prefills the whole prompt — the
+                // minutes-long "stopped responding" crawl on hybrid models). Route straight to
+                // the empty-response correction, which demands an actual answer.
+                bool stuckInThink = qwenNeverClosedThink && visibleEmpty;
+
+                // Once a continuation has been injected and the model STILL produced no visible
+                // text, it is not a truncated response — it is an empty/degenerate one. Keep
+                // continuing would burn up to MaxContinuationsPerTurn full re-prefills on a
+                // model that is not producing output.
+                bool noVisibleProgress = continuationsThisTurn > 0 && visibleEmpty;
+                bool continuationAllowed = !stuckInThink && !noVisibleProgress;
+
+                if ((isTruncatedMidGeneration || hitOutputCap) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn)
                 {
                     continuationsThisTurn++;
                     logger.LogInformation("Output generation cut off (hitMaxTokens={HitCap}, midSentence={MidSentence}). Triggering auto-continuation iteration {Count}/{Max}.",
@@ -1400,12 +1429,15 @@ public class ChatEngine(
                     AddToSessionHistory(activeHistory, continuationMsgObj, generatingSessionId);
                     // Engine-internal continuation notice: in-memory only (see IsEngineInjectedMessage).
                 }
-                else if (string.IsNullOrWhiteSpace(visibleTextBuilder.ToString()) && !qwenNeverClosedThink && selfCorrectionsThisTurn < MaxSelfCorrectionsPerTurn)
+                else if (visibleEmpty && selfCorrectionsThisTurn < MaxSelfCorrectionsPerTurn)
                 {
-                    // Empty/degenerate response: the model closed its think block and produced no
-                    // actual visible content (reasoning alone does not count — the user sees
-                    // nothing). Ending the turn here would silently deliver nothing — treat it
-                    // like a loop and self-correct instead.
+                    // Empty/degenerate response: the model produced no actual visible content
+                    // (reasoning alone does not count — the user sees nothing). Ending the turn
+                    // here would silently deliver nothing — treat it like a loop and self-correct
+                    // instead. NOT gated on qwenNeverClosedThink: an unclosed think block with
+                    // zero visible text is exactly the degenerate case that must reach this
+                    // path — previously it fell through the gated branches to a silent break
+                    // after burning up to 16 continuation re-prefills.
                     selfCorrectionsThisTurn++;
                     NoteLesson("empty_response", $"Model produced an empty visible response; empty-response self-correction injected (correction {selfCorrectionsThisTurn}).");
                     logger.LogWarning("Model produced an empty visible response. Injecting empty-response self-correction (correction {Count} of {Max} this turn).",
@@ -1416,7 +1448,7 @@ public class ChatEngine(
                     // Engine-internal correction: in-memory only (see IsEngineInjectedMessage).
                     yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model produced an empty response — self-correcting…");
                 }
-                else if (string.IsNullOrWhiteSpace(visibleTextBuilder.ToString()) && !qwenNeverClosedThink && !rescueTriggered)
+                else if (visibleEmpty && !rescueTriggered)
                 {
                     // Empty responses exhausted the correction budget — rescue mode: plain
                     // direct answer without tools or thinking blocks (see the rescue activation
@@ -1442,6 +1474,17 @@ public class ChatEngine(
             yield return new ChatStreamEvent(ChatStreamEventType.Error, "Max tool iterations reached.");
         }
 
+        // Terminal-output guarantee: if the ENTIRE turn produced no visible text (all
+        // self-corrections, the rescue attempt, and every continuation failed), surface a clear
+        // error instead of ending silently. Previously this dead-ended with zero output — the
+        // user saw a thought bubble stall, then nothing ("the model stopped responding").
+        if (!producedVisibleOutput)
+        {
+            logger.LogWarning("Turn ended with no visible output across {Iterations} iterations (all corrections/rescue attempts failed).", iterationCount);
+            yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                "⚠ The model produced no visible response after exhausting self-correction and rescue attempts. Please try rephrasing your request or adjusting the generation settings.");
+        }
+
         yield return new ChatStreamEvent(ChatStreamEventType.StreamEnd, "");
     }
 
@@ -1463,6 +1506,8 @@ public class ChatEngine(
                 "SemanticLoop" => "[System Self-Correction: You began repeating the same content over and over in different words. Stop immediately. Re-read the user's message and produce new content that fulfills the user's request without re-stating anything you already wrote.]",
                 "PaddingLoop" => "[System Self-Correction: You began emitting filler/whitespace in a loop. Stop immediately and continue the task with substantive new content.]",
                 "JunkOutput" => "[System Self-Correction: You began emitting garbage/random token fragments. Stop immediately. Re-read the user's latest message and continue with coherent, meaningful content that fulfills the user's request.]",
+                "ParagraphCopy" => "[System Self-Correction: You began repeating the same paragraph over and over (even with words merged or spacing removed). Stop immediately. Re-read the user's request and continue with genuinely NEW content that advances the task instead of copying what you already wrote.]",
+                "ThinkOverflow" => "[System Self-Correction: You produced ONLY internal reasoning with no visible answer. Stop reasoning immediately. Close your thinking block, then answer the user's request directly in plain text — or emit ONE complete, well-formed tool call if a tool is needed. Do not continue planning inside the thinking block.]",
                 _ => "[System Self-Correction: You began looping on the same output. Stop immediately, re-read the user's message, and continue with new, non-repeating content that fulfills the user's request.]"
             };
 
@@ -1476,6 +1521,8 @@ public class ChatEngine(
         "RepetitionStutter" => "token repetition",
         "NGramLoop" => "a repetitive phrase loop",
         "SemanticLoop" => "repeated content (paraphrased loop)",
+        "ParagraphCopy" => "repeated copied paragraphs",
+        "ThinkOverflow" => "uninterrupted reasoning with no answer",
         "PaddingLoop" => "filler/whitespace repetition",
         "JunkOutput" => "garbage/random token output",
         _ => "a degenerate output loop"

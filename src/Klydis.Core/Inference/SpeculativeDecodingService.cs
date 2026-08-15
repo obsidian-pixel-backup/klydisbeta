@@ -103,9 +103,10 @@ public class SpeculativeDecodingService
 
         var targetMetadata = GgufMetadataReader.Parse(targetModel.FilePath);
         bool isHybridTarget = targetMetadata != null && (
-            string.Equals(targetMetadata.Architecture, "qwen35", StringComparison.OrdinalIgnoreCase) ||
+            InferenceEngine.IsQwenThinkingArchitecture(targetMetadata.Architecture) ||
             string.Equals(targetMetadata.Architecture, "mamba", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(targetMetadata.Architecture, "rwkv", StringComparison.OrdinalIgnoreCase)
+            string.Equals(targetMetadata.Architecture, "rwkv", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(targetMetadata.Architecture, "jamba", StringComparison.OrdinalIgnoreCase)
         );
 
         if (isHybridTarget)

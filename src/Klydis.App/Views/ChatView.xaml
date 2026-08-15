@@ -1047,6 +1047,12 @@
                                         <TextBlock Text="Clear All" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}"/>
                                     </StackPanel>
                                 </Button>
+                                <Button DockPanel.Dock="Right" Style="{DynamicResource GhostButton}" Command="{Binding SendAllQueuedNowCommand}" ToolTip="Send ALL queued messages now, one after another (cancels any running generation)" VerticalAlignment="Center" Padding="6,3" Margin="6,0,0,0">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,4,0"/>
+                                        <TextBlock Text="Send All Now" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Button>
                             </DockPanel>
 
                             <ScrollViewer MaxHeight="108" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
@@ -1075,6 +1081,13 @@
                                                             </Border>
                                                         </Button>
                                                         <TextBlock Text="{Binding Content}" MaxWidth="180" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}"/>
+                                                        <Button Style="{DynamicResource GhostButton}"
+                                                                Command="{Binding DataContext.SendQueuedItemNowCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                CommandParameter="{Binding}"
+                                                                ToolTip="Send now — send this message immediately (cancels any running generation)"
+                                                                Margin="6,0,0,0" Padding="2,0" VerticalAlignment="Center">
+                                                            <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                                        </Button>
                                                         <Button Style="{DynamicResource GhostButton}"
                                                                 Command="{Binding BeginEditCommand}"
                                                                 ToolTip="Edit queued message"

@@ -7,7 +7,7 @@ namespace Klydis.Core.Chat;
 /// <summary>
 /// Describes a degenerate output loop detected mid-stream by <see cref="GenerationLoopDetector"/>.
 /// </summary>
-/// <param name="Reason">Machine-readable reason: "TagSpam", "ToolCallSpam", "RepetitionStutter", "NGramLoop", "SemanticLoop", "JunkOutput" or "PaddingLoop".</param>
+/// <param name="Reason">Machine-readable reason: "TagSpam", "ToolCallSpam", "RepetitionStutter", "NGramLoop", "SemanticLoop", "ParagraphCopy", "JunkOutput", "PaddingLoop" or "ThinkOverflow".</param>
 /// <param name="LoopStartChar">Character offset (relative to the generated content) where the looped tail begins. Everything at or after this offset is garbage and should be discarded.</param>
 /// <param name="GeneratedTokenCount">Total tokens generated at the moment the loop was detected.</param>
 public sealed record GenerationLoopInfo(
@@ -144,6 +144,28 @@ public sealed class GenerationLoopDetector
     /// ever contained 2 copies (below the 3-repeat threshold), so the loop streamed for pages.
     /// </summary>
     private const int SemanticScanChars = 3000;
+
+    /// <summary>
+    /// Character span scanned for the paragraph-copy detector (whitespace-mangled repeats).
+    /// Only the tail matters: the copy loop is active RIGHT NOW, so the last few paragraphs
+    /// are where it lives.
+    /// </summary>
+    private const int ParagraphCopyScanChars = 2000;
+
+    /// <summary>
+    /// A normalized paragraph must be at least this long (whitespace stripped) before the copy
+    /// detector judges it — short paragraphs legitimately repeat in real text (dialogue, list
+    /// items, headings).
+    /// </summary>
+    private const int ParagraphCopyMinLength = 40;
+
+    /// <summary>
+    /// Adjacent paragraphs whose whitespace-insensitive character bigram Jaccard similarity
+    /// meets this threshold are treated as copies. Identical mangled copies score ~1.0; the
+    /// observed story-log repeats (same paragraph with spaces removed) scored well above 0.95.
+    /// Legitimate prose never produces adjacent paragraphs this character-identical.
+    /// </summary>
+    private const double ParagraphCopyJaccardThreshold = 0.90;
 
     /// <summary>
     /// A normalized sentence must be at least this long to count toward semantic-loop
@@ -464,6 +486,23 @@ public sealed class GenerationLoopDetector
             }
         }
 
+        // 4.5 Paragraph-copy loop: the SAME paragraph repeated with whitespace mangled or words
+        //     merged together ("theairwasthin;itseepedthrough..."). Stripping whitespace defeats
+        //     every word-level detector above — each mangled copy tokenizes into different
+        //     tokens, so token stutter, n-grams, and normalized-sentence semantics all miss it
+        //     (observed live: a "10-chapter" story where every chapter was the same paragraph
+        //     with spaces removed streamed for pages). Compare consecutive paragraphs on
+        //     whitespace-insensitive character content: near-identical character bigrams mean a
+        //     copy loop regardless of how whitespace was mangled. Lenient inside think blocks
+        //     like the other phrase-level checks.
+        int paraStart = Math.Max(0, _text.Length - ParagraphCopyScanChars);
+        string paraText = _text.ToString(paraStart, _text.Length - paraStart);
+        int paraCopyOffset = DetectParagraphCopy(paraText);
+        if (paraCopyOffset >= 0 && !IsCharInThink(paraStart + paraCopyOffset))
+        {
+            return new GenerationLoopInfo("ParagraphCopy", paraStart + paraCopyOffset, count);
+        }
+
         // 5. Semantic repetition: the same normalized sentence or line appearing repeatedly.
         //    This is the classic "psychotic loop" that exact-token checks miss — the model
         //    paraphrases the same content over and over with different words ("The cat sat on
@@ -540,6 +579,92 @@ public sealed class GenerationLoopDetector
         // Trailing unit after the last boundary (or the whole text when there is no boundary).
         ProcessUnit(sentenceStart, text.Length);
         return result;
+    }
+
+    /// <summary>
+    /// Detects the whitespace-mangled paragraph-copy loop: the same paragraph repeated with
+    /// whitespace stripped or mangled. Returns the char offset (relative to <paramref name="text"/>
+    /// of the SECOND paragraph of the trailing copy run — the point where the loop begins — or
+    /// -1 when the last paragraph is not part of an active copy run.
+    /// </summary>
+    private static int DetectParagraphCopy(string text)
+    {
+        // Split into paragraphs (on newlines), tracking each one's start offset in the input.
+        var contents = new List<string>();
+        var offsets = new List<int>();
+        int start = 0;
+        for (int i = 0; i <= text.Length; i++)
+        {
+            if (i == text.Length || text[i] == '\n')
+            {
+                string para = text.Substring(start, i - start).Trim();
+                if (para.Length > 0)
+                {
+                    contents.Add(para);
+                    offsets.Add(start);
+                }
+                start = i + 1;
+            }
+        }
+        if (contents.Count < 2) return -1;
+
+        // A copy loop is ACTIVE only when the LAST paragraph is itself a copy: walk backward
+        // from the end while consecutive paragraphs are copy-similar, and fire when the run
+        // contains at least two copies. This mirrors the other detectors' "the loop is cycling
+        // right now" requirement — a single mangled paragraph followed by new content is not a
+        // loop (the model moved on), but the observed story failure (every chapter an identical
+        // paragraph) repeats back-to-back to the very end.
+        int lastIdx = contents.Count - 1;
+        int runStart = lastIdx;
+        for (int i = lastIdx; i >= 1; i--)
+        {
+            string a = StripAllWhitespace(contents[i - 1]);
+            string b = StripAllWhitespace(contents[i]);
+            if (a.Length < ParagraphCopyMinLength || b.Length < ParagraphCopyMinLength) break;
+            if (CharacterBigramJaccard(a, b) < ParagraphCopyJaccardThreshold) break;
+            runStart = i - 1;
+        }
+        if (runStart >= lastIdx) return -1; // last paragraph is not part of a copy run
+
+        // The second paragraph of the run is the first repetition of already-written content;
+        // everything from there is the looped tail. The first paragraph of the run is genuine.
+        return offsets[runStart + 1];
+    }
+
+    /// <summary>
+    /// Removes EVERY whitespace character, so mangled copies ("the air was thin" vs
+    /// "theairwasthin") align into the same character stream.
+    /// </summary>
+    private static string StripAllWhitespace(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        foreach (char c in text)
+        {
+            if (!char.IsWhiteSpace(c)) sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Jaccard similarity of the character-bigram sets of two strings (0..1). Character
+    /// bigrams capture content order, so two paragraphs sharing the same characters in the
+    /// same order (even with different whitespace) score near 1.0.
+    /// </summary>
+    private static double CharacterBigramJaccard(string a, string b)
+    {
+        var setA = new HashSet<string>();
+        var setB = new HashSet<string>();
+        for (int i = 0; i + 1 < a.Length; i++) setA.Add(a.Substring(i, 2));
+        for (int i = 0; i + 1 < b.Length; i++) setB.Add(b.Substring(i, 2));
+        if (setA.Count == 0 || setB.Count == 0) return 0.0;
+
+        int inter = 0;
+        foreach (var g in setA)
+        {
+            if (setB.Contains(g)) inter++;
+        }
+        int union = setA.Count + setB.Count - inter;
+        return union == 0 ? 0.0 : (double)inter / union;
     }
 
     private static bool IsSentenceBoundary(char c) => c == '.' || c == '!' || c == '?' || c == '\n';

@@ -183,8 +183,12 @@
             </ScrollViewer>
 
             <!-- Right Column: Local Models -->
-            <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" Padding="10,0,0,0">
-                <StackPanel>
+            <Grid Grid.Column="2" Margin="10,0,0,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <StackPanel Grid.Row="0">
                     <TextBlock Text="Local Models" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10" />
                     <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" 
                              Margin="0,0,0,10"
@@ -204,9 +208,22 @@
                         </WrapPanel>
                     </Border>
 
-                    <ListBox ItemsSource="{Binding FilteredModels}" SelectedItem="{Binding SelectedLocalModel, Mode=TwoWay}"
-                             Background="Transparent" BorderThickness="0"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <TextBlock Text="No models found. Download models from the Hugging Face Hub." 
+                               Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" Margin="10,0,10,10"
+                               Visibility="{Binding FilteredModels.Count, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                </StackPanel>
+
+                <!-- The model list MUST be its own scroller with a bounded height (fills this
+                     row) — never nested inside an outer ScrollViewer. A ListBox has an internal
+                     ScrollViewer; nesting it inside an outer ScrollViewer creates a mouse-wheel
+                     dead zone: the inner viewer sizes to its content (unbounded in the outer
+                     StackPanel), captures the wheel, has nothing to scroll, and the outer
+                     ScrollViewer never receives the event — so the page appears unscrollable.
+                     This matches the SkillsView / ChatView scroller pattern. -->
+                <ListBox Grid.Row="1" ItemsSource="{Binding FilteredModels}" SelectedItem="{Binding SelectedLocalModel, Mode=TwoWay}"
+                         Background="Transparent" BorderThickness="0" Margin="0,10,0,0"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto">
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -290,12 +307,7 @@
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
-
-                    <TextBlock Text="No models found. Download models from the Hugging Face Hub." 
-                               Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" Margin="10"
-                               Visibility="{Binding FilteredModels.Count, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                </StackPanel>
-            </ScrollViewer>
+            </Grid>
         </Grid>
     </Grid>
 </UserControl>

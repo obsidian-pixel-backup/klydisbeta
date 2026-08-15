@@ -409,6 +409,8 @@ public class SystemPromptManager
             sb.AppendLine();
         }
         sb.AppendLine("### TOOL RULES");
+        sb.AppendLine("- Tools are REAL and execute on this machine with full system access: run_command runs actual commands, search_web queries the live web, read_file reads actual files. NEVER simulate tool use or fabricate results — emit the real <tool_call> tag and use the actual returned output.");
+        sb.AppendLine("- NEVER claim you lack access or that live data is unavailable (internet, weather, files, system) — the tools above execute for you on demand. Call the tool.");
         sb.AppendLine("- NEVER repeat a tool call with identical arguments. If you already received a result, USE IT.");
         sb.AppendLine("- ALWAYS analyze tool results before making additional calls; try a DIFFERENT approach on errors.");
         sb.AppendLine("- Do not invent custom tool names. Only use tools defined in the schema.");

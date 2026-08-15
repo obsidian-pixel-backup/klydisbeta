@@ -1449,6 +1449,76 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
+    /// Gracefully interrupts any in-flight generation (mirrors ForceSendMessageAsync) so a
+    /// queued message can be sent immediately instead of waiting for the queue's auto-process
+    /// path, which is gated on idle state and never fires for Steer messages the model fails
+    /// to incorporate via 'incorporate_queued_message' (the "messages stuck in the queue
+    /// forever" bug).
+    /// </summary>
+    private async Task CancelActiveGenerationIfNeededAsync()
+    {
+        if (IsGenerating || IsModelLoading)
+        {
+            Cancel();
+            if (_chatEngine != null)
+            {
+                await _chatEngine.CancelActiveGenerationAsync();
+            }
+
+            // Small delay to allow the active loop background task to finalize its partial
+            // response history before the new turn starts.
+            await Task.Delay(200);
+        }
+    }
+
+    /// <summary>
+    /// Sends ONE queued message immediately as a real user turn, bypassing the queue: removes
+    /// it from the queue, cancels any running generation, and sends the content now. The
+    /// escape hatch for messages stuck waiting on the model to incorporate them.
+    /// </summary>
+    [RelayCommand]
+    private async Task SendQueuedItemNowAsync(QueuedMessageViewModel? item)
+    {
+        if (item == null || string.IsNullOrWhiteSpace(item.Content)) return;
+        if (!IsModelReady) return; // cannot send without a loaded model — leave it queued
+
+        var content = item.Content;
+        // Remove first so the item can never be double-sent or re-picked by the auto-process path.
+        _messageQueue?.Remove(item.Id);
+
+        await CancelActiveGenerationIfNeededAsync();
+        await SendMessageForTextAsync(content);
+    }
+
+    /// <summary>
+    /// Sends ALL pending queued messages for the current session immediately, one after
+    /// another. All items are removed up front so the queue's auto-process-on-complete path
+    /// cannot double-send any of them.
+    /// </summary>
+    [RelayCommand]
+    private async Task SendAllQueuedNowAsync()
+    {
+        var sessionId = SelectedSession?.Id ?? string.Empty;
+        if (string.IsNullOrEmpty(sessionId)) return;
+        var pending = (_messageQueue?.GetPending(sessionId) ?? Array.Empty<QueuedMessage>()).ToList();
+        if (pending.Count == 0) return;
+        if (!IsModelReady) return;
+
+        // Remove ALL items up front: after each send completes, the engine's finally block
+        // auto-processes the next queued message — with an empty queue nothing is double-sent.
+        foreach (var msg in pending)
+        {
+            _messageQueue?.Remove(msg.Id);
+        }
+
+        foreach (var msg in pending)
+        {
+            await CancelActiveGenerationIfNeededAsync();
+            await SendMessageForTextAsync(msg.Content);
+        }
+    }
+
+    /// <summary>
     /// ModelMessageQueue exposes no in-place content update, so an edit is applied as a
     /// remove-then-re-enqueue of the same session/mode with the new text. That means an
     /// edited item loses its original queue position and reappears at the back (queue

@@ -127,8 +127,30 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public string Architecture { get; set; } = "llama"; // Default for now
 
     /// <summary>
+    /// True for the Qwen3.x thinking/recurrent model family (qwen35 / qwen35moe / qwen3next).
+    /// These are hybrid Gated-DeltaNet + attention architectures with tiny per-layer KV caches,
+    /// M-RoPE position requirements, pre-opened &lt;think&gt; templates, and the native
+    /// &lt;tool_call&gt;&lt;function=...&gt; tool syntax. EVERY runtime decision that makes them
+    /// behave — recurrent overflow strategy, thinking prelude, verbatim assistant storage,
+    /// grammar-constrained tool calls, stricter anti-repetition sampling — must key off this
+    /// single check. A qwen3next-arch model falling through a qwen35-only gate produced decode
+    /// failures, re-prefill loops, and flubbed tool calls (the "all qwen3.6 models are trash"
+    /// failure mode: the Qwen3-Next GGUF reports a different architecture string than the
+    /// qwen35 family, so it silently missed every qwen35-gated path). Plain dense Qwen3
+    /// ("/qwen3") is deliberately NOT matched — it is a standard transformer, not hybrid.
+    /// </summary>
+    public static bool IsQwenThinkingArchitecture(string? architecture)
+    {
+        if (string.IsNullOrWhiteSpace(architecture)) return false;
+        string lower = architecture.ToLowerInvariant();
+        return lower.StartsWith("qwen35", StringComparison.Ordinal) ||
+               lower.StartsWith("qwen3next", StringComparison.Ordinal) ||
+               lower.StartsWith("qwen3-next", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// True when the loaded model uses a recurrent/SSM hybrid architecture with M-RoPE
-    /// position requirements (qwen35 / qwen35moe / Qwen3-Next, mamba, rwkv, jamba). These
+    /// position requirements (qwen35 / qwen35moe / qwen3next, mamba, rwkv, jamba). These
     /// models cannot use partial-prefix KV rewinding (MemorySequenceRemove + fresh executor):
     /// the recurrent memory keeps its old positions while the new input batch starts at 0,
     /// violating the M-RoPE X &lt; Y invariant and making llama_decode fail.
@@ -138,8 +160,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         get
         {
             string? arch = Architecture?.ToLowerInvariant();
-            return arch is "qwen35" or "mamba" or "rwkv" or "jamba" ||
-                   (arch != null && arch.StartsWith("qwen35", StringComparison.Ordinal));
+            return IsQwenThinkingArchitecture(arch) || arch is "mamba" or "rwkv" or "jamba";
         }
     }
 
@@ -741,7 +762,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                lower.Contains("mixtral", StringComparison.Ordinal) ||
                lower.Contains("deepseekv2", StringComparison.Ordinal) ||
                lower.Contains("deepseekv3", StringComparison.Ordinal) ||
-               lower.Contains("grok", StringComparison.Ordinal);
+               lower.Contains("grok", StringComparison.Ordinal) ||
+               // qwen3next (Qwen3-Next, e.g. qwen3.6-14B-A3B): hybrid sparse model, fragile
+               // under stress — it gets the same MoE stabilizers (compact prompt, stricter
+               // anti-repetition sampling, loop self-correction) as the qwen35moe family.
+               lower.StartsWith("qwen3next", StringComparison.Ordinal) ||
+               lower.StartsWith("qwen3-next", StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1052,6 +1078,22 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     // thinking blocks (planning restates ideas by design) and strict on visible text.
                     bool startsInsideThink = GenerationLoopDetector.EndsInsideThinkBlock(prompt);
 
+                    // Thinking-token budget: a thinking model can stream reasoning indefinitely
+                    // without ever closing its think block (observed live: minutes of "stopped
+                    // responding" while the model re-drafted its plan inside <think> with no
+                    // visible output). The phrase-level loop detectors are deliberately lenient
+                    // inside think blocks, so a slow, non-repeating reasoning drift evades them
+                    // entirely. Cap uninterrupted in-think tokens per generation; beyond the cap
+                    // the generation is degenerate — stop it and route through the same
+                    // self-correction path as a detected loop (LastGenerationLoopInfo). Tool-call
+                    // content (which qwen models may emit inside the pre-opened think block) is
+                    // exempt: it is short, and cutting it mid-way would corrupt the call.
+                    const int MaxThinkTokensPerGeneration = 4096;
+                    bool thinkBlockWasOpen = startsInsideThink;
+                    int thinkTokenCount = 0;
+                    bool thinkCapFired = false;
+                    bool toolTagSeen = false;
+
                     // Route through the speculative path when a draft model is loaded OR the
                     // zero-VRAM N-gram fallback is active (previously the fallback was advertised
                     // in the UI but never engaged because IsLoaded stayed false).
@@ -1089,6 +1131,40 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                     loop.Reason, tokenCount, loop.LoopStartChar);
                                 LastGenerationLoopInfo = loop;
                                 break;
+                            }
+
+                            // Thinking-cap (see the budget declaration above). A generation stuck
+                            // in an unclosed think block with no tool call and no visible output
+                            // is degenerate no matter how varied its reasoning looks.
+                            if (!thinkCapFired)
+                            {
+                                bool thinkOpen = loopDetector.IsInThinkBlock;
+                                if (thinkOpen && !thinkBlockWasOpen)
+                                {
+                                    thinkTokenCount = 0; // new think block: restart the budget
+                                }
+                                thinkBlockWasOpen = thinkOpen;
+                                if (thinkOpen && !toolTagSeen)
+                                {
+                                    if (token.Contains("<tool_call", StringComparison.OrdinalIgnoreCase) ||
+                                        token.Contains("<|tool_call", StringComparison.OrdinalIgnoreCase) ||
+                                        token.Contains("function=", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        toolTagSeen = true;
+                                    }
+                                    else
+                                    {
+                                        thinkTokenCount++;
+                                        if (thinkTokenCount > MaxThinkTokensPerGeneration)
+                                        {
+                                            thinkCapFired = true;
+                                            _logger.LogWarning("Thinking block exceeded {Cap} tokens with no visible output and no tool call; stopping generation for self-correction (ThinkOverflow).",
+                                                MaxThinkTokensPerGeneration);
+                                            LastGenerationLoopInfo = new GenerationLoopInfo("ThinkOverflow", 0, tokenCount);
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                         
@@ -1425,7 +1501,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// understands. Mirrors ChatEngine's isQwenThinkingModel detection.
     /// </summary>
     private bool IsQwenNativeToolCallModel =>
-        (Architecture ?? string.Empty).Contains("qwen35", StringComparison.OrdinalIgnoreCase) &&
+        IsQwenThinkingArchitecture(Architecture) &&
         !string.IsNullOrWhiteSpace(RawChatTemplate) &&
         RawChatTemplate.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase);
 
