@@ -98,6 +98,34 @@ public class ToolExecutor(
     /// </summary>
     public RiskLevel CurrentRiskLevel { get; set; } = RiskLevel.Standard;
 
+    /// <summary>
+    /// Generic per-tool-call wall-clock timeout applied at dispatch, on top of any timeout a
+    /// tool already implements internally (crawl, browser, command execution). Guards the
+    /// whole turn against a single hung tool call — the task-level MaxTurnDuration can only
+    /// stop the loop BETWEEN iterations, so a stalled tool would otherwise block everything.
+    /// A timeout returns a failed ToolResult with guidance; the identical-failure circuit
+    /// breaker then blocks repeated retries of the same hung call.
+    /// </summary>
+    public TimeSpan ToolCallTimeout { get; set; } = TimeSpan.FromSeconds(180);
+
+    /// <summary>
+    /// Per-tool timeouts for operations that legitimately run longer than the default
+    /// (network crawling, compilation, LLM-driven indexing/summarization).
+    /// </summary>
+    private static readonly System.Collections.Generic.Dictionary<string, TimeSpan> ToolCallTimeoutOverrides =
+        new(System.StringComparer.OrdinalIgnoreCase)
+        {
+            // run_command is deliberately absent: it already self-bounds via its own
+            // timeout_seconds argument (default 120s), so the dispatch-level budget only
+            // needs to backstop tools without an internal timeout.
+            ["crawl_url"] = TimeSpan.FromMinutes(10),
+            ["search_web"] = TimeSpan.FromMinutes(5),
+            ["store_memory"] = TimeSpan.FromMinutes(5),
+            ["summarize_context"] = TimeSpan.FromMinutes(5),
+            ["index_folder_rag"] = TimeSpan.FromMinutes(10),
+            ["retrieve_memory"] = TimeSpan.FromMinutes(5)
+        };
+
     // Custom tool definitions are re-queried from SQLite on EVERY tool execution and prompt
     // build (2+ DB roundtrips per tool call in the generation loop). Cache them and invalidate
     // on create/delete — ToolExecutor is a singleton, so the cache is safe.
@@ -441,42 +469,62 @@ public class ToolExecutor(
             }
         }
 
+        // Per-tool-call timeout: a single hung tool must never block the whole turn (the
+        // task-level MaxTurnDuration only fires between iterations). Linked to the caller's
+        // token so user cancellation still wins over the timeout.
+        TimeSpan effectiveToolTimeout = ToolCallTimeoutOverrides.TryGetValue(request.Name, out var toolOverride)
+            ? toolOverride
+            : ToolCallTimeout;
+        using var toolTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        toolTimeoutCts.CancelAfter(effectiveToolTimeout);
+        var toolCt = toolTimeoutCts.Token;
+
         ToolResult result;
         try
         {
             result = request.Name switch
             {
-                "read_file" => await ReadFileAsync(request, ct),
-                "write_file" => await WriteFileAsync(request, ct),
-                "list_directory" => await ListDirectoryAsync(request, ct),
-                "run_command" => await RunCommandAsync(request, ct),
-                "get_system_info" => await GetSystemInfoAsync(ct),
-                "search_web" => await SearchWebAsync(request, ct),
-                "crawl_url" => await CrawlUrlAsync(request, ct),
-                "search_files" => await SearchFilesAsync(request, ct),
-                "store_memory" => await StoreMemoryAsync(request, sessionId, ct),
-                "retrieve_memory" => await RetrieveMemoryAsync(request, sessionId, ct),
-                "summarize_context" => await SummarizeContextAsync(request, sessionId, ct),
+                "read_file" => await ReadFileAsync(request, toolCt),
+                "write_file" => await WriteFileAsync(request, toolCt),
+                "list_directory" => await ListDirectoryAsync(request, toolCt),
+                "run_command" => await RunCommandAsync(request, toolCt),
+                "get_system_info" => await GetSystemInfoAsync(toolCt),
+                "search_web" => await SearchWebAsync(request, toolCt),
+                "crawl_url" => await CrawlUrlAsync(request, toolCt),
+                "search_files" => await SearchFilesAsync(request, toolCt),
+                "store_memory" => await StoreMemoryAsync(request, sessionId, toolCt),
+                "retrieve_memory" => await RetrieveMemoryAsync(request, sessionId, toolCt),
+                "summarize_context" => await SummarizeContextAsync(request, sessionId, toolCt),
                 "check_message_queue" => await CheckMessageQueueAsync(sessionId),
                 "incorporate_queued_message" => await IncorporateQueuedMessageAsync(request, sessionId),
-                "create_custom_tool" => await CreateCustomToolAsync(request, ct),
-                "delete_custom_tool" => await DeleteCustomToolAsync(request, ct),
+                "create_custom_tool" => await CreateCustomToolAsync(request, toolCt),
+                "delete_custom_tool" => await DeleteCustomToolAsync(request, toolCt),
                 "list_skills" => await ListSkillsAsync(request),
                 "search_skills" => await SearchSkillsAsync(request),
                 "get_skill_details" => await GetSkillDetailsAsync(request),
                 "activate_skill" => await ActivateSkillAsync(request),
                 "learn_skill" => await LearnSkillAsync(request),
                 "delete_skill" => await DeleteSkillAsync(request),
-                "search_rag" => await SearchRagAsync(request, ct),
-                "list_rag_collections" => await ListRagCollectionsAsync(ct),
-                "index_folder_rag" => await IndexFolderRagAsync(request, ct),
-                "learn_lesson" => await LearnLessonAsync(request, ct, modelPath),
-                "recall_lessons" => await RecallLessonsAsync(request, ct, modelPath),
+                "search_rag" => await SearchRagAsync(request, toolCt),
+                "list_rag_collections" => await ListRagCollectionsAsync(toolCt),
+                "index_folder_rag" => await IndexFolderRagAsync(request, toolCt),
+                "learn_lesson" => await LearnLessonAsync(request, toolCt, modelPath),
+                "recall_lessons" => await RecallLessonsAsync(request, toolCt, modelPath),
                 "task_complete" => ExecuteTaskComplete(request),
                 "task_progress" => ExecuteTaskProgress(request),
-                "plan" => ExecutePlan(request, sessionId),
-                _ => await ExecuteCustomToolAsync(request, ct)
+                "plan" => await ExecutePlanAsync(request, sessionId),
+                _ => await ExecuteCustomToolAsync(request, toolCt)
             };
+        }
+        catch (OperationCanceledException) when (toolTimeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // The per-call budget fired (not the user cancelling): surface an actionable
+            // timeout instead of a generic cancellation. The identical-failure circuit
+            // breaker will block a model that keeps retrying the same hung call.
+            logger.LogWarning("Tool '{ToolName}' exceeded the per-call timeout of {Timeout} and was cancelled.", request.Name, effectiveToolTimeout);
+            result = new ToolResult(request.Name, false, string.Empty,
+                $"⚠ Tool call '{request.Name}' exceeded the per-call timeout of {(int)effectiveToolTimeout.TotalSeconds} s and was cancelled. " +
+                $"Re-plan: split the operation into smaller steps or reduce its scope before retrying.");
         }
         catch (Exception ex)
         {
@@ -998,6 +1046,11 @@ public class ToolExecutor(
         }
         catch (Exception ex)
         {
+            // Cancellation must PROPAGATE to the dispatch-level per-tool-call timeout handler
+            // (which produces the actionable "exceeded the per-call timeout" message). The
+            // old swallow-and-convert leaked a bare "The operation was canceled." to the
+            // model, and it made the ToolExecutor.ToolCallTimeout backstop dead for run_command.
+            if (ex is OperationCanceledException) throw;
             return new ToolResult(request.Name, false, "", ex.Message);
         }
     }
@@ -2367,10 +2420,52 @@ public class ToolExecutor(
     // ---- Agent task plan / todo list (keyed by session) ----
     // The model maintains its todo list through the 'plan' tool; ChatEngine re-injects the
     // plan into the prompt on every iteration, closing the goal-execution feedback loop.
+    // The plan is PERSISTED to the session store on every mutation (SaveSessionPlanAsync) and
+    // lazily restored on first access after a restart, so a long-horizon task's todo list
+    // survives app restarts and model switches instead of starting from zero.
     private sealed record PlanTask(string Text, bool Done);
+    private sealed record PlanSnapshot(List<PlanTask>? Items, int Progress);
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<PlanTask>> _sessionPlans = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _sessionPlanProgress = new();
+    // Sessions already hydrated from the store, so the lazy restore hits the DB at most once
+    // per session per process (the getters below are called on the UI thread every 2s).
+    private readonly HashSet<string> _planLoadAttempted = new();
+
+    /// <summary>
+    /// Hydrates a session's persisted plan (if any) into the in-memory dictionaries. Called
+    /// lazily from the plan getters and from every 'plan' tool execution, so a session opened
+    /// after an app restart shows the plan the model left behind. Best-effort: a failed load
+    /// is logged and the session simply starts with an empty plan.
+    /// </summary>
+    private void EnsureSessionPlanLoaded(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return;
+        lock (_planLoadAttempted)
+        {
+            if (!_planLoadAttempted.Add(sessionId)) return;
+        }
+        try
+        {
+            var record = messageStore.GetSessionAsync(sessionId).GetAwaiter().GetResult();
+            if (record?.PlanJson != null)
+            {
+                var snapshot = System.Text.Json.JsonSerializer.Deserialize<PlanSnapshot>(record.PlanJson);
+                if (snapshot != null && snapshot.Items != null)
+                {
+                    _sessionPlans[sessionId] = snapshot.Items;
+                    if (snapshot.Progress >= 0)
+                    {
+                        _sessionPlanProgress[sessionId] = Math.Clamp(snapshot.Progress, 0, 100);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to load persisted plan for session {SessionId}.", sessionId);
+        }
+    }
 
     /// <summary>
     /// A single item in the agent's task plan (todo list).
@@ -2383,6 +2478,7 @@ public class ToolExecutor(
     /// </summary>
     public IReadOnlyList<PlanEntry> GetSessionPlanEntries(string sessionId)
     {
+        EnsureSessionPlanLoaded(sessionId);
         if (string.IsNullOrEmpty(sessionId) || !_sessionPlans.TryGetValue(sessionId, out var plan) || plan.Count == 0)
         {
             return Array.Empty<PlanEntry>();
@@ -2437,6 +2533,7 @@ public class ToolExecutor(
     /// </summary>
     public IReadOnlyList<string> GetSessionPlan(string sessionId)
     {
+        EnsureSessionPlanLoaded(sessionId);
         if (string.IsNullOrEmpty(sessionId) || !_sessionPlans.TryGetValue(sessionId, out var plan) || plan.Count == 0)
         {
             return Array.Empty<string>();
@@ -2455,6 +2552,7 @@ public class ToolExecutor(
     /// </summary>
     public int GetSessionPlanProgress(string sessionId)
     {
+        EnsureSessionPlanLoaded(sessionId);
         return string.IsNullOrEmpty(sessionId) || !_sessionPlanProgress.TryGetValue(sessionId, out var p) ? -1 : p;
     }
 
@@ -2551,10 +2649,12 @@ public class ToolExecutor(
         return (0, string.Empty);
     }
 
-    private ToolResult ExecutePlan(ToolCallRequest request, string sessionId)
+    private async Task<ToolResult> ExecutePlanAsync(ToolCallRequest request, string sessionId)
     {
+        string key = sessionId ?? string.Empty;
+        EnsureSessionPlanLoaded(key);
         string action = (GetStringArg(request.Arguments, "action") ?? "show").Trim().ToLowerInvariant();
-        var plan = _sessionPlans.GetOrAdd(sessionId ?? string.Empty, _ => new List<PlanTask>());
+        var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
 
         switch (action)
         {
@@ -2587,11 +2687,24 @@ public class ToolExecutor(
             var raw = ToolExecutor.UnwrapJsonElement(progObj)?.ToString();
             if (int.TryParse(raw, out int pct))
             {
-                _sessionPlanProgress[sessionId ?? string.Empty] = Math.Clamp(pct, 0, 100);
+                _sessionPlanProgress[key] = Math.Clamp(pct, 0, 100);
             }
         }
 
-        var formatted = GetSessionPlan(sessionId ?? string.Empty);
+        // Checkpoint: persist the plan + progress so the todo list survives restarts and
+        // model switches (long-horizon tasks keep their step-level plan across sessions).
+        try
+        {
+            var snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key));
+            string json = System.Text.Json.JsonSerializer.Serialize(snapshot);
+            await messageStore.SaveSessionPlanAsync(key, json);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to persist session plan for {SessionId}.", sessionId);
+        }
+
+        var formatted = GetSessionPlan(key);
         string body = formatted.Count > 0 ? string.Join("\n", formatted) : "(plan is empty)";
         int progress = GetSessionPlanProgress(sessionId ?? string.Empty);
         string progressLine = progress >= 0 ? $"\nOverall progress: {progress}%" : string.Empty;

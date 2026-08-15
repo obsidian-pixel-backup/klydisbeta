@@ -64,4 +64,28 @@ public class GoalExecutionState
     /// Summary reported by model upon calling task_complete.
     /// </summary>
     public string? CompletionSummary { get; set; }
+
+    /// <summary>
+    /// Number of consecutive task_complete claims rejected by the deterministic verifier
+    /// (open plan items still existed). Resets to zero only when a claim is accepted.
+    /// </summary>
+    public int CompletionRejections { get; set; }
+
+    /// <summary>
+    /// Human-readable reason from the most recent rejected completion claim, injected into
+    /// the next continuation prompt so the model knows exactly which work remains open.
+    /// </summary>
+    public string? LastVerificationRejection { get; set; }
+
+    /// <summary>
+    /// Consecutive turns that executed tool calls while the deterministic progress signal
+    /// (completed plan items) did not advance — the silent-failure detector.
+    /// </summary>
+    public int ConsecutiveStalledTurns { get; set; }
+
+    /// <summary>
+    /// Most recent stagnation warning, injected into the next continuation prompt so the
+    /// model reassesses instead of repeating a non-advancing pattern.
+    /// </summary>
+    public string? LastStagnationNotice { get; set; }
 }

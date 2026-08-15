@@ -20,7 +20,8 @@ public record SessionRecord(
     string? WorldState,
     string? SystemPrompt,
     string? SettingsJson,
-    bool IsPinned
+    bool IsPinned,
+    string? PlanJson
 );
 
 /// <summary>
@@ -148,7 +149,8 @@ public class MessageStore
                 world_state TEXT,
                 system_prompt TEXT,
                 settings_json TEXT,
-                is_pinned INTEGER DEFAULT 0
+                is_pinned INTEGER DEFAULT 0,
+                plan_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -192,6 +194,21 @@ public class MessageStore
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
+            -- Durable model message queue: steering/direct-send messages must survive
+            -- process restarts so a terminated model turn never loses queued work. The
+            -- stable id doubles as the idempotency key (a re-delivered message can be
+            -- detected and skipped); attempt_count is the lease signal incremented on
+            -- each claim, mirroring at-least-once delivery semantics.
+            CREATE TABLE IF NOT EXISTS queued_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                mode INTEGER NOT NULL,
+                status INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0
+            );
+
             -- FTS5 Virtual Table for full-text search
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
 
@@ -224,6 +241,19 @@ public class MessageStore
         {
             await using var alterCmd = connection.CreateCommand();
             alterCmd.CommandText = "ALTER TABLE messages ADD COLUMN is_consolidated INTEGER DEFAULT 0;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
+
+        // The agent's task plan / todo list (persisted so long-horizon plans survive app
+        // restarts and model switches — see ToolExecutor.SaveSessionPlanAsync).
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE sessions ADD COLUMN plan_json TEXT;";
             await alterCmd.ExecuteNonQueryAsync();
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
@@ -351,6 +381,23 @@ public class MessageStore
     }
 
     /// <summary>
+    /// Persists the agent's task plan (todo list) and progress for a session, so long-horizon
+    /// plans survive app restarts and model switches. <paramref name="planJson"/> is the JSON
+    /// snapshot written by ToolExecutor on every 'plan' tool mutation; null clears it.
+    /// </summary>
+    public async Task SaveSessionPlanAsync(string sessionId, string? planJson)
+    {
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE sessions SET plan_json = @plan, updated_at = @now WHERE id = @id";
+        command.Parameters.AddWithValue("@plan", planJson ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("o"));
+        command.Parameters.AddWithValue("@id", sessionId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
     /// Deletes a chat session and cascades to delete all associated messages.
     /// </summary>
     public async Task DeleteSessionAsync(string sessionId)
@@ -420,6 +467,89 @@ public class MessageStore
         }
         
         return messages;
+    }
+
+    /// <summary>
+    /// Persists a queued message (INSERT OR REPLACE so a re-enqueue of the same id is idempotent).
+    /// </summary>
+    public async Task SaveQueuedMessageAsync(QueuedMessage msg)
+    {
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO queued_messages (id, session_id, content, mode, status, created_at, attempt_count)
+            VALUES (@id, @sessionId, @content, @mode, @status, @createdAt, @attemptCount);
+        ";
+        command.Parameters.AddWithValue("@id", msg.Id.ToString());
+        command.Parameters.AddWithValue("@sessionId", msg.SessionId);
+        command.Parameters.AddWithValue("@content", msg.Content);
+        command.Parameters.AddWithValue("@mode", (int)msg.Mode);
+        command.Parameters.AddWithValue("@status", (int)msg.Status);
+        command.Parameters.AddWithValue("@createdAt", msg.CreatedAt.ToString("o"));
+        command.Parameters.AddWithValue("@attemptCount", msg.AttemptCount);
+
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Updates a queued message's status and attempt count (lease signal).
+    /// </summary>
+    public async Task UpdateQueuedMessageAsync(Guid id, QueuedMessageStatus status, int attemptCount)
+    {
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE queued_messages SET status = @status, attempt_count = @attemptCount WHERE id = @id;";
+        command.Parameters.AddWithValue("@id", id.ToString());
+        command.Parameters.AddWithValue("@status", (int)status);
+        command.Parameters.AddWithValue("@attemptCount", attemptCount);
+
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Loads all persisted queued messages (hydration after a restart).
+    /// </summary>
+    public async Task<List<QueuedMessage>> LoadQueuedMessagesAsync()
+    {
+        var result = new List<QueuedMessage>();
+
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id, session_id, content, mode, status, created_at, attempt_count FROM queued_messages ORDER BY created_at ASC;";
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new QueuedMessage
+            {
+                Id = Guid.Parse(reader.GetString(0)),
+                SessionId = reader.GetString(1),
+                Content = reader.GetString(2),
+                Mode = (QueuedMessageMode)reader.GetInt32(3),
+                Status = (QueuedMessageStatus)reader.GetInt32(4),
+                CreatedAt = DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                AttemptCount = reader.GetInt32(6)
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Deletes a queued message (terminal states are removed from the durable queue).
+    /// </summary>
+    public async Task DeleteQueuedMessageAsync(Guid id)
+    {
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM queued_messages WHERE id = @id;";
+        command.Parameters.AddWithValue("@id", id.ToString());
+
+        await command.ExecuteNonQueryAsync();
     }
 
     /// <summary>
@@ -794,7 +924,8 @@ public class MessageStore
             WorldState: reader.IsDBNull(reader.GetOrdinal("world_state")) ? null : reader.GetString(reader.GetOrdinal("world_state")),
             SystemPrompt: reader.IsDBNull(reader.GetOrdinal("system_prompt")) ? null : reader.GetString(reader.GetOrdinal("system_prompt")),
             SettingsJson: reader.IsDBNull(reader.GetOrdinal("settings_json")) ? null : reader.GetString(reader.GetOrdinal("settings_json")),
-            IsPinned: !reader.IsDBNull(reader.GetOrdinal("is_pinned")) && reader.GetInt32(reader.GetOrdinal("is_pinned")) == 1
+            IsPinned: !reader.IsDBNull(reader.GetOrdinal("is_pinned")) && reader.GetInt32(reader.GetOrdinal("is_pinned")) == 1,
+            PlanJson: reader.IsDBNull(reader.GetOrdinal("plan_json")) ? null : reader.GetString(reader.GetOrdinal("plan_json"))
         );
     }
 

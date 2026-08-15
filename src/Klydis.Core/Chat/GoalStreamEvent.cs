@@ -35,7 +35,26 @@ public enum GoalStreamEventType
     /// <summary>
     /// Goal loop terminated due to budget exhaustion or timeout.
     /// </summary>
-    BudgetExhausted
+    BudgetExhausted,
+
+    /// <summary>
+    /// The deterministic verifier rejected a task_complete claim because gating checks
+    /// (open plan items) had not passed. "Done" is decided by the harness, not the model.
+    /// </summary>
+    VerificationFailed,
+
+    /// <summary>
+    /// The harness detected stagnation: consecutive turns executed tool calls but the
+    /// deterministic progress signal (completed plan items) never advanced.
+    /// </summary>
+    StagnationDetected,
+
+    /// <summary>
+    /// The continuation supervisor's post-turn verdict: the task remains ACTIVE (plan open,
+    /// queue non-empty) or is verified complete. Model termination never sets this — the
+    /// harness's durable-state checks do.
+    /// </summary>
+    SupervisorVerdict
 }
 
 /// <summary>
@@ -73,4 +92,27 @@ public record GoalStreamEvent(GoalStreamEventType Type, string Content, IDiction
 
     public static GoalStreamEvent BudgetExhausted(string reason) =>
         new GoalStreamEvent(GoalStreamEventType.BudgetExhausted, reason);
+
+    public static GoalStreamEvent VerificationFailed(string reason, int rejectionCount, IReadOnlyList<string>? openPlanItems = null) =>
+        new GoalStreamEvent(GoalStreamEventType.VerificationFailed, reason, new Dictionary<string, object>
+        {
+            ["RejectionCount"] = rejectionCount,
+            ["OpenPlanItems"] = openPlanItems ?? new List<string>()
+        });
+
+    public static GoalStreamEvent StagnationDetected(string reason, int stalledTurns) =>
+        new GoalStreamEvent(GoalStreamEventType.StagnationDetected, reason, new Dictionary<string, object>
+        {
+            ["StalledTurns"] = stalledTurns
+        });
+
+    public static GoalStreamEvent SupervisorVerdict(TaskContinuationVerdict verdict) =>
+        new GoalStreamEvent(GoalStreamEventType.SupervisorVerdict,
+            $"Task status: {verdict.Status} — {verdict.Reason}",
+            new Dictionary<string, object>
+            {
+                ["TaskStatus"] = verdict.Status.ToString(),
+                ["Reason"] = verdict.Reason,
+                ["Continue"] = verdict.Continue
+            });
 }

@@ -172,6 +172,16 @@ public interface IInferenceEngine
     bool LastGenerationHitMaxTokens { get; }
 
     /// <summary>
+    /// True when the most recent chat-path generation was cut short mid-stream by a native
+    /// decode failure / context overflow AFTER emitting tokens, and the engine completed the
+    /// stream cleanly with the partial output (neither a MaxTokens cap hit, a stop token, a
+    /// cancellation, nor a detected degenerate loop). Read after the token stream ends: the
+    /// response is truncated and should be resumed via auto-continuation, exactly like a
+    /// MaxTokens cap hit.
+    /// </summary>
+    bool LastGenerationWasCutShort { get; }
+
+    /// <summary>
     /// True when the most recent chat-path generation completed EMPTY because the prompt itself
     /// already fills the context window (recurrent architectures complete empty instead of
     /// overflowing the cache). Read after the token stream ends: the caller must reduce the
@@ -205,7 +215,7 @@ public class ChatEngine(
     ILogger<ChatEngine> logger,
     ModelMessageQueue? messageQueue = null,
     Klydis.Core.RAG.VectorStore? vectorStore = null,
-    Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null)
+    Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null) : IGoalCompletionVerifier
 {
     private readonly List<ChatMessage> _history = new();
     private readonly Klydis.Core.Learning.AdaptiveLearningService? _adaptiveLearning = adaptiveLearning;
@@ -269,8 +279,75 @@ public class ChatEngine(
     public string SelectedPersonality { get; set; } = "Default";
     public bool IsGoalMode { get; set; } = true;
     public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
+
+    /// <summary>
+    /// Deterministic completion evidence for the goal loop's verification gate: the persisted
+    /// plan is the authoritative checklist, so "done" requires every item to be checked off.
+    /// See <see cref="IGoalCompletionVerifier"/>.
+    /// </summary>
+    public IReadOnlyList<string> GetOpenPlanItems(string sessionId)
+    {
+        try
+        {
+            return toolExecutor.GetSessionPlanEntries(sessionId)
+                .Where(e => !e.Done)
+                .Select(e => e.Text)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            // A verifier failure must never crash the goal loop; degrade to "no evidence of
+            // open work" (claim accepted) rather than blocking completion on an error.
+            logger.LogDebug(ex, "Failed to read open plan items for completion verification.");
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
+    /// Deterministic progress signal for stagnation detection: (Total, Completed) counts from
+    /// the persisted plan checklist. (0, 0) when there is no plan.
+    /// </summary>
+    public (int Total, int Completed) GetPlanProgress(string sessionId)
+    {
+        try
+        {
+            var entries = toolExecutor.GetSessionPlanEntries(sessionId);
+            return (entries.Count, entries.Count(e => e.Done));
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to read plan progress for stagnation detection.");
+            return (0, 0);
+        }
+    }
+
+    /// <summary>
+    /// The full plan checklist with done flags — the durable source for the continuation
+    /// contract (see <see cref="IGoalCompletionVerifier.GetPlanEntries"/>).
+    /// </summary>
+    public IReadOnlyList<ToolExecutor.PlanEntry> GetPlanEntries(string sessionId)
+    {
+        try
+        {
+            return toolExecutor.GetSessionPlanEntries(sessionId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to read plan entries for continuation contract.");
+            return Array.Empty<ToolExecutor.PlanEntry>();
+        }
+    }
     public bool IsGenerating { get; private set; }
     public double TokensPerSecond { get; private set; }
+
+    /// <summary>
+    /// Optional wall-clock budget for a single user turn (the whole agent loop: every
+    /// generation, tool call, and regeneration within one message). The loop checks it
+    /// between iterations and terminates with a timeout notice once exceeded — a runaway
+    /// long-horizon run can no longer burn unbounded tokens/time. Null = unlimited
+    /// (default, preserving current behavior).
+    /// </summary>
+    public TimeSpan? MaxTurnDuration { get; set; }
     /// <summary>
     /// Gets a snapshot of the conversation history. Returns a copy rather than a live view
     /// because the generation task mutates <c>_history</c> (Add/AddRange/Clear) while UI
@@ -688,6 +765,13 @@ public class ChatEngine(
         // this turn and the prompt STILL cannot fit, terminate with a clear error instead of
         // looping the "Model produced an empty response — self-correcting…" banner forever.
         bool windowCompressionAttemptedThisTurn = false;
+        // Long-horizon budget recovery: when the per-iteration prompt budget pass evicts
+        // history messages (hasDroppedMessages), run rolling compression SYNCHRONOUSLY (once
+        // per turn) instead of letting the deferred WorldState consolidation rescue them next
+        // turn. The evicted messages are archived + summarized into WorldState immediately and
+        // the prompt is rebuilt from the compressed history, so the model keeps working memory
+        // of early task context on long-horizon runs instead of losing it for a whole turn.
+        bool budgetCompressionAttemptedThisTurn = false;
         // Set when the window-full branch terminates the turn with its own specific error; the
         // generic "no visible output" terminal error below is then suppressed so the user does
         // not see two stacked failure banners for the same cause.
@@ -741,10 +825,24 @@ public class ChatEngine(
             return t;
         }
 
+        var turnStopwatch = System.Diagnostics.Stopwatch.StartNew();
+
         while (iterationCount < MAX_ITERATIONS)
         {
             iterationCount++;
-            
+
+            // Wall-clock budget: a turn is bounded by MaxTurnDuration (when set) in addition
+            // to the iteration cap — checked between iterations so a native decode is never
+            // interrupted mid-stream. The timeout notice ends the turn so the user can
+            // re-prompt (the conversation history is preserved) instead of watching a stalled
+            // or runaway run burn tokens.
+            if (MaxTurnDuration.HasValue && turnStopwatch.Elapsed > MaxTurnDuration.Value)
+            {
+                logger.LogWarning("Turn exceeded the maximum duration budget ({Budget}). Terminating the agent loop at iteration {Iteration}.", MaxTurnDuration.Value, iterationCount);
+                yield return new ChatStreamEvent(ChatStreamEventType.Error, $"⏱ This turn ran longer than the maximum allowed duration ({MaxTurnDuration.Value.TotalMinutes:F1} min) and was stopped. Continue in a new message — the conversation history is preserved.");
+                break;
+            }
+
             // Execute automated rolling compression when history tokens reach the threshold.
             int rollingThreshold = GetRollingCompressionThreshold();
             int estimatedHistoryTokens = activeHistory.Sum(TokensOf);
@@ -940,6 +1038,17 @@ public class ChatEngine(
                 var planHeader = "\n\nCURRENT TASK PLAN (your todo list — shown live to the user in the PLAN tab; keep it updated as you work and check off completed items with the 'plan' tool):\n" +
                     string.Join("\n", currentPlan.Select(l => $"  {l}")) +
                     (planProgress >= 0 ? $"\nOverall progress: {planProgress}%" : string.Empty);
+
+                // EXECUTION STATE continuation contract — deterministic from durable sources
+                // (plan checklist + queue), so rolling compaction can never erase the semantics
+                // of what remains REQUIRED ("D = NOT COMPLETE"). This is the model window's
+                // state, as opposed to the WorldState narrative summary.
+                var contract = ContinuationContractBuilder.Build(
+                    string.Empty,
+                    toolExecutor.GetSessionPlanEntries(generatingSessionId),
+                    MessageQueue?.GetPending(generatingSessionId).Count ?? 0);
+                planHeader += "\n" + ContinuationContractBuilder.Format(contract);
+
                 sysPrompt = sysPrompt.TrimEnd() + planHeader;
             }
         }
@@ -1151,6 +1260,42 @@ public class ChatEngine(
                 prompt = promptEngine.ApplyTemplate(messages, templateType, qwenThinking: isQwenThinkingModel);
                 finalPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(prompt) : contextOrchestrator.EstimateTokens(prompt);
             }
+        }
+
+        // LONG-HORIZON CONTEXT BUDGET RECOVERY: the backward budget pass and/or the strict
+        // truncation loop evicted history messages because prompt + history exceeded
+        // maxTotalPromptTokens. Without intervention the model loses that context THIS turn —
+        // the deferred WorldState consolidation only lands next turn (and the strict trim can
+        // evict early goal context that a long-horizon run still needs). Run rolling
+        // compression synchronously instead: the oldest messages are archived to disk and
+        // summarized into WorldState, and history is pruned in place, so the next iteration's
+        // prompt rebuild (which re-reads session.WorldState) fits the budget AND carries the
+        // summary immediately. Bounded to one compression per turn so a session whose WorldState
+        // itself cannot shrink does not spin the rebuild loop.
+        if (hasDroppedMessages && !budgetCompressionAttemptedThisTurn)
+        {
+            budgetCompressionAttemptedThisTurn = true;
+            logger.LogInformation("Prompt budget evicted history messages; running synchronous rolling compression so the model retains summarized context this turn.");
+            yield return new ChatStreamEvent(ChatStreamEventType.MemorySummarizing, "🧠 Context budget exceeded — summarizing older conversation into memory…");
+            // Keep exactly what the budget pass kept (the newest messages that fit), so the
+            // evicted tail is precisely the oldest history that overflowed — nothing more is
+            // summarized, and the rebuilt prompt fits the same budget.
+            int keepRecent = Math.Max(512, targetUserBudget);
+            int historyTokens = activeHistory.Sum(TokensOf);
+            // Force the compression to engage: history already overflowed the prompt budget, so
+            // use the measured size (instead of the 75%-headroom rolling threshold) as the
+            // trigger — the oldest messages are exactly the ones that were evicted.
+            int compressionThreshold = Math.Max(1, historyTokens);
+            bool compressed = await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, compressionThreshold, keepRecent);
+            if (compressed && CurrentSessionId == generatingSessionId && !ReferenceEquals(_history, activeHistory))
+            {
+                _history.Clear();
+                _history.AddRange(activeHistory);
+            }
+            InvalidateContextUsageCache();
+            // Restart the iteration: the top-of-loop compression check (now below threshold) and
+            // the prompt rebuild run against the compressed history + updated WorldState.
+            continue;
         }
 
         var fullResponseBuilder = new StringBuilder();
@@ -1586,13 +1731,19 @@ public class ChatEngine(
             else
             {
                 // Check if generation ended prematurely mid-response (truncated before completing
-                // output). Two independent signals: (a) the engine exhausted its MaxTokens budget
+                // output). Three independent signals: (a) the engine exhausted its MaxTokens budget
                 // (the stream was cut at the output cap — even a response that ends cleanly with a
-                // period is truncated), or (b) the visible text ends mid-sentence/structure. The
+                // period is truncated), (b) the visible text ends mid-sentence/structure, or
+                // (c) the native decode failed / context overflowed mid-stream AFTER tokens were
+                // emitted and the engine completed the channel with the partial output (see
+                // LastGenerationWasCutShort — without it, such a cut that lands on a sentence
+                // boundary looks like a natural stop and the turn silently ends with a partial
+                // answer, the observed "generation terminates after ~1k tokens" failure). The
                 // instruction may be injected up to MaxContinuationsPerTurn per user turn so long
                 // generations resume across chunks, but the budget prevents the old pathological
                 // cascade (each re-injection rebuilds and re-prefills the whole prompt).
                 bool hitOutputCap = inferenceEngine.LastGenerationHitMaxTokens;
+                bool cutShortMidStream = inferenceEngine.LastGenerationWasCutShort;
                 bool isTruncatedMidGeneration = IsTruncatedMidGeneration(fullResponse, visibleResponse);
                 bool visibleEmpty = string.IsNullOrWhiteSpace(visibleTextBuilder.ToString());
 
@@ -1662,11 +1813,11 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Generation was interrupted — the model was switched or unloaded while responding. Your message is still here; send it again once the model has finished loading.");
                     break;
                 }
-                else if ((isTruncatedMidGeneration || hitOutputCap) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn)
+                else if ((isTruncatedMidGeneration || hitOutputCap || cutShortMidStream) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn)
                 {
                     continuationsThisTurn++;
-                    logger.LogInformation("Output generation cut off (hitMaxTokens={HitCap}, midSentence={MidSentence}). Triggering auto-continuation iteration {Count}/{Max}.",
-                        hitOutputCap, isTruncatedMidGeneration, continuationsThisTurn, MaxContinuationsPerTurn);
+                    logger.LogInformation("Output generation cut off (hitMaxTokens={HitCap}, midSentence={MidSentence}, cutShortMidStream={CutShort}). Triggering auto-continuation iteration {Count}/{Max}.",
+                        hitOutputCap, isTruncatedMidGeneration, cutShortMidStream, continuationsThisTurn, MaxContinuationsPerTurn);
                     var continuationInstruction = "[System Instruction: Your previous output was truncated mid-generation due to output token constraints. Continue immediately from the exact point of truncation without repeating any previously written text.]";
                     var continuationMsgObj = new ChatMessage(ChatRole.User, continuationInstruction);
                     AddToSessionHistory(activeHistory, continuationMsgObj, generatingSessionId);

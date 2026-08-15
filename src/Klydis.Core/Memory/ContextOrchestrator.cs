@@ -60,22 +60,41 @@ namespace Klydis.Core.Memory
     private const int MaxWorldStateChars = 8000;
 
     /// <summary>
+    /// Effective WorldState character cap for the CURRENT model context. Long-horizon tasks on
+    /// small context windows previously grew WorldState (every rolling compression appends a
+    /// summary) toward the fixed 8000-char cap, which then consumed a large share of the
+    /// system-prompt budget on every turn — the model's working memory shrank until the
+    /// budget pass evicted history, and WorldState fought the conversation for the window.
+    /// Scaling the cap with the loaded context (up to the 8000-char ceiling) keeps small
+    /// windows at ~1.5K-3.5K chars (~400-900 tokens) of world state so the rest stays
+    /// available for conversation history on long-horizon runs.
+    /// </summary>
+    private int GetWorldStateCapChars()
+    {
+        if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded && _inferenceEngine.ContextSize > 0)
+        {
+            return Math.Clamp((int)(_inferenceEngine.ContextSize * 0.35), 1500, MaxWorldStateChars);
+        }
+        return MaxWorldStateChars;
+    }
+
+    /// <summary>
     /// Appends a new section to the persisted WorldState, keeping the combined value within
-    /// <see cref="MaxWorldStateChars"/> characters. When the cap would be exceeded the newest
+    /// <paramref name="capChars"/> characters. When the cap would be exceeded the newest
     /// content wins and the oldest portion is trimmed (full history stays in the transcript
     /// archive and the RAG memory index).
     /// </summary>
-    private static string AppendWorldState(string? existing, string newSection)
+    private static string AppendWorldState(string? existing, string newSection, int capChars)
     {
         if (string.IsNullOrWhiteSpace(existing)) return (newSection ?? string.Empty).Trim();
         var combined = $"{existing}\n\n{newSection}";
-        if (combined.Length <= MaxWorldStateChars) return combined.Trim();
+        if (combined.Length <= capChars) return combined.Trim();
 
-        int excess = combined.Length - MaxWorldStateChars;
+        int excess = combined.Length - capChars;
         int firstNewline = combined.IndexOf('\n', excess);
         return firstNewline >= 0
             ? "[...older world-state entries trimmed...]\n" + combined[(firstNewline + 1)..]
-            : combined[^MaxWorldStateChars..];
+            : combined[^capChars..];
     }
 
     /// <summary>
@@ -369,7 +388,7 @@ namespace Klydis.Core.Memory
             // Cap the combined WorldState so repeated compressions cannot grow it past the
             // system-prompt budget (see AppendWorldState).
             var newSection = $"Archived Context Summary:{archiveNotice}\n{summaryText}";
-            var newWorldState = AppendWorldState(existingState, newSection);
+            var newWorldState = AppendWorldState(existingState, newSection, GetWorldStateCapChars());
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState, null);
 
@@ -455,7 +474,7 @@ namespace Klydis.Core.Memory
             var existingState = session.WorldState ?? "";
             
             // Cap the combined WorldState (see AppendWorldState).
-            var newWorldState = AppendWorldState(existingState, $"Archived Context:\n{summaryText}");
+            var newWorldState = AppendWorldState(existingState, $"Archived Context:\n{summaryText}", GetWorldStateCapChars());
 
             await _store.UpdateSessionAsync(sessionId, null, newWorldState, null);
             await _store.MarkMessagesAsConsolidatedAsync(overflow.Select(m => m.Id));

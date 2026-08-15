@@ -191,6 +191,20 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public bool LastGenerationHitMaxTokens { get; private set; }
 
     /// <summary>
+    /// True when the most recent chat-path generation was cut short MID-STREAM by a native
+    /// decode failure / context overflow AFTER tokens were already emitted, and the stream was
+    /// completed cleanly with the partial output (neither a MaxTokens cap hit, a stop token,
+    /// user cancellation, nor a detected degenerate loop). This is the "llama_decode failed
+    /// (InvalidInputBatch) / ContextOverflowException" path — on recurrent architectures it
+    /// fires most often when M-RoPE positioning or the KV cache state breaks mid-generation.
+    /// ChatEngine reads this after the token stream ends: the response is truncated and must
+    /// be resumed via auto-continuation, exactly like a MaxTokens cap hit. Without it, a cut
+    /// that happens to end at a sentence boundary is indistinguishable from a natural stop and
+    /// the turn silently terminates at whatever token count was reached (~1k in practice).
+    /// </summary>
+    public bool LastGenerationWasCutShort { get; private set; }
+
+    /// <summary>
     /// True when the previous generation was aborted BEFORE decoding because the prompt already
     /// filled the context window (recurrent architectures complete empty instead of overflowing
     /// the native cache). ChatEngine must distinguish this from a genuinely degenerate model
@@ -955,6 +969,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             LastGenerationHitMaxTokens = false;
             LastGenerationPromptFilledWindow = false;
             LastGenerationWasCancelled = false;
+            LastGenerationWasCutShort = false;
 
             Channel<Action>? eventChannel = null;
             Task? eventDispatcherTask = null;
@@ -1270,6 +1285,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                             // channel cleanly with whatever was already generated.
                             _logger.LogWarning(ex, "Context window filled on recurrent architecture; completing generation cleanly instead of retrying.");
                             ResetContextInternal();
+                            // The stream was cut mid-generation after emitting {tokenCount}
+                            // tokens. Signal the cut to ChatEngine so the response is resumed
+                            // via auto-continuation instead of the turn silently ending at a
+                            // sentence boundary with a partial answer.
+                            LastGenerationWasCutShort = tokenCount > 0;
                             completedNormally = true;
                             generationException = null;
                         }
@@ -1338,6 +1358,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                 else
                                 {
                                     _logger.LogWarning("Context limit reached after tokens were emitted; completing channel cleanly.");
+                                    // Same mid-stream cut signal as the recurrent branch: tokens
+                                    // were already streamed and the stream ends early, so the
+                                    // response must be resumed rather than left truncated.
+                                    LastGenerationWasCutShort = tokenCount > 0;
                                     completedNormally = true;
                                     generationException = null;
                                 }

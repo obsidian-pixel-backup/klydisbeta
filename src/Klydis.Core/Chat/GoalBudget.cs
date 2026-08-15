@@ -34,6 +34,21 @@ public class GoalBudget
     public bool AllowInfinite { get; set; } = false;
 
     /// <summary>
+    /// Maximum consecutive task_complete claims rejected by the deterministic verifier
+    /// before the run halts. Guards against a model that insists it is done while plan
+    /// items remain open (the "repeats the same action without progress" failure mode).
+    /// Default 3.
+    /// </summary>
+    public int MaxCompletionRejections { get; set; } = 3;
+
+    /// <summary>
+    /// Consecutive tool-calling turns with no completed plan items before a stagnation
+    /// warning is emitted and injected into the next turn. Progress is measured by the
+    /// checklist, not by generated text. Default 6.
+    /// </summary>
+    public int MaxStalledTurns { get; set; } = 6;
+
+    /// <summary>
     /// Checks whether current execution state is within budget bounds.
     /// </summary>
     public bool IsWithinLimits(GoalExecutionState state)
@@ -44,6 +59,7 @@ public class GoalBudget
         if (state.TotalTokensGenerated >= MaxTotalTokens) return false;
         if (state.ElapsedTime >= MaxWallTime) return false;
         if (state.ConsecutiveEmptyTurns >= MaxConsecutiveEmptyTurns) return false;
+        if (state.CompletionRejections >= MaxCompletionRejections) return false;
 
         return true;
     }
@@ -55,6 +71,8 @@ public class GoalBudget
     {
         if (state.ConsecutiveEmptyTurns >= MaxConsecutiveEmptyTurns)
             return $"Agent reached max consecutive non-advancing turns ({MaxConsecutiveEmptyTurns}). Execution paused to prevent infinite loop stall.";
+        if (state.CompletionRejections >= MaxCompletionRejections)
+            return $"Task completion claim was rejected {MaxCompletionRejections} times by the deterministic verifier (plan items remained open). Execution halted because 'done' could not be verified.";
         if (state.TurnCount >= MaxTurns)
             return $"Reached maximum turn limit ({MaxTurns} turns).";
         if (state.TotalTokensGenerated >= MaxTotalTokens)
