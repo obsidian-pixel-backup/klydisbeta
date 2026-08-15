@@ -75,6 +75,14 @@ public interface IInferenceEngine
     bool IsSpeculativeDecodingEnabled { get; set; }
 
     /// <summary>
+    /// When true and the loaded model uses the qwen-native tool-call template, sampling is
+    /// grammar-constrained from the moment the model opens <tool_call> so malformed/abandoned
+    /// calls cannot reach the regex parser. Default off; ChatEngine enables it exactly when the
+    /// qwen native tools prelude is active.
+    /// </summary>
+    bool EnableToolGrammarConstrainedDecoding { get; set; }
+
+    /// <summary>
     /// Gets or sets speculative draft candidate count.
     /// </summary>
     int SpeculativeDraftCount { get; set; }
@@ -162,6 +170,23 @@ public interface IInferenceEngine
     /// token stream ends to decide whether an auto-continuation is warranted.
     /// </summary>
     bool LastGenerationHitMaxTokens { get; }
+
+    /// <summary>
+    /// True when the most recent chat-path generation completed EMPTY because the prompt itself
+    /// already fills the context window (recurrent architectures complete empty instead of
+    /// overflowing the cache). Read after the token stream ends: the caller must reduce the
+    /// prompt (rolling compression) rather than treating this as degenerate model output.
+    /// </summary>
+    bool LastGenerationPromptFilledWindow { get; }
+
+    /// <summary>
+    /// True when the most recent generation ended WITHOUT output because it was cancelled
+    /// (model switch/unload, user stop, teardown) rather than because the model degenerated.
+    /// An empty stream with this flag set must NOT be routed into the empty-response
+    /// self-correction cascade — the correction would rebuild the context and re-trigger the
+    /// very cancellation that produced the empty stream.
+    /// </summary>
+    bool LastGenerationWasCancelled { get; }
     int GetTokenCount(string text);
     Task CancelActiveGenerationAsync();
     Task UnloadModelAsync(CancellationToken ct = default);
@@ -242,7 +267,7 @@ public class ChatEngine(
 
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public string SelectedPersonality { get; set; } = "Default";
-    public bool IsGoalMode { get; set; } = false;
+    public bool IsGoalMode { get; set; } = true;
     public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
     public bool IsGenerating { get; private set; }
     public double TokensPerSecond { get; private set; }
@@ -357,6 +382,35 @@ public class ChatEngine(
         InvalidateContextUsageCache();
         CurrentSessionId = targetId;
         EvictOldSessionHistories(targetId);
+    }
+
+    /// <summary>
+    /// Re-syncs the in-memory cached history for a session from the store WITHOUT changing
+    /// the active session (CurrentSessionId and <c>_history</c> are untouched). Used when a
+    /// background generation completes while the user is viewing another chat: a switch-back
+    /// load may have replaced <c>_sessionHistories[sessionId]</c> with a mid-generation DB
+    /// snapshot, so the finished turn (appended to the now-orphaned live list) would be
+    /// missing from the model's next prompt in that chat.
+    /// </summary>
+    public async Task ResyncSessionHistoryFromStoreAsync(string sessionId)
+    {
+        try
+        {
+            var dbMessages = await messageStore.GetMessagesAsync(sessionId, null);
+            var list = new List<ChatMessage>();
+            foreach (var msg in dbMessages)
+            {
+                if (IsEngineInjectedMessage(msg.Content)) continue;
+                if (msg.Role == ChatRole.Assistant && string.IsNullOrWhiteSpace(msg.Content)) continue;
+                if (msg.IsConsolidated) continue;
+                list.Add(new ChatMessage(msg.Role, msg.Content));
+            }
+            _sessionHistories[sessionId] = list;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to resync cached session history for {SessionId}.", sessionId);
+        }
     }
 
     private void InvalidateContextUsageCache()
@@ -576,6 +630,15 @@ public class ChatEngine(
             useQwenNativePrelude = !await _adaptiveLearning.HasNativeToolFormatIssuesAsync(modelName, ct);
         }
 
+        // Grammar-constrained decoding: from the moment a qwen-native model opens <tool_call>,
+        // sampling is constrained to the well-formed call grammar (ToolCallConstrainedSampling
+        // Pipeline + BuildQwenNativeGbnf) so malformed/abandoned calls cannot reach the regex
+        // parser — each failed parse used to cost a full prompt rebuild + re-prefill +
+        // re-inference. Enabled exactly when the native prelude is used; for every other model
+        // (JSON-format qwen, dense, non-qwen) the sampling pipeline stays free-form. The
+        // pipeline latches off on any grammar failure, so a bad grammar can never kill a run.
+        inferenceEngine.EnableToolGrammarConstrainedDecoding = useQwenNativePrelude;
+
         // Fire-and-forget lesson recording for correction events (telemetry-like; never blocks
         // the turn and never throws into the stream).
         void NoteLesson(string source, string detail)
@@ -618,6 +681,23 @@ public class ChatEngine(
         // degenerate, one final generation strips the tools and the pre-opened think block and
         // demands a plain direct answer — so the user gets a coherent response instead of an
         // empty failed turn. Exactly one rescue attempt per turn (rescueTriggered latches it).
+        // Window-full guard: when the ENGINE reports the prompt itself filled the context
+        // window (recurrent architectures complete empty instead of overflowing the cache),
+        // injecting an empty-response correction would grow the prompt and fail identically.
+        // The correct remedy is rolling compression; if compression has already been attempted
+        // this turn and the prompt STILL cannot fit, terminate with a clear error instead of
+        // looping the "Model produced an empty response — self-correcting…" banner forever.
+        bool windowCompressionAttemptedThisTurn = false;
+        // Set when the window-full branch terminates the turn with its own specific error; the
+        // generic "no visible output" terminal error below is then suppressed so the user does
+        // not see two stacked failure banners for the same cause.
+        bool emittedWindowFullTerminalError = false;
+        // Set when the turn ends because the generation was cancelled (model switch/unload,
+        // user stop) instead of because the model degenerated. The interruption notice is the
+        // only message shown — no self-corrections, no rescue attempt, and the generic
+        // "no visible output" terminal error is suppressed.
+        bool emittedCancellationNotice = false;
+
         bool rescueTriggered = false;
         bool rescueRequested = false;
         var rescueSysMsg = new ChatMessage(ChatRole.System,
@@ -775,6 +855,23 @@ public class ChatEngine(
             // format failures skips the prelude and gets the JSON format instead (adaptive).
             var compactBase = sysPromptManager.BuildCompactSystemPrompt("", worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
             sysPrompt = promptEngine.BuildQwenToolsPrelude(toolsSchema) + "\n\n" + compactBase;
+
+            // The native tools prelude embeds the full ~17KB tool schema. On small context
+            // windows it can ALONE fill the window — the engine then completes generation EMPTY
+            // (recurrent arch) and the user sees the "Model produced an empty response" loop.
+            // Budget-check the prelude version exactly like the dense-model full-prompt path
+            // below: if it cannot fit alongside the minimum user budget, fall back to the
+            // compact prompt (JSON tool format) instead of shipping a guaranteed-empty prompt.
+            int preludeTokens = inferenceEngine.IsModelLoaded
+                ? inferenceEngine.GetTokenCount(sysPrompt)
+                : contextOrchestrator.EstimateTokens(sysPrompt);
+            if (preludeTokens > maxTotalPromptTokens - minUserBudget)
+            {
+                logger.LogWarning("Qwen tools prelude ({PreludeTokens} tokens) exceeds the prompt budget ({Budget}); falling back to the compact prompt (JSON tool format) to keep the context window usable.",
+                    preludeTokens, maxTotalPromptTokens - minUserBudget);
+                NoteLesson("prelude_too_large", $"Qwen tools prelude ({preludeTokens} tokens) exceeded the prompt budget ({maxTotalPromptTokens - minUserBudget}); fell back to the compact prompt (JSON tool format).");
+                sysPrompt = sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+            }
         }
         else if (inferenceEngine.IsMixtureOfExperts)
         {
@@ -787,6 +884,68 @@ public class ChatEngine(
             sysPrompt = fullPromptTokens > maxTotalPromptTokens - minUserBudget
                 ? sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode)
                 : fullPrompt;
+        }
+
+        // User-authored session notes (right-side Notes panel): pinned steering/context notes
+        // the user wants the model to honor on EVERY generation of this chat. They ride in the
+        // system prompt so they survive rolling compression, which would otherwise prune them
+        // from the raw conversation history.
+        try
+        {
+            var sessionNotes = await messageStore.GetNotesAsync(generatingSessionId);
+            if (sessionNotes.Count > 0)
+            {
+                var notesHeader = "\n\nUSER NOTES FOR THIS CHAT (authoritative instructions/context pinned in the NOTES tab by the user — read carefully and obey; they take precedence over ordinary conversation history):\n" +
+                    string.Join("\n", sessionNotes.Select((n, i) => $"{i + 1}. {n.Content}"));
+                sysPrompt = sysPrompt.TrimEnd() + notesHeader;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to load session notes for prompt context.");
+        }
+
+        // Artifacts this chat has produced (files the model wrote) — mirrors the PREVIEW tab
+        // of the workbench so the model knows what it has created and that the user can render
+        // HTML/Markdown/JSON live. Rebuilt each loop iteration alongside the plan.
+        try
+        {
+            var artifacts = toolExecutor.GetSessionArtifactPaths(generatingSessionId);
+            if (artifacts.Count > 0)
+            {
+                var artifactHeader = "\n\nARTIFACTS PRODUCED IN THIS CHAT (files you wrote — shown in the PREVIEW tab; HTML, Markdown and JSON render live for the user):\n" +
+                    string.Join("\n", artifacts.Take(15).Select(p => $"  - {p}"));
+                if (artifacts.Count > 15)
+                {
+                    artifactHeader += $"\n  … and {artifacts.Count - 15} more";
+                }
+                sysPrompt = sysPrompt.TrimEnd() + artifactHeader;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to load session artifacts for prompt context.");
+        }
+
+        // Agent's current task plan / todo list, maintained through the 'plan' tool. The
+        // prompt is rebuilt on EVERY loop iteration, so the model always sees its own
+        // checklist (with [x] checkmarks) and its reported progress — this is what closes the
+        // goal-execution feedback loop: plan → execute → update plan → re-plan → … → complete.
+        try
+        {
+            var currentPlan = toolExecutor.GetSessionPlan(generatingSessionId);
+            if (currentPlan.Count > 0)
+            {
+                int planProgress = toolExecutor.GetSessionPlanProgress(generatingSessionId);
+                var planHeader = "\n\nCURRENT TASK PLAN (your todo list — shown live to the user in the PLAN tab; keep it updated as you work and check off completed items with the 'plan' tool):\n" +
+                    string.Join("\n", currentPlan.Select(l => $"  {l}")) +
+                    (planProgress >= 0 ? $"\nOverall progress: {planProgress}%" : string.Empty);
+                sysPrompt = sysPrompt.TrimEnd() + planHeader;
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to load current task plan for prompt context.");
         }
 
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
@@ -1223,9 +1382,45 @@ public class ChatEngine(
                 continue;
             }
 
+            // Shared escalation ladder for malformed tool calls: whether parsing produced ZERO
+            // requests despite a tool tag, or the executor rejected a structurally invalid call
+            // (missing required argument), the model gets the same progressive fix-it feedback
+            // — reminder → alternative format → completed example → suspend + direct answer.
+            // Previously executor validation errors ("Command is required" ×7) were returned as
+            // ordinary tool results and NEVER entered this ladder, so a model stuck in that loop
+            // ran until the user gave up.
+            string BuildToolCallEscalation(string attemptedHint)
+            {
+                if (consecutiveToolParseFailures >= 4)
+                {
+                    // Last resort: stop trying tools entirely and demand a direct answer.
+                    toolsSuspendedForTurn = true;
+                    NoteLesson("tool_call_suspension", $"Tool calling suspended for the turn after {consecutiveToolParseFailures} consecutive malformed tool calls; a direct answer was forced.");
+                    return "[System: Tool calling has been suspended for this turn after repeated malformed calls. Do NOT emit <tool_call> or any tool tags. Answer the user's request directly using the information you already have.]";
+                }
+
+                if (consecutiveToolParseFailures >= 2)
+                {
+                    if (isQwenThinkingModel && _adaptiveLearning != null)
+                    {
+                        _ = _adaptiveLearning.RecordNativeToolFormatFailureAsync(inferenceEngine.CurrentModelPath);
+                    }
+                    NoteLesson("tool_parse_failure", $"Model emitted {consecutiveToolParseFailures} consecutive unparseable tool calls; escalation offered the alternative JSON format.");
+                    return isQwenThinkingModel
+                        ? $@"[Tool Error: Your tool call is STILL incomplete.{attemptedHint} The parser accepts BOTH formats — EITHER finish the native form: <tool_call><function=TOOL_NAME><parameter=ARG_NAME>value</parameter></function></tool_call> (close </function> and </tool_call>) OR use the JSON form: <tool_call>{{""name"": ""tool_name"", ""arguments"": {{""arg"": ""value""}}}}</tool_call>. Make the tool call the ENTIRE content of your response — nothing before, nothing after.]"
+                        : $@"[Tool Error: Failed to parse <tool_call> JSON again.{attemptedHint} Emit the tool call as the ENTIRE response in exactly this form: <tool_call>{{""name"": ""tool_name"", ""arguments"": {{""arg"": ""value""}}}}</tool_call>. No surrounding text, no code fences.]";
+                }
+
+                // First failure: teach the model's native format (qwen) or the JSON form.
+                return isQwenThinkingModel
+                    ? $"[Tool Error: Your tool call is INCOMPLETE — you opened <tool_call> but did not finish it.{attemptedHint} Complete it using the native format: <tool_call><function=TOOL_NAME><parameter=ARG_NAME>value</parameter></function></tool_call>. Required parameters must be included. Do NOT use JSON inside the tags.]"
+                    : $"[Tool Error: Failed to parse <tool_call> JSON.{attemptedHint} Please ensure arguments are valid JSON with 'name' and 'arguments'.]";
+            }
+
             if (toolCallRequests.Count > 0)
             {
                 bool forceTurnTermination = false;
+                bool validationEscalated = false;
 
                 foreach (var req in toolCallRequests)
                 {
@@ -1297,6 +1492,30 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
                     
                     var result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, ct, inferenceEngine.CurrentModelPath);
+
+                    // Executor rejected a STRUCTURALLY INVALID call (missing required argument,
+                    // malformed path). Route it into the parse-failure escalation ladder instead
+                    // of feeding it back as an ordinary tool result: the observed "Command is
+                    // required" ×7 loop happened because each empty call returned a plain error
+                    // that never escalated. The escalation message names the missing piece so the
+                    // model can fix the call on the next iteration.
+                    if (result.IsValidationError)
+                    {
+                        consecutiveToolParseFailures++;
+                        string validationHint = string.IsNullOrWhiteSpace(result.Error)
+                            ? $" You were attempting to call '{req.Name}'."
+                            : $" You called '{req.Name}' but it is malformed: {result.Error}";
+                        string escalation = BuildToolCallEscalation(validationHint);
+                        logger.LogWarning("Executor rejected invalid call for {ToolName} ({Error}); escalating (attempt {Attempt}).",
+                            req.Name, result.Error, consecutiveToolParseFailures);
+                        var escObj = new ChatMessage(ChatRole.Tool, escalation);
+                        AddToSessionHistory(activeHistory, escObj, generatingSessionId);
+                        // Engine-internal parse feedback: in-memory only (see IsEngineInjectedMessage).
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, escalation);
+                        validationEscalated = true;
+                        break;
+                    }
+
                     var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
                     
                     var currentPendingQueue = MessageQueue?.GetPending(generatingSessionId);
@@ -1320,6 +1539,14 @@ public class ChatEngine(
                     await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, toolOutput, 0, null);
                     
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolResult, toolOutput, new Dictionary<string, object> { ["Success"] = result.Success });
+                }
+
+                if (validationEscalated)
+                {
+                    // The escalation message is in history; regenerate so the model can fix the
+                    // call (same recovery the zero-parse branch uses). Only true termination
+                    // reasons below break the turn.
+                    continue;
                 }
 
                 if (forceTurnTermination || _consecutiveBlockedToolCalls >= 5)
@@ -1348,42 +1575,7 @@ public class ChatEngine(
                     ? ""
                     : $" You were attempting to call '{attemptedTool}'.";
 
-                string parseErrorMsg;
-                if (consecutiveToolParseFailures >= 4)
-                {
-                    // Last resort: stop trying tools entirely and demand a direct answer.
-                    toolsSuspendedForTurn = true;
-                    parseErrorMsg = "[System: Tool calling has been suspended for this turn after repeated malformed calls. Do NOT emit <tool_call> or any tool tags. Answer the user's request directly using the information you already have.]";
-                    NoteLesson("tool_call_suspension", $"Tool calling suspended for the turn after {consecutiveToolParseFailures} consecutive malformed tool calls; a direct answer was forced.");
-                }
-                else if (consecutiveToolParseFailures >= 2)
-                {
-                    // Second+ failure: the taught format is not working for this model. Offer the
-                    // alternative format explicitly — the parser accepts BOTH for every model.
-                    // Also persist the failure so the NEXT session adapts: a qwen model that
-                    // keeps failing the native format gets switched to the JSON format (see
-                    // useQwenNativePrelude above).
-                    if (isQwenThinkingModel && _adaptiveLearning != null)
-                    {
-                        _ = _adaptiveLearning.RecordNativeToolFormatFailureAsync(inferenceEngine.CurrentModelPath);
-                    }
-                    NoteLesson("tool_parse_failure", $"Model emitted {consecutiveToolParseFailures} consecutive unparseable tool calls; escalation offered the alternative JSON format.");
-                    parseErrorMsg = isQwenThinkingModel
-                        ? $@"[Tool Error: Your tool call is STILL incomplete.{attemptedHint} The parser accepts BOTH formats — EITHER finish the native form: <tool_call><function=TOOL_NAME><parameter=ARG_NAME>value</parameter></function></tool_call> (close </function> and </tool_call>) OR use the JSON form: <tool_call>{{""name"": ""tool_name"", ""arguments"": {{""arg"": ""value""}}}}</tool_call>. Make the tool call the ENTIRE content of your response — nothing before, nothing after.]"
-                        : $@"[Tool Error: Failed to parse <tool_call> JSON again.{attemptedHint} Emit the tool call as the ENTIRE response in exactly this form: <tool_call>{{""name"": ""tool_name"", ""arguments"": {{""arg"": ""value""}}}}</tool_call>. No surrounding text, no code fences.]";
-                }
-                else
-                {
-                    // First failure: teach the model's native format (qwen) or the JSON form.
-                    // For qwen thinking models the tool format is NATIVE (not JSON): the model
-                    // opens <tool_call> and must continue with <function=NAME><parameter=K>value
-                    // </parameter></function></tool_call>. Telling it to fix "JSON with 'name'
-                    // and 'arguments'" misleads it into the wrong format (a common failure: it
-                    // emits a bare <tool_call> and stops).
-                    parseErrorMsg = isQwenThinkingModel
-                        ? $"[Tool Error: Your tool call is INCOMPLETE — you opened <tool_call> but did not finish it.{attemptedHint} Complete it using the native format: <tool_call><function=TOOL_NAME><parameter=ARG_NAME>value</parameter></function></tool_call>. Required parameters must be included. Do NOT use JSON inside the tags.]"
-                        : $"[Tool Error: Failed to parse <tool_call> JSON.{attemptedHint} Please ensure arguments are valid JSON with 'name' and 'arguments'.]";
-                }
+                string parseErrorMsg = BuildToolCallEscalation(attemptedHint);
 
                 var parseErrMsgObj = new ChatMessage(ChatRole.Tool, parseErrorMsg);
                 AddToSessionHistory(activeHistory, parseErrMsgObj, generatingSessionId);
@@ -1419,7 +1611,58 @@ public class ChatEngine(
                 bool noVisibleProgress = continuationsThisTurn > 0 && visibleEmpty;
                 bool continuationAllowed = !stuckInThink && !noVisibleProgress;
 
-                if ((isTruncatedMidGeneration || hitOutputCap) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn)
+                if (inferenceEngine.LastGenerationPromptFilledWindow)
+                {
+                    // The prompt itself cannot fit the window — the empty stream is a
+                    // structural failure, NOT degenerate model behavior. Do NOT inject an
+                    // empty-response correction (it grows the prompt and fails identically).
+                    // First remedy: compress the conversation history and retry once.
+                    if (!windowCompressionAttemptedThisTurn)
+                    {
+                        windowCompressionAttemptedThisTurn = true;
+                        logger.LogWarning("Generation completed empty because the prompt fills the context window. Running rolling compression and retrying.");
+                        NoteLesson("window_full_empty", $"Generation completed empty because the prompt filled the context window; injected rolling compression and retried.");
+                        yield return new ChatStreamEvent(ChatStreamEventType.MemorySummarizing, "🧠 Context window is full — summarizing conversation history and retrying…");
+                        int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 262144);
+                        await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, Math.Max(1024, (int)(inferenceEngine.ContextSize / 2)), keepRecent);
+                        if (CurrentSessionId == generatingSessionId && !ReferenceEquals(_history, activeHistory))
+                        {
+                            _history.Clear();
+                            _history.AddRange(activeHistory);
+                        }
+                        InvalidateContextUsageCache();
+                        // Fall through: the loop rebuilds the prompt from the compressed history
+                        // and retries the generation.
+                    }
+                    else
+                    {
+                        // Compression was already attempted and the prompt STILL cannot fit.
+                        // Terminate with an actionable error instead of a silent/looping empty
+                        // response — the user must reduce context or raise the window.
+                        logger.LogWarning("Prompt still fills the context window after compression. Terminating the turn with a clear error.");
+                        NoteLesson("window_full_empty_persistent", "Prompt still fills the context window after rolling compression; turn terminated with an explicit error.");
+                        emittedWindowFullTerminalError = true;
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The model's context window is full even after compressing the conversation. Try starting a new chat or reducing context usage.");
+                        break;
+                    }
+                }
+                else if (visibleEmpty && inferenceEngine.LastGenerationWasCancelled)
+                {
+                    // The empty stream is the result of a CANCELLATION (model switch/unload,
+                    // user stop, teardown), not a degenerate model. Injecting an empty-response
+                    // self-correction here rebuilds the context and re-triggers the very
+                    // cancellation that produced the empty stream — the observed correction-storm
+                    // during model alternation (identical empty_response lessons across all qwen
+                    // models, 5 context rebuilds in 9 seconds, zero decodes). End the turn with
+                    // an accurate interruption notice; the user's message stays un-answered and
+                    // can be re-sent once the model is stable.
+                    emittedCancellationNotice = true;
+                    logger.LogWarning("Generation was cancelled before producing visible output (model switch, unload, or user stop). Ending the turn with an interruption notice instead of self-correcting.");
+                    NoteLesson("generation_cancelled", "Generation was cancelled (model switch/unload) before producing output; turn ended with an interruption notice instead of the empty-response correction cascade.");
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Generation was interrupted — the model was switched or unloaded while responding. Your message is still here; send it again once the model has finished loading.");
+                    break;
+                }
+                else if ((isTruncatedMidGeneration || hitOutputCap) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn)
                 {
                     continuationsThisTurn++;
                     logger.LogInformation("Output generation cut off (hitMaxTokens={HitCap}, midSentence={MidSentence}). Triggering auto-continuation iteration {Count}/{Max}.",
@@ -1478,7 +1721,7 @@ public class ChatEngine(
         // self-corrections, the rescue attempt, and every continuation failed), surface a clear
         // error instead of ending silently. Previously this dead-ended with zero output — the
         // user saw a thought bubble stall, then nothing ("the model stopped responding").
-        if (!producedVisibleOutput)
+        if (!producedVisibleOutput && !emittedWindowFullTerminalError && !emittedCancellationNotice)
         {
             logger.LogWarning("Turn ended with no visible output across {Iterations} iterations (all corrections/rescue attempts failed).", iterationCount);
             yield return new ChatStreamEvent(ChatStreamEventType.Error,
@@ -1784,6 +2027,15 @@ public class ChatEngine(
         var results = new List<ToolCallRequest>();
         if (string.IsNullOrWhiteSpace(response)) return results;
 
+        // Self-protecting: strip thinking blocks up front (thinking tags only — antml/qwen
+        // tool calls survive). Reasoning routinely contains JSON shaped like {"name": ...} /
+        // {"tool": ...} planning lines, and the loose JSON fallback layers below would
+        // misread them as real tool calls (phantom executions that re-run the whole turn
+        // loop). The production caller already passes a think-stripped response; stripping
+        // here makes the parser safe for any caller.
+        response = OutputSanitizer.StripThinkingBlocks(response);
+        if (string.IsNullOrWhiteSpace(response)) return results;
+
         // 0. Qwen-native format (qwen35/qwen35moe models): <tool_call><function=NAME><parameter=K>
         // value</parameter>...</function></tool_call>. The embedded qwen template emits this exact
         // structure when tools are provided; it is NOT JSON, so it must be parsed before the
@@ -1879,6 +2131,38 @@ public class ChatEngine(
                 {
                     results.Add(new ToolCallRequest(name, args));
                 }
+            }
+            if (results.Count > 0) return results;
+        }
+
+        // 0b. Anthropic/Claude native format (antml): <antml:invoke name="TOOL"><antml:parameter
+        // name="ARG">value</antml:parameter></antml:invoke>. Claude-fine-tuned models (e.g. the
+        // qwen35 "Claude-4.6" hybrid seen in production) emit THIS shape, not the qwen native
+        // tags above. Without a dedicated parser their calls fell through every layer and died
+        // as "INCOMPLETE tool call" — a well-formed Claude call was told to fix itself.
+        // Parsing is tolerant: the parameter name may be quoted or bare, multiple parameters
+        // are supported, and the closing tag is optional.
+        {
+            var antmlBlocks = Regex.Matches(response,
+                @"<antml:invoke\s+name\s*=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))[^>]*>(.*?)(?:</antml:invoke>|$)",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            foreach (Match block in antmlBlocks)
+            {
+                var name = FirstNonEmpty(block, 1, 2, 3);
+                if (string.IsNullOrEmpty(name)) continue;
+
+                var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                foreach (Match pm in Regex.Matches(block.Groups[4].Value,
+                    @"<antml:parameter\s+name\s*=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))[^>]*>([\s\S]*?)</antml:parameter>",
+                    RegexOptions.Singleline | RegexOptions.IgnoreCase))
+                {
+                    var key = FirstNonEmpty(pm, 1, 2, 3);
+                    if (string.IsNullOrEmpty(key)) continue;
+                    var rawVal = System.Net.WebUtility.HtmlDecode(pm.Groups[4].Value.Trim());
+                    args[key] = TryParseQwenNativeJsonValue(rawVal) ?? rawVal;
+                }
+
+                results.Add(new ToolCallRequest(name, args));
             }
             if (results.Count > 0) return results;
         }
@@ -2046,29 +2330,11 @@ public class ChatEngine(
             }
         }
 
-        // 5. Final Fallback: Extract narrative simulated tool calls like "- tool_name \n - Input: { ... }"
-        if (results.Count == 0 && !string.IsNullOrWhiteSpace(response))
-        {
-            var simulatedInputMatches = Regex.Matches(response, @"(?:^|\n|\r)\s*(?:-\s*|\*\*\s*|tool:\s*)?([a-zA-Z0-9_.-]+)\s*[\r\n\s]*(?:-\s*)?(?:Input|arguments|params)\s*:\s*(\{[\s\S]*?\})", RegexOptions.IgnoreCase);
-            foreach (Match m in simulatedInputMatches)
-            {
-                var toolName = m.Groups[1].Value.Trim();
-                var rawArgsJson = m.Groups[2].Value.Trim();
-                try
-                {
-                    var rawDict = JsonSerializer.Deserialize<Dictionary<string, object>>(rawArgsJson);
-                    if (rawDict != null)
-                    {
-                        var args = UnwrapArgs(rawDict);
-                        results.Add(new ToolCallRequest(toolName, args));
-                    }
-                }
-                catch
-                {
-                    // Ignore fallback parse failures
-                }
-            }
-        }
+        // Layer 5 (narrative simulated tool calls — "- tool_name\n- Input: {...}") was REMOVED.
+        // It regex-extracted prose that merely LOOKED like a call and executed it as a real tool,
+        // laundering fabricated planning text into commands (the KMS chats' invented
+        // "kms-agent" execution). Real formats are parsed in layers 0-4 above; prose that is not
+        // a structured call must be answered, not executed.
 
         return results;
     }

@@ -35,6 +35,75 @@
         <!-- TitleBarButtonStyle/CloseButtonStyle now live in ThemeStyles.xaml (shared
              with TextContextWindow's custom chrome) - resolved via the app-wide merged
              dictionary, so no local copy is needed here. -->
+
+        <!-- Stats popup row label. -->
+        <Style x:Key="StatRowLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,2"/>
+        </Style>
+
+        <!-- Stats popup value: right-aligned primary text with per-metric severity coloring.
+             The base style carries only setters so the severity triggers on the derived styles
+             do not stack across metrics. -->
+        <Style x:Key="StatValueText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="StatValueCpu" TargetType="TextBlock" BasedOn="{StaticResource StatValueText}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.CpuSeverity}" Value="Warning">
+                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.CpuSeverity}" Value="Critical">
+                    <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="StatValueGpu" TargetType="TextBlock" BasedOn="{StaticResource StatValueText}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.GpuSeverity}" Value="Warning">
+                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.GpuSeverity}" Value="Critical">
+                    <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="StatValueRam" TargetType="TextBlock" BasedOn="{StaticResource StatValueText}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.RamSeverity}" Value="Warning">
+                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.RamSeverity}" Value="Critical">
+                    <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="StatValueVram" TargetType="TextBlock" BasedOn="{StaticResource StatValueText}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.VramSeverity}" Value="Warning">
+                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.VramSeverity}" Value="Critical">
+                    <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="StatValueContext" TargetType="TextBlock" BasedOn="{StaticResource StatValueText}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Warning">
+                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Critical">
+                    <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
     </Window.Resources>
 
     <Border x:Name="MainBorder" Background="{DynamicResource WindowBackgroundBrush}" CornerRadius="10">
@@ -205,99 +274,6 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="{Binding SystemMonitorViewModel.CpuUsagePercent, StringFormat='CPU: {0:F1}%'}" FontSize="12" Margin="0,0,16,0">
-                        <TextBlock.ToolTip>
-                            <ToolTip>
-                                <TextBlock Text="{Binding SystemMonitorViewModel.ProcessCpuUsagePercent, StringFormat='Process CPU: {0:F1}% | System CPU: Total Load'}" />
-                            </ToolTip>
-                        </TextBlock.ToolTip>
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.CpuSeverity}" Value="Warning">
-                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                    </DataTrigger>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.CpuSeverity}" Value="Critical">
-                                        <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
-                                        <Setter Property="FontWeight" Value="SemiBold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
-
-                    <TextBlock Text="{Binding SystemMonitorViewModel.GpuUsagePercent, StringFormat='GPU: {0}%'}" FontSize="12" Margin="0,0,16,0">
-                        <TextBlock.ToolTip>
-                            <ToolTip>
-                                <TextBlock Text="{Binding SystemMonitorViewModel.GpuName, StringFormat='GPU: {0}'}" />
-                            </ToolTip>
-                        </TextBlock.ToolTip>
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.GpuSeverity}" Value="Warning">
-                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                    </DataTrigger>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.GpuSeverity}" Value="Critical">
-                                        <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
-                                        <Setter Property="FontWeight" Value="SemiBold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
-
-                    <TextBlock Text="{Binding SystemMonitorViewModel.RamUsedGb, StringFormat='RAM: {0:F1} GB'}" FontSize="12" Margin="0,0,16,0">
-                        <TextBlock.ToolTip>
-                            <ToolTip>
-                                <TextBlock Text="{Binding SystemMonitorViewModel.AppRamUsedMb, StringFormat='App WorkingSet RAM: {0} MB'}" />
-                            </ToolTip>
-                        </TextBlock.ToolTip>
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.RamSeverity}" Value="Warning">
-                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                    </DataTrigger>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.RamSeverity}" Value="Critical">
-                                        <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
-                                        <Setter Property="FontWeight" Value="SemiBold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
-
-                    <TextBlock Text="{Binding SystemMonitorViewModel.VramUsedMb, StringFormat='VRAM: {0} MB / '}" FontSize="12">
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.VramSeverity}" Value="Warning">
-                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                    </DataTrigger>
-                                    <DataTrigger Binding="{Binding SystemMonitorViewModel.VramSeverity}" Value="Critical">
-                                        <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
-                                        <Setter Property="FontWeight" Value="SemiBold"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
-                    <TextBlock Text="{Binding SystemMonitorViewModel.VramTotalMb, StringFormat='{}{0} MB'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0"/>
-                    <TextBlock Text="{Binding SystemMonitorViewModel.ModelMemoryMb, StringFormat='Model Mem: {0:F1} MB'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0"/>
-                    <TextBlock Text="{Binding SystemMonitorViewModel.CurrentTokensPerSecond, StringFormat='{}{0:F1} t/s'}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" Margin="0,0,16,0" ToolTip="Token generation throughput (live and last generation run)"/>
-
-                    <TextBlock Text="{Binding SystemMonitorViewModel.TokenUsageSummary}" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12">
-                        <TextBlock.ToolTip>
-                            <ToolTip>
-                                <TextBlock Text="{Binding SystemMonitorViewModel.TokenUsageTooltip}" TextWrapping="Wrap" MaxWidth="340" />
-                            </ToolTip>
-                        </TextBlock.ToolTip>
-                    </TextBlock>
 
                     <!-- Background dependency-update notification (driven by DependencyUpdateChecker).
                          Clickable: opens the update dialog where the user can apply the updates. -->
@@ -319,36 +295,112 @@
                         </Button.ToolTip>
                     </Button>
 
-                    <!-- Context window progress ring (bottom-right corner): shows how much of the
-                         model's context window is still free. The ring depletes as the window
-                         fills; the center number is the % remaining. Amber below 30%, red below 10%. -->
-                    <Grid Width="24" Height="24" Margin="10,0,0,0" VerticalAlignment="Center"
-                          ToolTip="{Binding SystemMonitorViewModel.ContextWindowSummary}">
-                        <Ellipse Stroke="{DynamicResource TextMutedBrush}" StrokeThickness="3" Opacity="0.22"/>
-                        <Ellipse StrokeThickness="3" StrokeDashArray="66 66"
-                                 StrokeDashOffset="{Binding SystemMonitorViewModel.ContextWindowRemainingPercent, Converter={StaticResource PercentToDashOffsetConverter}, ConverterParameter=66}"
-                                 RenderTransformOrigin="0.5,0.5">
-                            <Ellipse.RenderTransform>
-                                <RotateTransform Angle="-90"/>
-                            </Ellipse.RenderTransform>
-                            <Ellipse.Style>
-                                <Style TargetType="Ellipse">
-                                    <Setter Property="Stroke" Value="{DynamicResource AccentPrimaryBrush}"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Warning">
-                                            <Setter Property="Stroke" Value="{DynamicResource WarningBrush}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Critical">
-                                            <Setter Property="Stroke" Value="{DynamicResource ErrorBrush}"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Ellipse.Style>
-                        </Ellipse>
-                        <TextBlock Text="{Binding SystemMonitorViewModel.ContextWindowRemainingPercent, StringFormat={}{0:F0}%}"
-                                   FontSize="8" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
-                    </Grid>
+                    <!-- Chat/system stats: a single icon in the bottom-right corner. Hovering it
+                         pops out the full stats menu (click also toggles). All the previously
+                         always-visible numbers (CPU/GPU/RAM/VRAM/model mem/speed/tokens/context)
+                         now live in the popup. -->
+                    <Button x:Name="StatsIconButton" Click="StatsIconButton_Click"
+                            MouseEnter="StatsIcon_MouseEnter" MouseLeave="StatsIcon_MouseLeave"
+                            Margin="10,0,0,0" Padding="8,3" Background="Transparent" BorderThickness="0"
+                            Cursor="Hand" VerticalAlignment="Center" ToolTip="Chat &amp; system stats">
+                        <Path Data="M 3,17 L 3,11 M 8,17 L 8,6 M 13,17 L 13,13 M 18,17 L 18,3"
+                              Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.5"
+                              Width="18" Height="18" Stretch="Uniform"/>
+                    </Button>
+
+                    <Popup x:Name="StatsPopup" Placement="Top" StaysOpen="False" AllowsTransparency="True"
+                           VerticalOffset="-6" MouseEnter="StatsPopup_MouseEnter" MouseLeave="StatsPopup_MouseLeave">
+                        <Border Background="{DynamicResource SurfaceElevatedBrush}"
+                                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10"
+                                Padding="12,10" Width="320">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="20" ShadowDepth="4" Direction="270" Color="#000000" Opacity="0.5"/>
+                            </Border.Effect>
+                            <StackPanel>
+                                <TextBlock Text="CHAT &amp; SYSTEM STATS" FontSize="10" FontWeight="Bold"
+                                           Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,8"/>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="92"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="CPU" Style="{StaticResource StatRowLabel}"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="1" Style="{StaticResource StatValueCpu}"
+                                               Text="{Binding SystemMonitorViewModel.CpuUsagePercent, StringFormat={}{0:F1}%}"
+                                               ToolTip="{Binding SystemMonitorViewModel.ProcessCpuUsagePercent, StringFormat=Process CPU: {0:F1}% | System CPU: Total Load}"/>
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="GPU" Style="{StaticResource StatRowLabel}"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="1" Style="{StaticResource StatValueGpu}"
+                                               Text="{Binding SystemMonitorViewModel.GpuUsagePercent, StringFormat={}{0}%}"
+                                               ToolTip="{Binding SystemMonitorViewModel.GpuName, StringFormat=GPU: {0}}"/>
+
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="RAM" Style="{StaticResource StatRowLabel}"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="1" Style="{StaticResource StatValueRam}"
+                                               Text="{Binding SystemMonitorViewModel.RamUsedGb, StringFormat={}{0:F1} GB}"
+                                               ToolTip="{Binding SystemMonitorViewModel.AppRamUsedMb, StringFormat=App WorkingSet RAM: {0} MB}"/>
+
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="VRAM" Style="{StaticResource StatRowLabel}"/>
+                                    <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                                        <TextBlock Style="{StaticResource StatValueVram}"
+                                                   Text="{Binding SystemMonitorViewModel.VramUsedMb, StringFormat={}{0} MB}"/>
+                                        <TextBlock Text=" / " Foreground="{DynamicResource TextMutedBrush}" FontSize="12" VerticalAlignment="Center"/>
+                                        <TextBlock Style="{StaticResource StatValueText}"
+                                                   Text="{Binding SystemMonitorViewModel.VramTotalMb, StringFormat={}{0} MB}"/>
+                                    </StackPanel>
+
+                                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Model Mem" Style="{StaticResource StatRowLabel}"/>
+                                    <TextBlock Grid.Row="4" Grid.Column="1" Style="{StaticResource StatValueText}"
+                                               Text="{Binding SystemMonitorViewModel.ModelMemoryMb, StringFormat={}{0:F1} MB}"/>
+
+                                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Speed" Style="{StaticResource StatRowLabel}"/>
+                                    <TextBlock Grid.Row="5" Grid.Column="1" Style="{StaticResource StatValueText}"
+                                               Text="{Binding SystemMonitorViewModel.CurrentTokensPerSecond, StringFormat={}{0:F1} t/s}"
+                                               ToolTip="Token generation throughput (live and last generation run)"/>
+
+                                    <TextBlock Grid.Row="6" Grid.Column="0" Text="Tokens" Style="{StaticResource StatRowLabel}"/>
+                                    <TextBlock Grid.Row="6" Grid.Column="1" Style="{StaticResource StatValueText}"
+                                               Text="{Binding SystemMonitorViewModel.TokenUsageSummary}" FontSize="11.5"
+                                               ToolTip="{Binding SystemMonitorViewModel.TokenUsageTooltip}" TextWrapping="Wrap" MaxWidth="190" HorizontalAlignment="Right"/>
+
+                                    <TextBlock Grid.Row="7" Grid.Column="0" Text="Context" Style="{StaticResource StatRowLabel}"/>
+                                    <TextBlock Grid.Row="7" Grid.Column="1" Style="{StaticResource StatValueContext}"
+                                               Text="{Binding SystemMonitorViewModel.ContextWindowRemainingPercent, StringFormat={}{0:F0}% free}"
+                                               ToolTip="{Binding SystemMonitorViewModel.ContextWindowSummary}"/>
+                                </Grid>
+
+                                <!-- Context window occupancy bar (amber below 30%, red below 10%). -->
+                                <ProgressBar Height="4" Minimum="0" Maximum="100" Margin="0,10,0,0" BorderThickness="0"
+                                             Background="{DynamicResource BackgroundTertiary}"
+                                             Value="{Binding SystemMonitorViewModel.ContextWindowRemainingPercent}">
+                                    <ProgressBar.Style>
+                                        <Style TargetType="ProgressBar">
+                                            <Setter Property="Foreground" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Warning">
+                                                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Critical">
+                                                    <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ProgressBar.Style>
+                                </ProgressBar>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
                 </StackPanel>
             </Grid>
         </Border>

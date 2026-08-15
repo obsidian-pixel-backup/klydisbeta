@@ -63,6 +63,19 @@ public record LessonRecord(
 );
 
 /// <summary>
+/// A user-authored note attached to a chat session. Notes are surfaced to the model as part
+/// of the system prompt context on every generation, so the user can steer long-running work
+/// ("keep this file read-only", "verify before claiming done") without re-sending messages.
+/// </summary>
+public record SessionNoteRecord(
+    string Id,
+    string SessionId,
+    string Content,
+    DateTime CreatedAt,
+    DateTime UpdatedAt
+);
+
+/// <summary>
 /// SQLite-based persistence for chat sessions and messages.
 /// </summary>
 public class MessageStore
@@ -168,6 +181,15 @@ public class MessageStore
                 source TEXT,
                 created_at TEXT NOT NULL,
                 use_count INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS session_notes (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
             -- FTS5 Virtual Table for full-text search
@@ -603,6 +625,74 @@ public class MessageStore
         command.Parameters.AddWithValue("@type", type);
         var result = await command.ExecuteScalarAsync();
         return Convert.ToInt32(result ?? 0);
+    }
+
+    /// <summary>
+    /// Returns all notes for a session, oldest first.
+    /// </summary>
+    public async Task<List<SessionNoteRecord>> GetNotesAsync(string sessionId)
+    {
+        var results = new List<SessionNoteRecord>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT id, session_id, content, created_at, updated_at
+            FROM session_notes
+            WHERE session_id = @sessionId
+            ORDER BY created_at ASC";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            results.Add(new SessionNoteRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                DateTime.Parse(reader.GetString(3)).ToLocalTime(),
+                DateTime.Parse(reader.GetString(4)).ToLocalTime()));
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Upserts a note for a session. When <paramref name="noteId"/> is null or empty a new
+    /// note is created (the generated id is returned); otherwise the existing note's content
+    /// and updated_at are replaced.
+    /// </summary>
+    public async Task<string> SaveNoteAsync(string sessionId, string? noteId, string content)
+    {
+        string id = string.IsNullOrWhiteSpace(noteId) ? Guid.NewGuid().ToString("N") : noteId;
+        string now = DateTime.UtcNow.ToString("o");
+
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT INTO session_notes (id, session_id, content, created_at, updated_at)
+            VALUES (@id, @sessionId, @content, @created, @updated)
+            ON CONFLICT(id) DO UPDATE SET
+                content = excluded.content,
+                updated_at = excluded.updated_at";
+        command.Parameters.AddWithValue("@id", id);
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        command.Parameters.AddWithValue("@content", content);
+        command.Parameters.AddWithValue("@created", now);
+        command.Parameters.AddWithValue("@updated", now);
+        await command.ExecuteNonQueryAsync();
+        return id;
+    }
+
+    /// <summary>
+    /// Deletes a note from a session.
+    /// </summary>
+    public async Task DeleteNoteAsync(string sessionId, string noteId)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM session_notes WHERE id = @id AND session_id = @sessionId";
+        command.Parameters.AddWithValue("@id", noteId);
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        await command.ExecuteNonQueryAsync();
     }
 
     /// <summary>

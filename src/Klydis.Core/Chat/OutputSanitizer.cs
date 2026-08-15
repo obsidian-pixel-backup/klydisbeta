@@ -18,11 +18,11 @@ public static class OutputSanitizer
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex ThinkingBlockRegex = new(
-        @"<\|?(?:think|thought)\|?>([\s\S]*?)(?:</\|?(?:think|thought)\|?>|<\|/(?:think|thought)\|?>|$)|\[(?:THINK|THOUGHT)\]([\s\S]*?)(?:\[/(?:THINK|THOUGHT)\]|$)",
+        @"<\|?(?:think|thought)\|?>([\s\S]*?)(?:</\|?(?:think|thought)\|?>|<\|/(?:think|thought)\|?>|$)|\[(?:THINK|THOUGHT)\]([\s\S]*?)(?:\[/(?:THINK|THOUGHT)\]|$)|<antml:thinking>([\s\S]*?)</antml:thinking>|\{antml:thinking\}([\s\S]*?)\{/antml:thinking\}",
         RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex RawThinkingTagsRegex = new(
-        @"</?\|?(?:think|thought)\|?>|\[/?(?:THINK|THOUGHT)\]",
+        @"</?\|?(?:think|thought)\|?>|\[/?(?:THINK|THOUGHT)\]|</?antml:thinking>|\{/?antml:thinking\}",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex ToolCallBlockRegex = new(
@@ -55,6 +55,21 @@ public static class OutputSanitizer
     }
 
     /// <summary>
+    /// Strips ONLY thinking blocks (all tag families) from text, leaving everything else —
+    /// including antml tool calls — intact. Used by the tool-call parser before its JSON
+    /// fallbacks run, so reasoning that merely looks like JSON never becomes a phantom call
+    /// while real antml/qwen calls survive.
+    /// </summary>
+    public static string StripThinkingBlocks(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+
+        string clean = ThinkingBlockRegex.Replace(text, "");
+        clean = RawThinkingTagsRegex.Replace(clean, "");
+        return clean.Trim();
+    }
+
+    /// <summary>
     /// Strips thinking blocks, antml tags, special tokens, and tool calls to leave clean context history.
     /// </summary>
     public static string CleanHistoryResponse(string? text)
@@ -76,38 +91,47 @@ public static class OutputSanitizer
     {
         if (string.IsNullOrWhiteSpace(text)) return (string.Empty, text ?? string.Empty);
 
-        string sanitizedText = AntmlTagRegex.Replace(text, "");
-        sanitizedText = SpecialTokenRegex.Replace(sanitizedText, "");
+        // Match thinking FIRST on the RAW text — the antml markup regex below would otherwise
+        // consume <antml:thinking>…</antml:thinking> blocks before they can be extracted
+        // (the antml strip targets system markup, not the thinking block itself).
+        var match = ThinkingBlockRegex.Match(text);
+        string thinking = string.Empty;
+        string remaining = text;
 
-        var match = ThinkingBlockRegex.Match(sanitizedText);
         if (match.Success)
         {
-            string thinkingGroup = !string.IsNullOrEmpty(match.Groups[1].Value) ? match.Groups[1].Value : match.Groups[2].Value;
-            string thinking = AntmlTagRegex.Replace(thinkingGroup, "").Trim();
+            string thinkingGroup = FirstNonEmptyGroup(match, 1, 2, 3, 4);
+            thinking = AntmlTagRegex.Replace(thinkingGroup, "").Trim();
             thinking = SpecialTokenRegex.Replace(thinking, "").Trim();
 
-            string remaining = sanitizedText.Remove(match.Index, match.Length).Trim();
-            remaining = AntmlTagRegex.Replace(remaining, "").Trim();
-
-            if (string.IsNullOrWhiteSpace(thinking) || thinking.Equals("auto", StringComparison.OrdinalIgnoreCase))
-            {
-                thinking = string.Empty;
-            }
-
-            if (remaining.Equals("auto", StringComparison.OrdinalIgnoreCase))
-            {
-                remaining = string.Empty;
-            }
-
-            return (thinking, remaining);
+            remaining = text.Remove(match.Index, match.Length).Trim();
         }
 
-        string cleanRemaining = AntmlTagRegex.Replace(sanitizedText, "").Trim();
+        string cleanRemaining = AntmlTagRegex.Replace(remaining, "");
+        cleanRemaining = SpecialTokenRegex.Replace(cleanRemaining, "").Trim();
+
+        if (string.IsNullOrWhiteSpace(thinking) || thinking.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            thinking = string.Empty;
+        }
+
         if (cleanRemaining.Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
-            return (string.Empty, string.Empty);
+            cleanRemaining = string.Empty;
         }
 
-        return (string.Empty, cleanRemaining);
+        return (thinking, cleanRemaining);
+    }
+
+    private static string FirstNonEmptyGroup(System.Text.RegularExpressions.Match match, params int[] groups)
+    {
+        foreach (int g in groups)
+        {
+            if (match.Groups[g].Success && !string.IsNullOrEmpty(match.Groups[g].Value))
+            {
+                return match.Groups[g].Value;
+            }
+        }
+        return string.Empty;
     }
 }

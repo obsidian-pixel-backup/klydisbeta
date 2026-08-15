@@ -289,6 +289,11 @@ public class SystemPromptManager
         sb.AppendLine("- ALWAYS analyze tool results before making additional calls.");
         sb.AppendLine("- If a tool returns an error, try a DIFFERENT approach (different tool or different arguments).");
         sb.AppendLine("- Do not invent custom tool names (e.g. video-downloader, start-app). Only use tools defined in the tool schema.");
+        sb.AppendLine("- Use tool names EXACTLY as listed in the schema — never invent names (e.g. 'list_categories' does not exist). If a name is not in the schema, it does not exist.");
+        sb.AppendLine("- NEVER retry a failed tool call with identical arguments — the system blocks identical failed retries after 3 attempts. Change the arguments or use a different tool.");
+        sb.AppendLine("- The 'path' argument of read_file/write_file/list_directory/search_files takes ONE plain filesystem path — never shell syntax like `&&`, `|`, `>`, or redirection. Use run_command for commands.");
+        sb.AppendLine("- 'run_command' ALREADY executes PowerShell — write your PowerShell directly. Do NOT wrap your command in `powershell -Command \"...\"`: that double-wraps it and breaks variables (e.g. `$lines` becomes empty).");
+        sb.AppendLine("- When tool output is offloaded to a file, read it in RANGES with start_line and end_line (about 100 lines per call). NEVER re-read the whole offloaded file in one call — it will be capped and offloaded again.");
         sb.AppendLine();
         sb.AppendLine("### QUEUED MESSAGES & STEERING STRATEGY");
         sb.AppendLine("- Periodically check for queued messages using 'check_message_queue' during long, multi-step operations or extended reasoning workflows, or whenever you require additional user context.");
@@ -337,6 +342,28 @@ public class SystemPromptManager
         sb.AppendLine("11. DO NOT repeat the exact same tool call if it just failed or returned an error.");
         sb.AppendLine("12. GOAL COMPLETION & PROGRESS SIGNALING: You are equipped with 'task_complete' and 'task_progress'. When executing long-horizon tasks or operating in Goal Mode, call 'task_progress' with {\"percent\": N, \"status\": \"...\"} to report progress. When your requested goal is 100% finished and verified, you MUST call 'task_complete' with {\"summary\": \"...\"} to signal task completion.");
 
+        sb.AppendLine();
+        sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
+        sb.AppendLine("- For substantive, multi-step, or task-oriented requests, operate as a goal-driven agent:");
+        sb.AppendLine("  1. ANALYZE & RESTATE: Parse the request and restate the goal in one clear sentence.");
+        sb.AppendLine("  2. PLAN THE STEPS: Determine the concrete steps required to achieve the goal.");
+        sb.AppendLine("  3. ESTABLISH A TODO LIST: Before starting, call tool 'plan' with action=create and a newline-separated 'items' list of the required tasks, and publish it to the user.");
+        sb.AppendLine("  4. EXECUTE STEP-BY-STEP: Work the list one step at a time — call the tool(s) each step needs, read the ACTUAL tool output, then move on.");
+        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete) and call 'task_progress' with {\"percent\": N, \"status\": \"...\"}.");
+        sb.AppendLine("  6. VERIFY BEFORE COMPLETING: Before declaring the goal done, verify the deliverable actually exists and works (re-read the file, re-run a check command, inspect the state). Never claim success from assumptions.");
+        sb.AppendLine("  7. COMPLETE: When every todo item is done AND verified, call 'task_complete' with a detailed summary, then give the user a concise final report.");
+        sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");
+        sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
+        sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
+
+        sb.AppendLine();
+        sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
+        sb.AppendLine("- Your chat has a live workbench panel the user watches: PLAN (your todo list), FILES (every file you touch), CHANGES (your activity log), PREVIEW (renderable files you produce), NOTES (user-pinned instructions), and QUEUE (pending user messages).");
+        sb.AppendLine("- TODO LIST: Maintain a precise todo list with the 'plan' tool — the user sees it live in the PLAN tab. Create it up front, keep items granular and actionable, and check items off with action=complete the moment they are done. Never let the list go stale while you work; update it on every milestone.");
+        sb.AppendLine("- ARTIFACTS: Any file you write with 'write_file' appears in the PREVIEW tab, and HTML/Markdown/JSON files are rendered live for the user. When a deliverable can be a file — a page, dashboard, report, config, script, or doc — WRITE IT TO A FILE so the user can view it in the panel, then summarize it concisely in chat.");
+        sb.AppendLine("- WORK RECORD: Every tool call you make in this chat is recorded in FILES/CHANGES. Keep your actions on-goal and relevant to the current session — that record is what the user sees of your work. Do not touch unrelated files or wander into other projects.");
+        sb.AppendLine("- USER NOTES: Instructions the user pins in the NOTES tab reach you as 'USER NOTES FOR THIS CHAT' and take precedence over ordinary conversation — re-read them whenever they are present and obey them.");
+
         if (isGoalMode)
         {
             sb.AppendLine();
@@ -344,7 +371,8 @@ public class SystemPromptManager
             sb.AppendLine("- You are operating in AUTONOMOUS GOAL MODE. The user has assigned you a goal to achieve.");
             sb.AppendLine("- You MUST work continuously and autonomously across turns until the goal is fully accomplished.");
             sb.AppendLine("- Do NOT ask the user for permission or confirmation between turns — execute tools to investigate, fix, test, or build.");
-            sb.AppendLine("- When the goal is 100% complete, call tool 'task_complete' with a detailed summary.");
+            sb.AppendLine("- Establish and maintain your todo list with the 'plan' tool; keep checking off completed items.");
+            sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary.");
             sb.AppendLine("- Periodically call tool 'task_progress' to report your completion percentage.");
             sb.AppendLine("- If an approach fails, try an alternative tool or parameter strategy. Never stop until the goal is completed or unresolvable.");
         }
@@ -411,9 +439,12 @@ public class SystemPromptManager
         sb.AppendLine("### TOOL RULES");
         sb.AppendLine("- Tools are REAL and execute on this machine with full system access: run_command runs actual commands, search_web queries the live web, read_file reads actual files. NEVER simulate tool use or fabricate results — emit the real <tool_call> tag and use the actual returned output.");
         sb.AppendLine("- NEVER claim you lack access or that live data is unavailable (internet, weather, files, system) — the tools above execute for you on demand. Call the tool.");
-        sb.AppendLine("- NEVER repeat a tool call with identical arguments. If you already received a result, USE IT.");
+        sb.AppendLine("- NEVER repeat a tool call with identical arguments. If you already received a result, USE IT. Identical failed retries are blocked — change the arguments or use a different tool.");
         sb.AppendLine("- ALWAYS analyze tool results before making additional calls; try a DIFFERENT approach on errors.");
         sb.AppendLine("- Do not invent custom tool names. Only use tools defined in the schema.");
+        sb.AppendLine("- File-tool 'path' arguments take ONE plain filesystem path, never shell syntax (&&, |, >). Use run_command for commands.");
+        sb.AppendLine("- 'run_command' already runs PowerShell — write the PowerShell directly; do NOT wrap it in `powershell -Command \"...\"` (that breaks variables like $x).");
+        sb.AppendLine("- When output is offloaded to a file, read it in ranges with start_line/end_line (~100 lines per call) — never re-read the whole file in one call.");
         sb.AppendLine("- After 'search_web' or 'crawl_url', SUMMARIZE the key information concisely. Never paste raw search output.");
         sb.AppendLine("- For large tool output, summarize the key insight rather than re-quoting the full output.");
 
@@ -436,11 +467,34 @@ public class SystemPromptManager
             sb.AppendLine("- NEVER simulate a tool result in plain text — only real <tool_call> tags trigger execution.");
         }
 
+        sb.AppendLine();
+        sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
+        sb.AppendLine("- For substantive, multi-step, or task-oriented requests, operate as a goal-driven agent:");
+        sb.AppendLine("  1. ANALYZE & RESTATE: Parse the request and restate the goal in one clear sentence.");
+        sb.AppendLine("  2. PLAN THE STEPS: Determine the concrete steps required to achieve the goal.");
+        sb.AppendLine("  3. ESTABLISH A TODO LIST: Before starting, call tool 'plan' with action=create and a newline-separated 'items' list of the required tasks.");
+        sb.AppendLine("  4. EXECUTE STEP-BY-STEP: Work the list one step at a time — call the tool(s) each step needs, read the ACTUAL tool output, then move on.");
+        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete) and call 'task_progress' with {\"percent\": N, \"status\": \"...\"}.");
+        sb.AppendLine("  6. VERIFY BEFORE COMPLETING: Before declaring the goal done, verify the deliverable actually exists and works (re-read the file, re-run a check command, inspect the state). Never claim success from assumptions.");
+        sb.AppendLine("  7. COMPLETE: When every todo item is done AND verified, call 'task_complete' with a detailed summary, then give the user a concise final report.");
+        sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");
+        sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
+        sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
+
+        sb.AppendLine();
+        sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
+        sb.AppendLine("- Your todo list (maintained with the 'plan' tool) is shown live to the user in the PLAN tab: keep it current and check items off as you go.");
+        sb.AppendLine("- Files you write appear in the PREVIEW tab — HTML/Markdown/JSON render live for the user. If a deliverable can be a file (page, dashboard, report, script, doc), write it to disk so the user can preview it, then summarize in chat.");
+        sb.AppendLine("- All your tool calls in this chat are tracked in FILES/CHANGES: keep actions on-goal and relevant to this session only.");
+        sb.AppendLine("- User-pinned NOTES reach you as 'USER NOTES FOR THIS CHAT' and take precedence — obey them.");
+
         if (isGoalMode)
         {
             sb.AppendLine();
-            sb.AppendLine("### GOAL MODE");
+            sb.AppendLine("### AUTONOMOUS GOAL EXECUTION MODE");
             sb.AppendLine("- You are operating in goal mode: break the user's objective into steps, use tools to gather what you need, and drive the task to completion. Keep the user informed of progress.");
+            sb.AppendLine("- Maintain your todo list with the 'plan' tool and keep checking off completed items.");
+            sb.AppendLine("- Verify the deliverable exists and works before calling 'task_complete'.");
         }
 
         sb.AppendLine();

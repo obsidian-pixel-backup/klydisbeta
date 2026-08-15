@@ -45,7 +45,14 @@ public record ToolCallRequest(string Name, IDictionary<string, object> Arguments
 /// <summary>
 /// Represents the result of executing a tool.
 /// </summary>
-public record ToolResult(string ToolName, bool Success, string Output, string? Error);
+public record ToolResult(string ToolName, bool Success, string Output, string? Error, bool IsValidationError = false);
+
+/// <summary>
+/// A single recorded tool invocation for a session. Kept per session so the UI's right-side
+/// panel can surface ONLY what a given chat actually did (files read/written, artifacts
+/// produced, commands run) instead of workspace-global state.
+/// </summary>
+public sealed record ToolActivityRecord(string ToolName, string ArgsJson, bool Success, string OutputPreview, DateTime Timestamp);
 
 /// <summary>
 /// Event arguments for tool approval requests.
@@ -234,6 +241,13 @@ public class ToolExecutor(
         {
             new("percent", "integer", "Estimated percentage of goal completion (0-100)", true),
             new("status", "string", "Brief description of current progress and next steps", true)
+        }, false),
+        new ToolDefinition("plan", "Maintains the agent's todo list for the current task or goal. The plan is persisted for this chat and re-injected into your context every turn, so it is the authoritative checklist you keep updating. Use action 'create' with a newline-separated 'items' list to establish the plan, 'add' to append tasks, 'complete' to mark a task done (match by its number or text), 'remove' to delete a task, 'show' to review the current plan, and 'clear' to reset it.", new List<ToolParameter>
+        {
+            new("action", "string", "One of: create, add, complete, remove, show, clear", true, new[] { "create", "add", "complete", "remove", "show", "clear" }),
+            new("items", "string", "Newline-separated list of tasks (for action=create or add)", false),
+            new("item", "string", "Single task to complete or remove — match by its number (e.g. '2') or by text", false),
+            new("progress", "integer", "Optional overall completion percent 0-100", false)
         }, false)
     };
 
@@ -349,6 +363,24 @@ public class ToolExecutor(
             throw new OperationCanceledException(ct);
         }
 
+        // Serialize the arguments once — shared by duplicate-call tracking and the session
+        // activity record.
+        string argsJson = string.Empty;
+        if (request.Arguments != null)
+        {
+            try { argsJson = System.Text.Json.JsonSerializer.Serialize(request.Arguments); } catch { /* best effort */ }
+        }
+        string callKey = $"{request.Name}|{argsJson}";
+
+        // Refuse an identical-failed-call retry loop BEFORE it wastes another turn: once a
+        // call has failed 3+ consecutive times with the same arguments, block it outright.
+        if (CheckIdenticalRetry(sessionId, callKey, out string blockMessage))
+        {
+            TrackIdenticalCallOutcome(sessionId, callKey, succeeded: false);
+            return FinishToolCall(request, sessionId, argsJson,
+                new ToolResult(request.Name, false, string.Empty, blockMessage));
+        }
+
         var tools = await GetToolDefinitionsAsync();
         var toolDef = tools.FirstOrDefault(t => t.Name == request.Name);
         
@@ -442,6 +474,7 @@ public class ToolExecutor(
                 "recall_lessons" => await RecallLessonsAsync(request, ct, modelPath),
                 "task_complete" => ExecuteTaskComplete(request),
                 "task_progress" => ExecuteTaskProgress(request),
+                "plan" => ExecutePlan(request, sessionId),
                 _ => await ExecuteCustomToolAsync(request, ct)
             };
         }
@@ -450,6 +483,37 @@ public class ToolExecutor(
             logger.LogError(ex, "Error executing tool {ToolName}", request.Name);
             result = new ToolResult(request.Name, false, string.Empty, ex.Message);
         }
+
+        // Escalate identical-failed-call retry loops: the 2nd consecutive identical failure
+        // gets a warning appended, the 3rd+ gets an explicit BLOCKED message, and any further
+        // identical call is refused BEFORE it executes (see the pre-dispatch check above).
+        var (_, postMessage) = TrackIdenticalCallOutcome(sessionId, callKey, result.Success);
+        if (!string.IsNullOrWhiteSpace(postMessage))
+        {
+            result = result with
+            {
+                Output = string.IsNullOrEmpty(result.Output) ? postMessage : result.Output + $"\n\n{postMessage}"
+            };
+        }
+
+        return FinishToolCall(request, sessionId, argsJson, result);
+    }
+
+    private ToolResult FinishToolCall(ToolCallRequest request, string sessionId, string argsJson, ToolResult result)
+    {
+        // Record the invocation for the right-side panel (session-scoped). Args are serialized
+        // so path-bearing tools can be surfaced as "files this chat worked with".
+        try
+        {
+            string outputPreview = string.Empty;
+            if (!string.IsNullOrEmpty(result.Output))
+            {
+                outputPreview = result.Output.Length > 220 ? result.Output.Substring(0, 220) : result.Output;
+            }
+            _sessionToolActivity.GetOrAdd(sessionId ?? string.Empty, _ => new List<ToolActivityRecord>())
+                .Add(new ToolActivityRecord(request.Name, argsJson, result.Success, outputPreview, DateTime.Now));
+        }
+        catch { /* recording must never break tool execution */ }
 
         result = ProcessToolOutputOffload(result);
         ToolExecuted?.Invoke(this, result);
@@ -490,6 +554,16 @@ public class ToolExecutor(
 
             File.WriteAllText(filePath, result.Output);
 
+            // Count lines cheaply (streaming) so the directive can teach pagination: reading
+            // the whole file back in one read_file call re-offloads and loops forever.
+            int lineCount = 0;
+            try
+            {
+                using var reader = new StreamReader(filePath, Encoding.UTF8);
+                while (reader.ReadLine() != null) lineCount++;
+            }
+            catch { /* best effort */ }
+
             var preview = result.Output.Length > OffloadPreviewChars 
                 ? result.Output[..OffloadPreviewChars] 
                 : result.Output;
@@ -501,7 +575,8 @@ public class ToolExecutor(
                                    $"--------------------------------------------------\n" +
                                    $"{preview}\n" +
                                    $"--------------------------------------------------\n" +
-                                   $"[ACTION REQUIRED: You MUST call tool read_file with path '{filePath}' to retrieve the complete content before forming your response. Do NOT tell the user to read the file themselves — read it now and synthesize the answer.]";
+                                   $"[ACTION REQUIRED: You MUST call tool read_file with path '{filePath}' to retrieve the complete content before forming your response. Do NOT tell the user to read the file themselves — read it now and synthesize the answer. " +
+                                   $"(The file has {lineCount} line(s): read it in RANGES with start_line and end_line, about 100 lines per call, so the content stays in your context — do NOT re-read the whole file in one call.)]";
 
             logger.LogInformation("Tool output for {ToolName} ({CharCount} chars) offloaded to {FilePath}", result.ToolName, result.Output.Length, filePath);
 
@@ -520,6 +595,24 @@ public class ToolExecutor(
             }
             return result;
         }
+    }
+
+    /// <summary>
+    /// Models frequently wrap their command in `powershell -Command "..."` because they don't
+    /// realize run_command ALREADY executes PowerShell. Re-wrapping is destructive: the outer
+    /// PowerShell parses the quoted string and interpolates $variables away (observed:
+    /// `powershell -Command "$lines = ..."` ran as `= ...` with an empty $lines). Detect the
+    /// wrapper and unwrap it so the intended script executes verbatim.
+    /// </summary>
+    public static string NormalizePowershellWrapper(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return command;
+        var match = Regex.Match(command, @"^\s*(?:powershell|pwsh)(?:\.exe)?(?:\s+-[A-Za-z]+)*\s*(?:-Command|-c)\s+([""'])(?<script>.*)\1\s*$", RegexOptions.IgnoreCase);
+        if (match.Success && !string.IsNullOrWhiteSpace(match.Groups["script"].Value))
+        {
+            return match.Groups["script"].Value.Trim();
+        }
+        return command;
     }
 
     public static object? UnwrapJsonElement(object? value)
@@ -546,6 +639,42 @@ public class ToolExecutor(
             return null;
         var unwrapped = UnwrapJsonElement(val);
         return unwrapped?.ToString();
+    }
+
+    /// <summary>
+    /// True when a 'path' argument contains shell command syntax instead of being a plain
+    /// filesystem path. Models sometimes concatenate cmd/PowerShell into a path argument
+    /// (observed: `C:\... 2>nul && dir /b ... | findstr` passed to list_directory); those
+    /// calls can never succeed and the repeated attempts waste turns — fail fast instead.
+    /// </summary>
+    public static bool IsPathArgCommandLike(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        return path.IndexOf("&&", StringComparison.Ordinal) >= 0
+            || path.IndexOf("||", StringComparison.Ordinal) >= 0
+            || path.IndexOf('|') >= 0
+            || path.IndexOf('<') >= 0
+            || path.IndexOf('>') >= 0
+            || path.IndexOf('`') >= 0
+            || path.IndexOf("2>nul", StringComparison.OrdinalIgnoreCase) >= 0
+            || path.IndexOf("2>&1", StringComparison.OrdinalIgnoreCase) >= 0
+            || path.IndexOf('\r') >= 0
+            || path.IndexOf('\n') >= 0;
+    }
+
+    /// <summary>
+    /// Returns a clear failure result when a path argument looks like shell syntax, so the
+    /// model learns to pass a single plain path (or use run_command) instead of retrying.
+    /// Returns null when the path is fine.
+    /// </summary>
+    private static ToolResult? CommandLikePathResult(ToolCallRequest request, string path)
+    {
+        if (!IsPathArgCommandLike(path)) return null;
+        string shown = path.Replace("\r", " ").Replace("\n", " ");
+        if (shown.Length > 140) shown = shown.Substring(0, 140) + "…";
+        return new ToolResult(request.Name, false, "",
+            $"Invalid 'path' argument for '{request.Name}': it looks like shell command syntax, not a filesystem path (\"{shown}\"). " +
+            $"The 'path' parameter takes ONE plain filesystem path. If you meant to run a command, use run_command instead — do NOT embed shell syntax in a path.");
     }
 
     /// <summary>
@@ -587,10 +716,26 @@ public class ToolExecutor(
         return false;
     }
 
+    /// <summary>
+    /// Builds an INVALID_CALL result for a structurally malformed tool request (missing required
+    /// argument, invalid path shape, etc.). ChatEngine routes these into the escalating
+    /// parse-failure path instead of treating them as ordinary tool results — so a model that
+    /// repeatedly opens calls with empty arguments gets the "fix the call" feedback and,
+    /// eventually, the suspend-and-answer exit ramp (the observed "Command is required" ×7
+    /// loop). Zero-arg tools (get_system_info, list_rag_collections, ...) are unaffected: they
+    /// have no required parameters.
+    /// </summary>
+    private static ToolResult InvalidCall(string toolName, string message)
+    {
+        return new ToolResult(toolName, false, string.Empty, message, IsValidationError: true);
+    }
+
     private async Task<ToolResult> ReadFileAsync(ToolCallRequest request, CancellationToken ct)
     {
         var path = GetStringArg(request.Arguments, "path");
-        if (string.IsNullOrEmpty(path)) return new ToolResult(request.Name, false, "", "Path is required");
+        if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Path is required");
+        var commandLike = CommandLikePathResult(request, path);
+        if (commandLike != null) return commandLike;
         if (!File.Exists(path)) return new ToolResult(request.Name, false, "", "File not found");
 
         int? startLine = null;
@@ -616,13 +761,29 @@ public class ToolExecutor(
             int count = int.MaxValue;
             if (endLine.HasValue)
             {
+                // Both start_line/end_line are 1-based and inclusive: deliver exactly
+                // end_line - start_line + 1 lines (start is 0-based internally, so use the
+                // original 1-based value here — mixing them over-delivers by one line).
                 int end = Math.Max(endLine.Value, startLine.GetValueOrDefault(1));
-                count = end - start + 1;
+                count = end - (startLine ?? 1) + 1;
             }
+            else if (path.Contains("offload_") || path.Contains("tool_outputs"))
+            {
+                // Reading an offloaded artifact without explicit ranges: default to a bounded
+                // window so a whole-file re-read can never re-offload into an infinite loop.
+                count = 120;
+            }
+
+            // Cap the delivered characters so the result always fits in context and never gets
+            // offloaded again (offloaded reads of offload files were looping forever). When the
+            // cap is hit, tell the model exactly which range to continue with.
+            int charBudget = Math.Max(4000, MaxToolOutputChars - 1500);
 
             var sb = new StringBuilder();
             int lineIndex = 0;
+            int delivered = 0;
             int remaining = count;
+            bool capped = false;
             await foreach (var line in File.ReadLinesAsync(path, ct))
             {
                 if (lineIndex < start)
@@ -631,9 +792,42 @@ public class ToolExecutor(
                     continue;
                 }
                 if (remaining <= 0) break;
+                string chunk = line;
+                if (sb.Length + chunk.Length + 1 > charBudget)
+                {
+                    if (sb.Length == 0 && chunk.Length > charBudget)
+                    {
+                        // Single enormous line: deliver a bounded slice rather than nothing.
+                        chunk = chunk.Substring(0, charBudget);
+                    }
+                    else
+                    {
+                        capped = true;
+                        break;
+                    }
+                }
                 if (sb.Length > 0) sb.Append('\n');
-                sb.Append(line);
+                sb.Append(chunk);
+                delivered++;
                 remaining--;
+                lineIndex++;
+            }
+
+            if (delivered == 0)
+            {
+                return new ToolResult(request.Name, false, "",
+                    $"No lines found in the requested range (start_line={(startLine ?? 1)}). The file may be empty or the range starts past its end.");
+            }
+
+            if (capped)
+            {
+                int nextStart = start + delivered + 1;
+                sb.Append($"\n\n…[output capped at {charBudget} chars to fit context — {delivered} line(s) delivered (lines {start + 1}-{start + delivered}). Continue reading the next range with start_line={nextStart}, end_line={nextStart + 100}.]");
+            }
+            else if (!endLine.HasValue && remaining <= 0)
+            {
+                int nextStart = start + delivered + 1;
+                sb.Append($"\n\n…[lines {start + 1}-{start + delivered} delivered; the file continues beyond. Read the next range with start_line={nextStart}, end_line={nextStart + 100}.]");
             }
             return new ToolResult(request.Name, true, sb.ToString(), null);
         }
@@ -646,8 +840,10 @@ public class ToolExecutor(
     {
         var path = GetStringArg(request.Arguments, "path");
         var content = GetStringArg(request.Arguments, "content");
-        if (string.IsNullOrEmpty(path)) return new ToolResult(request.Name, false, "", "Path is required");
-        if (content == null) return new ToolResult(request.Name, false, "", "Content is required");
+        if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Path is required");
+        if (content == null) return InvalidCall(request.Name, "Content is required");
+        var commandLike = CommandLikePathResult(request, path);
+        if (commandLike != null) return commandLike;
 
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -659,7 +855,9 @@ public class ToolExecutor(
     private Task<ToolResult> ListDirectoryAsync(ToolCallRequest request, CancellationToken ct)
     {
         var path = GetStringArg(request.Arguments, "path");
-        if (string.IsNullOrEmpty(path)) return Task.FromResult(new ToolResult(request.Name, false, "", "Path is required"));
+        if (string.IsNullOrEmpty(path)) return Task.FromResult(InvalidCall(request.Name, "Path is required"));
+        var commandLike = CommandLikePathResult(request, path);
+        if (commandLike != null) return Task.FromResult(commandLike);
         if (!Directory.Exists(path)) return Task.FromResult(new ToolResult(request.Name, false, "", "Directory not found"));
 
         var info = new DirectoryInfo(path);
@@ -675,7 +873,7 @@ public class ToolExecutor(
     private async Task<ToolResult> RunCommandAsync(ToolCallRequest request, CancellationToken ct)
     {
         var command = GetStringArg(request.Arguments, "command");
-        if (string.IsNullOrEmpty(command)) return new ToolResult(request.Name, false, "", "Command is required");
+        if (string.IsNullOrEmpty(command)) return InvalidCall(request.Name, "Command is required");
 
         var workingDir = GetStringArg(request.Arguments, "working_directory");
         if (string.IsNullOrWhiteSpace(workingDir) || !Directory.Exists(workingDir))
@@ -702,6 +900,8 @@ public class ToolExecutor(
             string rawArgs = matchStartFlags.Groups[2].Value;
             sanitizedCmd = $"Start-Process -FilePath \"{appName}\" -ArgumentList {rawArgs}";
         }
+
+        sanitizedCmd = NormalizePowershellWrapper(sanitizedCmd);
 
         var encodedCmd = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitizedCmd));
 
@@ -759,9 +959,39 @@ public class ToolExecutor(
                 else output += $"\nSTDERR:\n{stderr}";
             }
 
+            // Unknown-cmdlet feedback: PowerShell's "The term 'X' is not recognized as the name of
+            // a cmdlet..." is the ground-truth signal for a hallucinated command token (the KMS
+            // chats invented Get-RandomProperty / Write-OutnFile / slpapi.exe and got zero useful
+            // feedback). Extract the first unknown token and say exactly what was wrong — the
+            // model can then replace that ONE token instead of guessing.
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                var unknown = Regex.Match(stderr, @"The term\s+['""]([^'""]+)['""]\s+is not recognized", RegexOptions.IgnoreCase);
+                if (unknown.Success && !string.IsNullOrWhiteSpace(unknown.Groups[1].Value))
+                {
+                    output = $"[Unknown command: '{unknown.Groups[1].Value}' — that is not a real cmdlet/command. Replace it with a valid PowerShell cmdlet or the correct tool.]\n\n{output}";
+                }
+            }
+
+            // GUI-dialog detection: a process that exits 0 with EMPTY console output may have
+            // opened a GUI window instead (slmgr /dli, slmgr /ckmsctl, ...). Treating that as
+            // "Command executed successfully with no output." lets the model mistake a dialog
+            // for evidence — the observed "we received visual outputs" dead-end. Known
+            // dialog-launcher verbs get a distinct signal naming the console variant.
             if (string.IsNullOrWhiteSpace(output) && process.ExitCode == 0)
             {
-                output = "Command executed successfully with no output.";
+                var firstToken = Regex.Match(sanitizedCmd, @"^\s*([a-zA-Z0-9_\-\.]+)").Groups[1].Value;
+                // slmgr invoked directly opens a GUI dialog (the console variant is
+                // cscript //nologo slmgr.vbs); wscript is the GUI twin of cscript; slui is the
+                // activation UI; control opens the Control Panel. cscript itself is the CONSOLE
+                // host and must NOT be flagged.
+                bool guiLauncher = firstToken.Equals("slmgr", StringComparison.OrdinalIgnoreCase) ||
+                                   firstToken.Equals("slui", StringComparison.OrdinalIgnoreCase) ||
+                                   firstToken.Equals("wscript", StringComparison.OrdinalIgnoreCase) ||
+                                   firstToken.Equals("control", StringComparison.OrdinalIgnoreCase);
+                output = guiLauncher
+                    ? $"[This command opened a GUI dialog; its console output is unavailable. Use the console variant to get capturable output: cscript //nologo %windir%\\system32\\slmgr.vbs /dli]"
+                    : "Command executed successfully with no output.";
             }
 
             return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null);
@@ -879,7 +1109,7 @@ public class ToolExecutor(
     private async Task<ToolResult> SearchWebAsync(ToolCallRequest request, CancellationToken ct)
     {
         var query = GetStringArg(request.Arguments, "query");
-        if (string.IsNullOrEmpty(query)) return new ToolResult(request.Name, false, "", "Query is required");
+        if (string.IsNullOrEmpty(query)) return InvalidCall(request.Name, "Query is required");
 
         int maxResults = 5;
         if (request.Arguments != null && request.Arguments.TryGetValue("max_results", out var mrObj))
@@ -1036,7 +1266,7 @@ public class ToolExecutor(
     private async Task<ToolResult> CrawlUrlAsync(ToolCallRequest request, CancellationToken ct)
     {
         var url = GetStringArg(request.Arguments, "url");
-        if (string.IsNullOrEmpty(url)) return new ToolResult(request.Name, false, "", "URL is required");
+        if (string.IsNullOrEmpty(url)) return InvalidCall(request.Name, "URL is required");
 
         // Tier 1: fast plain-HTTP fetch. Works without any browser binaries and is the most
         // reliable path for static, server-rendered pages (weather, news, documentation).
@@ -1304,7 +1534,10 @@ public class ToolExecutor(
         var pattern = GetStringArg(request.Arguments, "pattern") ?? "*.*";
         var contains = GetStringArg(request.Arguments, "contains");
 
-        if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return new ToolResult(request.Name, false, "", "Valid path is required");
+        if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Valid path is required");
+        var commandLike = CommandLikePathResult(request, path);
+        if (commandLike != null) return commandLike;
+        if (!Directory.Exists(path)) return new ToolResult(request.Name, false, "", "Valid path is required");
 
         try
         {
@@ -1418,7 +1651,7 @@ public class ToolExecutor(
     private async Task<ToolResult> StoreMemoryAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
         var fact = GetStringArg(request.Arguments, "fact");
-        if (string.IsNullOrEmpty(fact)) return new ToolResult(request.Name, false, "", "Fact is required");
+        if (string.IsNullOrEmpty(fact)) return InvalidCall(request.Name, "Fact is required");
 
         var session = await messageStore.GetSessionAsync(sessionId);
         if (session == null) return new ToolResult(request.Name, false, "", "Session not found");
@@ -1454,7 +1687,7 @@ public class ToolExecutor(
     private async Task<ToolResult> RetrieveMemoryAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
         var query = GetStringArg(request.Arguments, "query");
-        if (string.IsNullOrEmpty(query)) return new ToolResult(request.Name, false, "", "Query is required");
+        if (string.IsNullOrEmpty(query)) return InvalidCall(request.Name, "Query is required");
 
         // C1/H4/H8: Fetch more candidates so filtering doesn't leave us empty, then filter to
         // User/Assistant roles only. Exclude injected system/tool messages to prevent the tool
@@ -1563,11 +1796,11 @@ public class ToolExecutor(
         var schema = GetStringArg(request.Arguments, "parameters_schema");
         var script = GetStringArg(request.Arguments, "script_content");
 
-        if (string.IsNullOrEmpty(name)) return new ToolResult(request.Name, false, "", "Name is required");
-        if (string.IsNullOrEmpty(desc)) return new ToolResult(request.Name, false, "", "Description is required");
-        if (string.IsNullOrEmpty(lang)) return new ToolResult(request.Name, false, "", "Language is required");
-        if (string.IsNullOrEmpty(schema)) return new ToolResult(request.Name, false, "", "Parameters schema is required");
-        if (string.IsNullOrEmpty(script)) return new ToolResult(request.Name, false, "", "Script content is required");
+        if (string.IsNullOrEmpty(name)) return InvalidCall(request.Name, "Name is required");
+        if (string.IsNullOrEmpty(desc)) return InvalidCall(request.Name, "Description is required");
+        if (string.IsNullOrEmpty(lang)) return InvalidCall(request.Name, "Language is required");
+        if (string.IsNullOrEmpty(schema)) return InvalidCall(request.Name, "Parameters schema is required");
+        if (string.IsNullOrEmpty(script)) return InvalidCall(request.Name, "Script content is required");
 
         if (lang != "powershell" && lang != "python" && lang != "csharp")
         {
@@ -1577,7 +1810,7 @@ public class ToolExecutor(
         var nameError = ValidateCustomToolName(name, _tools.Select(t => t.Name));
         if (nameError != null)
         {
-            return new ToolResult(request.Name, false, "", nameError);
+            return InvalidCall(request.Name, nameError);
         }
 
         // Validate schema is parseable
@@ -1668,7 +1901,7 @@ public class ToolExecutor(
     private async Task<ToolResult> DeleteCustomToolAsync(ToolCallRequest request, CancellationToken ct)
     {
         var name = GetStringArg(request.Arguments, "name");
-        if (string.IsNullOrEmpty(name)) return new ToolResult(request.Name, false, "", "Name is required");
+        if (string.IsNullOrEmpty(name)) return InvalidCall(request.Name, "Name is required");
 
         await messageStore.DeleteCustomToolAsync(name);
         InvalidateCustomToolsCache();
@@ -1905,7 +2138,7 @@ public class ToolExecutor(
 
         if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(promptInstruction))
         {
-            return new ToolResult(request.Name, false, string.Empty, "Both 'name' and 'prompt_instruction' are required to learn a skill.");
+            return InvalidCall(request.Name, "Both 'name' and 'prompt_instruction' are required to learn a skill.");
         }
 
         string id = name.Trim().ToLowerInvariant().Replace(" ", "-");
@@ -2129,5 +2362,281 @@ public class ToolExecutor(
         int.TryParse(percentStr, out int pct);
         string status = GetStringArg(request.Arguments, "status") ?? "In progress";
         return new ToolResult("task_progress", true, $"[PROGRESS UPDATE: {pct}%] Status: {status}", null);
+    }
+
+    // ---- Agent task plan / todo list (keyed by session) ----
+    // The model maintains its todo list through the 'plan' tool; ChatEngine re-injects the
+    // plan into the prompt on every iteration, closing the goal-execution feedback loop.
+    private sealed record PlanTask(string Text, bool Done);
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<PlanTask>> _sessionPlans = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _sessionPlanProgress = new();
+
+    /// <summary>
+    /// A single item in the agent's task plan (todo list).
+    /// </summary>
+    public sealed record PlanEntry(string Text, bool Done);
+
+    /// <summary>
+    /// Returns the raw todo list for a session, or an empty list when the agent has not
+    /// established a plan yet. Used by the UI (right-side Plan tab) and by ChatEngine.
+    /// </summary>
+    public IReadOnlyList<PlanEntry> GetSessionPlanEntries(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId) || !_sessionPlans.TryGetValue(sessionId, out var plan) || plan.Count == 0)
+        {
+            return Array.Empty<PlanEntry>();
+        }
+        return plan.Select(t => new PlanEntry(t.Text, t.Done)).ToList();
+    }
+
+    /// <summary>
+    /// Distinct file paths this session has produced via write_file/str_replace, oldest first.
+    /// Surfaces the workbench PREVIEW-tab contents into the model's context so it knows which
+    /// of its deliverables the user can view live.
+    /// </summary>
+    public IReadOnlyList<string> GetSessionArtifactPaths(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId) || !_sessionToolActivity.TryGetValue(sessionId, out var list) || list.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var paths = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in list)
+        {
+            if (r.ToolName is not ("write_file" or "str_replace")) continue;
+            string p = ExtractPathArg(r.ArgsJson);
+            if (string.IsNullOrEmpty(p) || !seen.Add(p)) continue;
+            paths.Add(p);
+        }
+        return paths;
+    }
+
+    private static string ExtractPathArg(string argsJson)
+    {
+        if (string.IsNullOrEmpty(argsJson)) return string.Empty;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(argsJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return string.Empty;
+            if (root.TryGetProperty("path", out var p) && p.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                return p.GetString() ?? string.Empty;
+            }
+        }
+        catch { /* best effort */ }
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// Returns the formatted todo list for a session ("1. [x] task" lines), or an empty list
+    /// when the agent has not established a plan yet. Called by ChatEngine each prompt build.
+    /// </summary>
+    public IReadOnlyList<string> GetSessionPlan(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId) || !_sessionPlans.TryGetValue(sessionId, out var plan) || plan.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var lines = new List<string>(plan.Count);
+        for (int i = 0; i < plan.Count; i++)
+        {
+            lines.Add($"{i + 1}. {(plan[i].Done ? "[x]" : "[ ]")} {plan[i].Text}");
+        }
+        return lines;
+    }
+
+    /// <summary>
+    /// Returns the last reported overall completion percent for a session, or -1 when none.
+    /// </summary>
+    public int GetSessionPlanProgress(string sessionId)
+    {
+        return string.IsNullOrEmpty(sessionId) || !_sessionPlanProgress.TryGetValue(sessionId, out var p) ? -1 : p;
+    }
+
+    // ---- Per-session tool activity ----
+    // Records every tool invocation (name + serialized args + time) keyed by session, so the
+    // UI's right-side panel can show ONLY what this chat actually did — files it read/wrote,
+    // artifacts it produced — instead of workspace-global git state.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ToolActivityRecord>> _sessionToolActivity = new();
+
+    /// <summary>
+    /// Returns the recorded tool invocations for a session, oldest first.
+    /// </summary>
+    public IReadOnlyList<ToolActivityRecord> GetSessionToolActivity(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId) || !_sessionToolActivity.TryGetValue(sessionId, out var list) || list.Count == 0)
+        {
+            return Array.Empty<ToolActivityRecord>();
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// Clears the recorded tool activity for a session (e.g. when the chat is deleted).
+    /// </summary>
+    public void ClearSessionToolActivity(string sessionId)
+    {
+        if (!string.IsNullOrEmpty(sessionId))
+        {
+            _sessionToolActivity.TryRemove(sessionId, out _);
+        }
+    }
+
+    // ---- Identical-failed-call retry guard ----
+    // Models sometimes repeat a failing tool call with the exact same arguments (observed: a
+    // broken list_directory path retried 6+ times, burning turns and context). Successful
+    // calls are never affected — repeated successful calls like check_message_queue polling
+    // with identical empty args are legitimate. Consecutive identical FAILURES escalate:
+    // the 2nd appends a warning, the 3rd+ is blocked before execution.
+    private System.Collections.Concurrent.ConcurrentDictionary<string, (string Key, int FailCount)>? _lastFailedCalls;
+
+    /// <summary>
+    /// True when the session's most recent calls for this key have failed 3+ consecutive times
+    /// with identical arguments — the call should be blocked before it executes again.
+    /// </summary>
+    private bool CheckIdenticalRetry(string sessionId, string key, out string blockMessage)
+    {
+        blockMessage = string.Empty;
+        _lastFailedCalls ??= new System.Collections.Concurrent.ConcurrentDictionary<string, (string Key, int FailCount)>();
+        if (!_lastFailedCalls.TryGetValue(sessionId ?? string.Empty, out var cur) || cur.Key != key || cur.FailCount < 3)
+        {
+            return false;
+        }
+
+        string toolName = key.Substring(0, key.IndexOf('|') >= 0 ? key.IndexOf('|') : key.Length);
+        blockMessage = $"BLOCKED: '{toolName}' has failed {cur.FailCount} consecutive times with IDENTICAL arguments. " +
+                       "Repeating the same call cannot succeed. Re-read the tool's description in the schema, " +
+                       "change your arguments, or use a different tool. Further identical retries will be refused.";
+        return true;
+    }
+
+    /// <summary>
+    /// Records the outcome of a tool call for duplicate tracking. Returns (Status, Message)
+    /// where Status 0 = normal, 1 = append the warning to the result, 2 = append the blocked
+    /// message (the NEXT identical call will be refused by <see cref="CheckIdenticalRetry"/>).
+    /// </summary>
+    private (int Status, string Message) TrackIdenticalCallOutcome(string sessionId, string key, bool succeeded)
+    {
+        _lastFailedCalls ??= new System.Collections.Concurrent.ConcurrentDictionary<string, (string Key, int FailCount)>();
+        var map = _lastFailedCalls;
+        string sid = sessionId ?? string.Empty;
+
+        if (succeeded)
+        {
+            map[sid] = (key, 0);
+            return (0, string.Empty);
+        }
+
+        var cur = map.TryGetValue(sid, out var c) ? c : (Key: string.Empty, FailCount: 0);
+        int failCount = cur.Key == key ? cur.FailCount + 1 : 1;
+        map[sid] = (key, failCount);
+
+        string toolName = key.Substring(0, key.IndexOf('|') >= 0 ? key.IndexOf('|') : key.Length);
+        if (failCount >= 3)
+        {
+            return (2, $"'{toolName}' has now failed {failCount} consecutive times with IDENTICAL arguments. STOP retrying — " +
+                       "re-read the tool description, change the arguments, or use a different tool. " +
+                       "The next identical call will be blocked before execution.");
+        }
+        if (failCount == 2)
+        {
+            return (1, $"Warning: '{toolName}' failed again with identical arguments (2nd consecutive attempt). " +
+                       "Do NOT retry the same arguments — change them or use a different tool.");
+        }
+        return (0, string.Empty);
+    }
+
+    private ToolResult ExecutePlan(ToolCallRequest request, string sessionId)
+    {
+        string action = (GetStringArg(request.Arguments, "action") ?? "show").Trim().ToLowerInvariant();
+        var plan = _sessionPlans.GetOrAdd(sessionId ?? string.Empty, _ => new List<PlanTask>());
+
+        switch (action)
+        {
+            case "create":
+                plan.Clear();
+                goto case "add";
+            case "add":
+                foreach (var line in SplitPlanItems(GetStringArg(request.Arguments, "items")))
+                {
+                    plan.Add(new PlanTask(line, false));
+                }
+                break;
+            case "complete":
+                MarkPlanItems(request, plan, done: true);
+                break;
+            case "remove":
+                MarkPlanItems(request, plan, done: false, remove: true);
+                break;
+            case "clear":
+                plan.Clear();
+                _sessionPlanProgress.TryRemove(sessionId ?? string.Empty, out _);
+                break;
+            case "show":
+            default:
+                break;
+        }
+
+        if (request.Arguments != null && request.Arguments.TryGetValue("progress", out var progObj))
+        {
+            var raw = ToolExecutor.UnwrapJsonElement(progObj)?.ToString();
+            if (int.TryParse(raw, out int pct))
+            {
+                _sessionPlanProgress[sessionId ?? string.Empty] = Math.Clamp(pct, 0, 100);
+            }
+        }
+
+        var formatted = GetSessionPlan(sessionId ?? string.Empty);
+        string body = formatted.Count > 0 ? string.Join("\n", formatted) : "(plan is empty)";
+        int progress = GetSessionPlanProgress(sessionId ?? string.Empty);
+        string progressLine = progress >= 0 ? $"\nOverall progress: {progress}%" : string.Empty;
+        return new ToolResult("plan", true, $"[PLAN {action.ToUpperInvariant()} — current todo list:]\n{body}{progressLine}", null);
+    }
+
+    private static void MarkPlanItems(ToolCallRequest request, List<PlanTask> plan, bool done, bool remove = false)
+    {
+        string item = (GetStringArg(request.Arguments, "item") ?? string.Empty).Trim();
+        if (item.Length == 0) return;
+
+        // Match by number first ("2" or "2. rest of text"), then by text containment.
+        bool TryNumber(string s, out int idx)
+        {
+            idx = -1;
+            string head = s;
+            int dot = s.IndexOfAny(new[] { '.', ')' });
+            if (dot > 0) head = s.Substring(0, dot);
+            return int.TryParse(head.Trim(), out idx) && idx >= 1 && idx <= plan.Count;
+        }
+
+        if (TryNumber(item, out int numIdx))
+        {
+            var t = plan[numIdx - 1];
+            if (remove) plan.RemoveAt(numIdx - 1);
+            else plan[numIdx - 1] = t with { Done = done };
+            return;
+        }
+
+        for (int i = plan.Count - 1; i >= 0; i--)
+        {
+            if (plan[i].Text.Contains(item, StringComparison.OrdinalIgnoreCase))
+            {
+                if (remove) plan.RemoveAt(i);
+                else plan[i] = plan[i] with { Done = done };
+                break;
+            }
+        }
+    }
+
+    private static IEnumerable<string> SplitPlanItems(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return Enumerable.Empty<string>();
+        return raw.Split(new[] { '\n', ';' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0);
     }
 }

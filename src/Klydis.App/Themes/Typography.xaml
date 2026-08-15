@@ -1,0 +1,11 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Default typography. ThemeService hot-swaps this dictionary (App.xaml merged index 3)
+         at runtime when the user picks a different font family, weight, or style, so all
+         AppFontFamily/AppFontWeight/AppFontStyle DynamicResource references update live. -->
+    <FontFamily x:Key="AppFontFamily">Segoe UI Variable, Segoe UI, sans-serif</FontFamily>
+    <FontWeight x:Key="AppFontWeight">Normal</FontWeight>
+    <FontStyle x:Key="AppFontStyle">Normal</FontStyle>
+
+</ResourceDictionary>

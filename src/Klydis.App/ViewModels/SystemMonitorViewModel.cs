@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Threading.Tasks;
 using System.Windows.Threading;
@@ -6,6 +7,23 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
 namespace Klydis.App.ViewModels;
+
+/// <summary>
+/// A single local drive shown in the Storage section.
+/// </summary>
+public record DiskInfoItem(string Name, string Label, string Format, long UsedBytes, long FreeBytes, long TotalBytes)
+{
+    public double UsedPercent => TotalBytes > 0 ? UsedBytes * 100.0 / TotalBytes : 0;
+    public string UsedText => $"{FormatBytes(UsedBytes)} used";
+    public string FreeText => $"{FormatBytes(FreeBytes)} free";
+    public string TotalText => FormatBytes(TotalBytes);
+
+    private static string FormatBytes(long bytes)
+    {
+        double gb = bytes / (1024.0 * 1024.0 * 1024.0);
+        return gb >= 1 ? $"{gb:F1} GB" : $"{bytes / (1024.0 * 1024.0):F0} MB";
+    }
+}
 
 /// <summary>
 /// ViewModel for monitoring system resources such as GPU, CPU, and RAM.
@@ -66,6 +84,88 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private double _modelMemoryMb;
+
+    // ---- Overview percentages (derived each refresh) ----
+    [ObservableProperty]
+    private double _ramUsagePercent;
+
+    [ObservableProperty]
+    private double _vramUsagePercent;
+
+    [ObservableProperty]
+    private double _contextUsedPercent;
+
+    // ---- System diagnostics ----
+    [ObservableProperty]
+    private string _osVersion = "Unknown OS";
+
+    [ObservableProperty]
+    private string _machineName = "—";
+
+    [ObservableProperty]
+    private string _uptimeText = "—";
+
+    [ObservableProperty]
+    private int _coreCount;
+
+    [ObservableProperty]
+    private int _logicalProcessorCount;
+
+    [ObservableProperty]
+    private int _clockSpeedMHz;
+
+    [ObservableProperty]
+    private int _processThreadCount;
+
+    [ObservableProperty]
+    private int _processHandleCount;
+
+    // ---- Model & engine details ----
+    [ObservableProperty]
+    private string _modelName = string.Empty;
+
+    [ObservableProperty]
+    private string _modelDetailsSummary = "No model loaded";
+
+    [ObservableProperty]
+    private string _kvCacheSummary = "—";
+
+    [ObservableProperty]
+    private string _architectureLabel = "—";
+
+    [ObservableProperty]
+    private string _speculativeStatusText = "Speculative decoding initialized.";
+
+    // ---- Generation stats (from the last inference telemetry) ----
+    [ObservableProperty]
+    private string _lastGenerationSummary = "No generation yet.";
+
+    [ObservableProperty]
+    private string _lastGenerationDetail = string.Empty;
+
+    [ObservableProperty]
+    private int _lastGenTokens;
+
+    [ObservableProperty]
+    private double _lastGenDurationMs;
+
+    [ObservableProperty]
+    private double _lastTtftMs;
+
+    [ObservableProperty]
+    private double _lastPrefillTps;
+
+    [ObservableProperty]
+    private double _lastEndToEndTps;
+
+    // ---- Token-speed sparkline (pre-normalized bar heights 0..58) ----
+    [ObservableProperty]
+    private ObservableCollection<double> _tokensPerSecondBarHeights = new();
+
+    [ObservableProperty]
+    private double _tokensPerSecondMax = 60;
+
+    public ObservableCollection<DiskInfoItem> Disks { get; } = new();
 
     // ---- Session token usage stats (bottom-right status bar) ----
     // "Tokens in" = prompt/context tokens consumed by chat generations;
@@ -204,10 +304,15 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
             {
                 CurrentTokensPerSecond = Math.Round(tokensPerSecond, 1);
                 TokensPerSecondHistory.Add(CurrentTokensPerSecond);
+                if (CurrentTokensPerSecond > TokensPerSecondMax)
+                {
+                    TokensPerSecondMax = CurrentTokensPerSecond;
+                }
                 if (TokensPerSecondHistory.Count > 60)
                 {
                     TokensPerSecondHistory.RemoveAt(0);
                 }
+                RebuildTokenBars();
             }
 
             if (!string.IsNullOrEmpty(token))
@@ -261,6 +366,7 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
             _currentPromptTokens = telemetry.PromptTokenCount;
             _currentGeneratedTokens = telemetry.GeneratedTokenCount;
             UpdateContextWindow();
+            UpdateGenerationStats();
         });
     }
 
@@ -274,6 +380,7 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
             ContextWindowUsedTokens = 0;
             ContextWindowTotalTokens = 0;
             ContextWindowRemainingPercent = 100;
+            ContextUsedPercent = 0;
             ContextWindowSummary = "Context window: no model loaded";
             ContextWindowSeverity = "Normal";
             return;
@@ -298,8 +405,106 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
 
         long remaining = Math.Max(0, ContextWindowTotalTokens - used);
         ContextWindowRemainingPercent = Math.Round(remaining * 100.0 / ContextWindowTotalTokens, 1);
+        ContextUsedPercent = Math.Round(used * 100.0 / ContextWindowTotalTokens, 1);
         ContextWindowSummary = $"Context window ({modelLabel}): {FormatTokens(used)} used · {FormatTokens(remaining)} remaining of {FormatTokens(ContextWindowTotalTokens)}";
         ContextWindowSeverity = ContextWindowRemainingPercent < 10 ? "Critical" : ContextWindowRemainingPercent < 30 ? "Warning" : "Normal";
+    }
+
+    private void RebuildTokenBars()
+    {
+        TokensPerSecondBarHeights.Clear();
+        double max = Math.Max(TokensPerSecondMax, 10);
+        foreach (var value in TokensPerSecondHistory)
+        {
+            TokensPerSecondBarHeights.Add(Math.Max(1, Math.Min(58, value / max * 58)));
+        }
+    }
+
+    private static List<System.IO.DriveInfo> GetReadyFixedDrives()
+    {
+        var drives = new List<System.IO.DriveInfo>();
+        try
+        {
+            foreach (var d in System.IO.DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (!d.IsReady || d.TotalSize <= 0) continue;
+                    if (d.DriveType != System.IO.DriveType.Fixed && d.DriveType != System.IO.DriveType.Removable) continue;
+                    drives.Add(d);
+                }
+                catch { /* drive probe failed — skip */ }
+            }
+        }
+        catch { /* enumeration failed */ }
+        return drives;
+    }
+
+    private void UpdateModelDetails()
+    {
+        if (!_inferenceEngine.IsModelLoaded || string.IsNullOrEmpty(_inferenceEngine.CurrentModelPath))
+        {
+            ModelName = string.Empty;
+            ModelDetailsSummary = "No model loaded";
+            KvCacheSummary = "—";
+            ArchitectureLabel = "—";
+            SpeculativeStatusText = _inferenceEngine.SpeculativeStatus;
+            return;
+        }
+
+        ModelName = System.IO.Path.GetFileNameWithoutExtension(_inferenceEngine.CurrentModelPath);
+
+        double fileGb = 0;
+        try
+        {
+            var fi = new System.IO.FileInfo(_inferenceEngine.CurrentModelPath);
+            fileGb = fi.Length / (1024.0 * 1024.0 * 1024.0);
+        }
+        catch { /* file may be locked */ }
+
+        string batch = _inferenceEngine.UserBatchSize > 0 ? _inferenceEngine.UserBatchSize.ToString() : "Auto";
+        string ubatch = _inferenceEngine.UserUBatchSize > 0 ? _inferenceEngine.UserUBatchSize.ToString() : "Auto";
+        ModelDetailsSummary = $"{fileGb:F2} GB file · n_ctx {_inferenceEngine.ContextSize:N0} · batch {batch} / ubatch {ubatch}";
+
+        ArchitectureLabel = _inferenceEngine.IsMixtureOfExperts
+            ? "Mixture-of-Experts"
+            : _inferenceEngine.IsRecurrentArchitecture
+                ? "Recurrent (RWKV-style)"
+                : string.IsNullOrWhiteSpace(_inferenceEngine.Architecture) ? "llama" : _inferenceEngine.Architecture;
+
+        var kv = _inferenceEngine.CurrentKvCacheEstimate;
+        KvCacheSummary = kv != null
+            ? $"{kv.AttentionArchitecture} attention · {kv.NumLayers} layers · {kv.NumKvHeads} KV heads · head_dim {kv.HeadDim} · {kv.QuantizationType} · ≈{kv.TotalVramGigabytes:F2} GB VRAM"
+            : "KV cache estimate unavailable";
+
+        SpeculativeStatusText = _inferenceEngine.SpeculativeStatus;
+    }
+
+    private void UpdateGenerationStats()
+    {
+        var t = _inferenceEngine.LastTelemetry;
+        if (t == null)
+        {
+            LastGenerationSummary = "No generation yet.";
+            LastGenerationDetail = string.Empty;
+            LastGenTokens = 0;
+            LastGenDurationMs = 0;
+            LastTtftMs = 0;
+            LastPrefillTps = 0;
+            LastEndToEndTps = 0;
+            return;
+        }
+
+        LastGenTokens = t.GeneratedTokenCount;
+        LastGenDurationMs = t.GenerationDurationMs;
+        LastTtftMs = t.TimeToFirstTokenMs;
+        LastPrefillTps = t.PromptPrefillTokensPerSecond;
+        LastEndToEndTps = t.EndToEndTokensPerSecond;
+        LastGenerationSummary = t.GeneratedTokenCount > 0 || t.TotalElapsedMs > 0
+            ? $"{t.GeneratedTokenCount:N0} tokens in {t.GenerationDurationMs / 1000.0:F1}s · {t.GenerationTokensPerSecond:F1} tok/s"
+            : "Generation completed.";
+        LastGenerationDetail = $"Prompt {t.PromptTokenCount:N0} tokens · TTFT {t.TimeToFirstTokenMs:F0} ms · " +
+                               $"prefill {t.PromptPrefillTokensPerSecond:F0} tok/s · end-to-end {t.EndToEndTokensPerSecond:F1} tok/s";
     }
 
     private static string FormatTokens(long tokens) => tokens >= 1000 ? $"{tokens / 1000.0:F1}K" : tokens.ToString("N0");
@@ -370,11 +575,48 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
         ProcessCpuUsagePercent = profile.System.ProcessCpuUsagePercent;
         RamTotalGb = profile.System.TotalRamGb;
         RamUsedGb = Math.Round(RamTotalGb - profile.System.AvailableRamGb, 2);
+        RamUsagePercent = RamTotalGb > 0 ? Math.Round(RamUsedGb * 100.0 / RamTotalGb, 1) : 0;
         CpuSeverity = ClassifySeverity(CpuUsagePercent, 100.0);
         RamSeverity = ClassifySeverity(RamUsedGb, RamTotalGb);
 
+        CoreCount = profile.System.CoreCount;
+        LogicalProcessorCount = profile.System.LogicalProcessorCount;
+        ClockSpeedMHz = profile.System.ClockSpeedMHz;
+
+        // System-level diagnostics (cheap, local reads).
+        OsVersion = Environment.OSVersion.VersionString + (Environment.Is64BitOperatingSystem ? " · 64-bit" : " · 32-bit");
+        MachineName = Environment.MachineName;
+        var uptime = TimeSpan.FromMilliseconds(Environment.TickCount64);
+        UptimeText = $"{(int)uptime.TotalHours}h {uptime.Minutes}m {uptime.Seconds}s";
+
+        // Disk usage (fixed/removable drives only — run off the UI thread so a flaky drive
+        // cannot stall the UI).
+        var drives = await Task.Run(GetReadyFixedDrives);
+        Disks.Clear();
+        foreach (var d in drives)
+        {
+            try
+            {
+                Disks.Add(new DiskInfoItem(
+                    d.Name.TrimEnd('\\'),
+                    string.IsNullOrWhiteSpace(d.VolumeLabel) ? d.Name.TrimEnd('\\') : d.VolumeLabel,
+                    d.DriveFormat,
+                    d.TotalSize - d.TotalFreeSpace,
+                    d.TotalFreeSpace,
+                    d.TotalSize));
+            }
+            catch { /* race with drive removal */ }
+        }
+
         using var process = System.Diagnostics.Process.GetCurrentProcess();
         AppRamUsedMb = (int)(process.WorkingSet64 / (1024 * 1024));
+        ProcessThreadCount = process.Threads.Count;
+        ProcessHandleCount = process.HandleCount;
+
+        if (profile.Gpu != null)
+        {
+            VramUsagePercent = VramTotalMb > 0 ? Math.Round(VramUsedMb * 100.0 / VramTotalMb, 1) : 0;
+        }
 
         _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
@@ -411,6 +653,9 @@ public partial class SystemMonitorViewModel : ObservableObject, IDisposable
             {
                 UpdateContextWindow();
             }
+
+            UpdateModelDetails();
+            UpdateGenerationStats();
         });
     }
 

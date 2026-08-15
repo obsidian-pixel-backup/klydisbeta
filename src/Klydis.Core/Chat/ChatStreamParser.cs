@@ -18,13 +18,17 @@ public sealed class ChatStreamParser
     private static readonly string[] ThinkStartTags = new[]
     {
         "<think>", "<|think|>", "<thought>", "<|thought|>", "[THINK]", "[THOUGHT]",
-        "{antml:thinking_mode}", "<antml:thinking_mode>", "{thinking_mode}", "<thinking_mode>"
+        "{antml:thinking_mode}", "<antml:thinking_mode>", "{thinking_mode}", "<thinking_mode>",
+        // Anthropic/Claude native thinking (real Claude models use <antml:thinking>, no
+        // _mode suffix — the _mode forms are the older system-reminder variant).
+        "<antml:thinking>", "{antml:thinking}", "<thinking>"
     };
 
     private static readonly string[] ThinkEndTags = new[]
     {
         "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>",
-        "[/THINK]", "[/THOUGHT]", "{/antml:thinking_mode}", "</antml:thinking_mode>", "{/thinking_mode}", "</thinking_mode>"
+        "[/THINK]", "[/THOUGHT]", "{/antml:thinking_mode}", "</antml:thinking_mode>", "{/thinking_mode}", "</thinking_mode>",
+        "</antml:thinking>", "{/antml:thinking}", "</thinking>"
     };
 
     private static readonly string[] StrayThinkCloseTags = ThinkEndTags;
@@ -32,13 +36,17 @@ public sealed class ChatStreamParser
     private static readonly string[] ToolStartTags = new[]
     {
         "<tool_call>", "<|tool_call|>", "<tool_calls>", "<|tool_calls|>",
-        "[TOOL_CALLS]", "[TOOL_CALL]", "<TOOL_CALL>", "<TOOL_CALLS>"
+        "[TOOL_CALLS]", "[TOOL_CALL]", "<TOOL_CALL>", "<TOOL_CALLS>",
+        // Anthropic/Claude native calls (antml) — kept out of the visible stream just like
+        // the other tool formats so the user sees the call only in the UI's tool-call card.
+        "<antml:invoke"
     };
 
     private static readonly string[] ToolEndTags = new[]
     {
         "</tool_call>", "</|tool_call|>", "<|/tool_call|>", "</tool_calls>", "</|tool_calls|>", "<|/tool_calls|>",
-        "[/TOOL_CALLS]", "[/TOOL_CALL]", "</TOOL_CALL>", "</TOOL_CALLS>"
+        "[/TOOL_CALLS]", "[/TOOL_CALL]", "</TOOL_CALL>", "</TOOL_CALLS>",
+        "</antml:invoke>"
     };
 
     // All proper prefixes of the closing-think and opening-tool tags, used to avoid yielding a
@@ -116,6 +124,24 @@ public sealed class ChatStreamParser
                         int idx;
                         while ((idx = _unyieldedText.IndexOf(strayClose, StringComparison.OrdinalIgnoreCase)) >= 0)
                         {
+                            // A close tag is only STRAY when no opener precedes it in the buffer.
+                            // If an opening tag appears earlier (e.g. a whole
+                            // "<thinking>…</thinking>" block arriving in one token batch), the
+                            // close belongs to that block — leave it for the open/close state
+                            // machine instead of deleting it (which would swallow the close and
+                            // stream everything after it as thinking).
+                            bool openerPrecedes = false;
+                            foreach (var openTag in ThinkStartTags)
+                            {
+                                int openIdx = _unyieldedText.IndexOf(openTag, StringComparison.OrdinalIgnoreCase);
+                                if (openIdx >= 0 && openIdx < idx)
+                                {
+                                    openerPrecedes = true;
+                                    break;
+                                }
+                            }
+                            if (openerPrecedes) break;
+
                             _unyieldedText = _unyieldedText.Remove(idx, strayClose.Length);
                             processedAny = true;
                         }
@@ -336,8 +362,10 @@ public sealed class ChatStreamParser
         foreach (var tag in tags)
         {
             int idx = _unyieldedText.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
-            if (idx >= 0 && (index < 0 || idx < index))
+            if (idx >= 0 && (index < 0 || idx < index || (idx == index && tag.Length > tagLen)))
             {
+                // Earliest occurrence wins; at the SAME index the LONGEST tag wins so a
+                // prefix-overlapping pair (<think> vs <thinking>) never leaves a fragment.
                 index = idx;
                 tagLen = tag.Length;
             }

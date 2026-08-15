@@ -4,6 +4,7 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
+             xmlns:views="clr-namespace:Klydis.App.Views"
              xmlns:mdxam="clr-namespace:MdXaml;assembly=MdXaml"
              xmlns:sys="clr-namespace:System;assembly=mscorlib"
              mc:Ignorable="d"
@@ -306,16 +307,105 @@
                 </Expander>
             </Border>
         </DataTemplate>
+
+        <!-- Section header for the inline chat-settings menu. -->
+        <Style x:Key="SettingsMenuSectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="9.5"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
+            <Setter Property="Margin" Value="0,10,0,4"/>
+        </Style>
+
+        <!-- Option row for the inline chat-settings menu: radio dot + label, checked row
+             tinted with the accent so the current selection is obvious at a glance. -->
+        <Style x:Key="SettingsOptionStyle" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="6" Padding="8,5" Margin="0,1">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="Dot" Width="14" Height="14" CornerRadius="7"
+                                        BorderBrush="{DynamicResource TextMutedBrush}" BorderThickness="1.5"
+                                        Margin="0,0,8,0" VerticalAlignment="Center">
+                                    <Ellipse x:Name="DotFill" Width="8" Height="8" Fill="{DynamicResource AccentPrimaryBrush}" Visibility="Collapsed"/>
+                                </Border>
+                                <TextBlock Grid.Column="1" Text="{TemplateBinding Content}" VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                <Setter TargetName="Dot" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                <Setter TargetName="DotFill" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource InputBackgroundBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Personality list rows: same radio-dot look as the option rows above. -->
+        <Style x:Key="SettingsPersonalityItem" TargetType="ListBoxItem">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="6" Padding="8,5" Margin="0,1">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Border x:Name="Dot" Width="14" Height="14" CornerRadius="7"
+                                        BorderBrush="{DynamicResource TextMutedBrush}" BorderThickness="1.5"
+                                        Margin="0,0,8,0" VerticalAlignment="Center">
+                                    <Ellipse x:Name="DotFill" Width="8" Height="8" Fill="{DynamicResource AccentPrimaryBrush}" Visibility="Collapsed"/>
+                                </Border>
+                                <ContentPresenter Grid.Column="1" VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                <Setter TargetName="Dot" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                <Setter TargetName="DotFill" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource InputBackgroundBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
 
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="250" MinWidth="150" MaxWidth="600"/>
+            <!-- Left session-sidebar (chat list). Width/MinWidth are driven from code-behind
+                 (0 when collapsed) so a collapsed sidebar does not reserve layout space. -->
+            <ColumnDefinition x:Name="SessionSidebarColumn" Width="250" MinWidth="150" MaxWidth="600"/>
             <ColumnDefinition Width="*"/>
+            <!-- Right-side chat panel (queue / files / changes / preview / terminal / notes).
+                 Width is driven from code-behind (0 when the panel is closed) so a collapsed
+                 panel does not reserve layout space. -->
+            <ColumnDefinition x:Name="SidePanelColumn" Width="360" MinWidth="280" MaxWidth="720"/>
         </Grid.ColumnDefinitions>
 
-        <!-- Session List Panel -->
-        <Border Grid.Column="0" Background="{DynamicResource SidebarBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+        <!-- Session List Panel (visibility follows IsSessionSidebarOpen) -->
+        <Border Grid.Column="0" Background="{DynamicResource SidebarBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0"
+                Visibility="{Binding IsSessionSidebarOpen, Converter={StaticResource BoolToVisConverter}}">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -413,7 +503,37 @@
 
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                     <Grid>
-                                        <TextBlock x:Name="TitleText" Text="{Binding Title}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock x:Name="TitleText" Text="{Binding Title}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                            <!-- Per-chat working indicator: a pulsing dot + live status next to
+                                                 the title so it is obvious WHICH chat the model is currently
+                                                 working on, including while the user is viewing another chat. -->
+                                            <StackPanel x:Name="WorkingBadge" Orientation="Horizontal" Visibility="Collapsed" Margin="8,0,0,0" VerticalAlignment="Center">
+                                                <Ellipse Width="7" Height="7" Margin="0,0,5,0" VerticalAlignment="Center">
+                                                    <Ellipse.Style>
+                                                        <Style TargetType="Ellipse">
+                                                            <Setter Property="Fill" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                                            <Setter Property="Opacity" Value="1"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsWorking}" Value="True">
+                                                                    <DataTrigger.EnterActions>
+                                                                        <BeginStoryboard>
+                                                                            <Storyboard x:Name="SessionWorkingPulse">
+                                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.25" Duration="0:0:0.6" AutoReverse="True" RepeatBehavior="Forever"/>
+                                                                            </Storyboard>
+                                                                        </BeginStoryboard>
+                                                                    </DataTrigger.EnterActions>
+                                                                    <DataTrigger.ExitActions>
+                                                                        <StopStoryboard BeginStoryboardName="SessionWorkingPulse"/>
+                                                                    </DataTrigger.ExitActions>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Ellipse.Style>
+                                                </Ellipse>
+                                                <TextBlock Text="{Binding WorkingStatusText}" FontSize="11" Foreground="{DynamicResource AccentPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding WorkingModel, StringFormat=Model: {0}}"/>
+                                            </StackPanel>
+                                        </StackPanel>
                                         <TextBox x:Name="TitleEdit" Text="{Binding Title, UpdateSourceTrigger=PropertyChanged}" Visibility="Collapsed" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderThickness="1" BorderBrush="{DynamicResource AccentPrimaryBrush}" Padding="2">
                                             <TextBox.InputBindings>
                                                 <KeyBinding Key="Return" Command="{Binding DataContext.CommitEditTitleCommand, RelativeSource={RelativeSource AncestorType=ListBox}}" CommandParameter="{Binding}"/>
@@ -452,6 +572,9 @@
                                 <DataTrigger Binding="{Binding IsPinned}" Value="True">
                                     <Setter TargetName="PinIcon" Property="Visibility" Value="Visible"/>
                                 </DataTrigger>
+                                <DataTrigger Binding="{Binding IsWorking}" Value="True">
+                                    <Setter TargetName="WorkingBadge" Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
                                 <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
                                     <Setter TargetName="ActionButtons" Property="Visibility" Value="Visible"/>
                                 </DataTrigger>
@@ -462,8 +585,9 @@
             </Grid>
         </Border>
 
-        <!-- Sidebar Resizer -->
-        <GridSplitter Grid.Column="0" Width="6" HorizontalAlignment="Right" VerticalAlignment="Stretch" Cursor="SizeWE" Background="Transparent" Panel.ZIndex="10" Margin="0,0,-3,0">
+        <!-- Sidebar Resizer (hidden when the sidebar is collapsed) -->
+        <GridSplitter x:Name="SessionSidebarSplitter" Grid.Column="0" Width="6" HorizontalAlignment="Right" VerticalAlignment="Stretch" Cursor="SizeWE" Background="Transparent" Panel.ZIndex="10" Margin="0,0,-3,0"
+                      Visibility="{Binding IsSessionSidebarOpen, Converter={StaticResource BoolToVisConverter}}">
             <GridSplitter.Template>
                 <ControlTemplate TargetType="GridSplitter">
                     <Border Background="Transparent" Padding="2,0">
@@ -481,6 +605,29 @@
             </GridSplitter.Template>
         </GridSplitter>
 
+        <!-- Right-side panel splitter -->
+        <GridSplitter x:Name="SidePanelSplitter" Grid.Column="2" Width="6" HorizontalAlignment="Left" VerticalAlignment="Stretch" Cursor="SizeWE" Background="Transparent" Panel.ZIndex="10" Margin="-3,0,0,0">
+            <GridSplitter.Template>
+                <ControlTemplate TargetType="GridSplitter">
+                    <Border Background="Transparent" Padding="0,2">
+                        <Border x:Name="VisualIndicator" Background="Transparent" Width="2" HorizontalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="VisualIndicator" Property="Background" Value="{DynamicResource AccentPrimaryBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsDragging" Value="True">
+                            <Setter TargetName="VisualIndicator" Property="Background" Value="{DynamicResource AccentPrimaryBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </GridSplitter.Template>
+        </GridSplitter>
+
+        <!-- Right-side chat panel host (visibility follows SidePanel.IsPanelOpen) -->
+        <views:ChatSidePanelView x:Name="SidePanelHost" Grid.Column="2"
+                                 Visibility="{Binding SidePanel.IsPanelOpen, Converter={StaticResource BoolToVisConverter}}"/>
+
         <!-- Chat Area -->
         <Grid Grid.Column="1">
             <Grid.RowDefinitions>
@@ -497,7 +644,52 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <Grid VerticalAlignment="Center" HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Left">
+                        <!-- Collapse/expand toggle for the left session sidebar. The chevron
+                             points left when the list is open, right when collapsed. -->
+                        <ToggleButton IsChecked="{Binding IsSessionSidebarOpen, Mode=TwoWay}"
+                                      ToolTip="Show / hide the session list"
+                                      Width="28" Height="28" Padding="0" Cursor="Hand" FocusVisualStyle="{x:Null}"
+                                      VerticalAlignment="Center" Margin="0,0,6,0">
+                            <ToggleButton.Style>
+                                <Style TargetType="ToggleButton">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="BorderThickness" Value="0"/>
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ToggleButton">
+                                                <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsChecked" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ToggleButton.Style>
+                            <Path Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.8"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  Width="11" Height="12" Stretch="Uniform"
+                                  Data="M 8,2 L 3,7 L 8,12">
+                                <Path.Style>
+                                    <Style TargetType="Path">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Value="False">
+                                                <Setter Property="Data" Value="M 3,2 L 8,7 L 3,12"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Path.Style>
+                            </Path>
+                        </ToggleButton>
+                        <Grid VerticalAlignment="Center">
                         <StackPanel x:Name="HeaderTitleDisplay" Orientation="Horizontal" Background="Transparent"
                                     ToolTip="Click to rename this chat" Cursor="Hand">
                             <StackPanel.InputBindings>
@@ -514,6 +706,44 @@
                             </StackPanel.Style>
                             <TextBlock Text="{Binding SessionTitle}" VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold"
                                        Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" MaxWidth="520"/>
+                            <!-- Live working indicator for the open chat: pulsing dot + status, so
+                                 the model's current state stays visible in the chat itself after
+                                 switching between conversations. -->
+                            <StackPanel x:Name="HeaderWorkingBadge" Orientation="Horizontal" Margin="10,0,0,0" VerticalAlignment="Center">
+                                <StackPanel.Style>
+                                    <Style TargetType="StackPanel">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedSession.IsWorking}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </StackPanel.Style>
+                                <Ellipse Width="8" Height="8" Margin="0,0,6,0" VerticalAlignment="Center">
+                                    <Ellipse.Style>
+                                        <Style TargetType="Ellipse">
+                                            <Setter Property="Fill" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                            <Setter Property="Opacity" Value="1"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding SelectedSession.IsWorking}" Value="True">
+                                                    <DataTrigger.EnterActions>
+                                                        <BeginStoryboard>
+                                                            <Storyboard x:Name="HeaderWorkingPulse">
+                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.25" Duration="0:0:0.6" AutoReverse="True" RepeatBehavior="Forever"/>
+                                                            </Storyboard>
+                                                        </BeginStoryboard>
+                                                    </DataTrigger.EnterActions>
+                                                    <DataTrigger.ExitActions>
+                                                        <StopStoryboard BeginStoryboardName="HeaderWorkingPulse"/>
+                                                    </DataTrigger.ExitActions>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Ellipse.Style>
+                                </Ellipse>
+                                <TextBlock Text="{Binding SelectedSession.WorkingStatusText}" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding SelectedSession.WorkingModel, StringFormat=Model: {0}}"/>
+                            </StackPanel>
                             <Path Data="M 1,11 L 4,14 L 14,4 L 11,1 Z M 1,14 L 1,11 L 4,14 Z" Fill="{DynamicResource TextMutedBrush}"
                                   Width="11" Height="11" Stretch="Uniform" VerticalAlignment="Center" Margin="8,1,0,0">
                                 <Path.Style>
@@ -548,17 +778,68 @@
                                 </Style>
                             </TextBox.Style>
                         </TextBox>
-                    </Grid>
-
-                    <Button Grid.Column="1" Command="{Binding ExportChatCommand}" 
-                            ToolTip="Export Chat Log" Background="Transparent" BorderThickness="0"
-                            Padding="8,4" Cursor="Hand" VerticalAlignment="Center">
-                        <Grid>
-                            <Path Data="M 14,14 L 2,14 M 8,2 L 8,11 M 4,7 L 8,11 L 12,7" 
-                                  Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.5" Fill="Transparent"
-                                  Width="14" Height="14" Stretch="Uniform"/>
                         </Grid>
-                    </Button>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Command="{Binding ExportChatCommand}" 
+                                ToolTip="Export Chat Log" Background="Transparent" BorderThickness="0"
+                                Padding="8,4" Cursor="Hand" VerticalAlignment="Center">
+                            <Grid>
+                                <Path Data="M 14,14 L 2,14 M 8,2 L 8,11 M 4,7 L 8,11 L 12,7" 
+                                      Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.5" Fill="Transparent"
+                                      Width="14" Height="14" Stretch="Uniform"/>
+                            </Grid>
+                        </Button>
+
+                        <!-- Right-side panel toggle (Queue / Files / Changes / Preview /
+                             Terminal / Notes). ToggleButton bound TwoWay so the panel stays
+                             open/closed as the user left it. -->
+                        <ToggleButton IsChecked="{Binding SidePanel.IsPanelOpen, Mode=TwoWay}" 
+                                      ToolTip="Show / hide the workbench panel (queue, files, changes, preview, terminal, notes)"
+                                      Padding="8,4" Cursor="Hand" FocusVisualStyle="{x:Null}"
+                                      VerticalAlignment="Center" Margin="2,0,0,0">
+                            <ToggleButton.Style>
+                                <Style TargetType="ToggleButton">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+                                    <Setter Property="BorderThickness" Value="0"/>
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ToggleButton">
+                                                <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                                        CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsChecked" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ToggleButton.Style>
+                            <Path Data="M 4,2 L 4,14 M 9,2 L 9,14 M 14,2 L 14,14" 
+                                  Stroke="{DynamicResource TextSecondaryBrush}" StrokeThickness="1.5">
+                                <Path.Style>
+                                    <Style TargetType="Path">
+                                        <Setter Property="Opacity" Value="0.55"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Value="True">
+                                                <Setter Property="Opacity" Value="1"/>
+                                                <Setter Property="Stroke" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Path.Style>
+                            </Path>
+                        </ToggleButton>
+                    </StackPanel>
 
                 </Grid>
             </Border>
@@ -1020,129 +1301,17 @@
             <!-- Input Area -->
             <Border Grid.Row="2" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,12">
                 <StackPanel>
-                    <!-- Queue Status Bar: previously a single horizontal row that forced
-                         every item edge-to-edge behind a 3px-tall scrollbar (the app's
-                         global ScrollBar style, tuned thin for the chat pane) - with more
-                         than a handful of items, only one or two chips were visible at a
-                         time and reaching the rest meant dragging a sliver. Chips now wrap
-                         into a fixed-height panel so several rows are visible at once, and
-                         overflow is reached with an ordinary vertical mouse-wheel scroll
-                         (the natural gesture, unlike horizontal scroll) instead of hunting
-                         for a barely-visible handle. -->
-                    <Border Visibility="{Binding HasQueuedMessages, Converter={StaticResource BoolToVisConverter}}"
-                            Background="{DynamicResource SurfaceElevatedBrush}"
-                            BorderBrush="{DynamicResource BorderMidBrush}"
-                            BorderThickness="1" CornerRadius="8" Margin="0,0,0,10" Padding="10,8">
-                        <StackPanel>
-                            <DockPanel Margin="0,0,0,6">
-                                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
-                                    <TextBlock Text="⚡ Queue:" FontWeight="SemiBold" FontSize="12" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,6,0" VerticalAlignment="Center"/>
-                                    <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="10" Padding="6,1.5" VerticalAlignment="Center">
-                                        <TextBlock Text="{Binding QueuedMessages.Count, StringFormat='{}{0} item(s)'}" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                    </Border>
-                                </StackPanel>
-                                <Button DockPanel.Dock="Right" Style="{DynamicResource GhostButton}" Command="{Binding ClearQueueCommand}" ToolTip="Clear all queued messages for this session" VerticalAlignment="Center" Padding="6,3">
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <TextBlock Text="✕" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,4,0"/>
-                                        <TextBlock Text="Clear All" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}"/>
-                                    </StackPanel>
-                                </Button>
-                                <Button DockPanel.Dock="Right" Style="{DynamicResource GhostButton}" Command="{Binding SendAllQueuedNowCommand}" ToolTip="Send ALL queued messages now, one after another (cancels any running generation)" VerticalAlignment="Center" Padding="6,3" Margin="6,0,0,0">
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,4,0"/>
-                                        <TextBlock Text="Send All Now" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                    </StackPanel>
-                                </Button>
-                            </DockPanel>
-
-                            <ScrollViewer MaxHeight="108" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
-                                <ItemsControl ItemsSource="{Binding QueuedMessages}">
-                                    <ItemsControl.ItemsPanel>
-                                        <ItemsPanelTemplate>
-                                            <WrapPanel Orientation="Horizontal"/>
-                                        </ItemsPanelTemplate>
-                                    </ItemsControl.ItemsPanel>
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <Border Background="{DynamicResource InputBackgroundBrush}"
-                                                    BorderBrush="{DynamicResource BorderBrush}"
-                                                    BorderThickness="1" CornerRadius="6" Margin="0,0,6,6" Padding="6,4">
-                                                <Grid>
-                                                    <!-- Read-only chip -->
-                                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
-                                                                Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
-                                                        <Button Style="{DynamicResource GhostButton}"
-                                                                Command="{Binding DataContext.ToggleQueueItemModeCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding}"
-                                                                ToolTip="Click to toggle between Steer and Direct Send"
-                                                                Margin="0,0,6,0" Padding="0">
-                                                            <Border x:Name="ModeBadgeBorder" Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="5,1.5">
-                                                                <TextBlock x:Name="ModeText" Text="{Binding ModeBadgeText}" FontSize="10.5" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                                            </Border>
-                                                        </Button>
-                                                        <TextBlock Text="{Binding Content}" MaxWidth="180" TextTrimming="CharacterEllipsis" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}"/>
-                                                        <Button Style="{DynamicResource GhostButton}"
-                                                                Command="{Binding DataContext.SendQueuedItemNowCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding}"
-                                                                ToolTip="Send now — send this message immediately (cancels any running generation)"
-                                                                Margin="6,0,0,0" Padding="2,0" VerticalAlignment="Center">
-                                                            <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                                        </Button>
-                                                        <Button Style="{DynamicResource GhostButton}"
-                                                                Command="{Binding BeginEditCommand}"
-                                                                ToolTip="Edit queued message"
-                                                                Margin="6,0,0,0" Padding="2,0">
-                                                            <TextBlock Text="✎" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
-                                                        </Button>
-                                                        <Button Style="{DynamicResource QueueItemCloseButton}"
-                                                                Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding}"
-                                                                Margin="4,0,0,0" ToolTip="Cancel/Remove Queued Request"
-                                                                VerticalAlignment="Center"/>
-                                                    </StackPanel>
-
-                                                    <!-- Edit chip: swaps the content text for an inline TextBox.
-                                                         ModelMessageQueue has no in-place content update, so Save
-                                                         re-enqueues under a new Id/CreatedAt (see
-                                                         SaveQueuedItemEditCommand) - the chip will visually jump to
-                                                         the back of the queue on confirm, which is expected. -->
-                                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
-                                                                Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisConverter}}">
-                                                        <TextBox Text="{Binding EditText, UpdateSourceTrigger=PropertyChanged}"
-                                                                 Width="200" MaxHeight="60" TextWrapping="Wrap" AcceptsReturn="True"
-                                                                 VerticalScrollBarVisibility="Auto"
-                                                                 Background="{DynamicResource PanelBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
-                                                                 BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1" Padding="4,2"/>
-                                                        <Button Style="{DynamicResource GhostButton}"
-                                                                Command="{Binding DataContext.SaveQueuedItemEditCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding}"
-                                                                ToolTip="Save changes" Margin="6,0,0,0" Padding="2,0">
-                                                            <TextBlock Text="✓" FontSize="12" FontWeight="Bold" Foreground="{DynamicResource SuccessBrush}"/>
-                                                        </Button>
-                                                        <Button Style="{DynamicResource QueueItemCloseButton}"
-                                                                Command="{Binding CancelEditCommand}"
-                                                                Margin="4,0,0,0" ToolTip="Discard changes"
-                                                                VerticalAlignment="Center"/>
-                                                    </StackPanel>
-                                                </Grid>
-                                            </Border>
-                                            <DataTemplate.Triggers>
-                                                <!-- Was hardcoded #252A18/#F59E0B - fixed to the theme's
-                                                     WarningBrush (paired with a neutral elevated surface
-                                                     rather than a bespoke soft-amber background, mirroring
-                                                     how the Delete Skill button avoids needing its own
-                                                     soft-tint resource) so it varies correctly across every
-                                                     Mode/Background/Accent combination instead of only
-                                                     ever rendering one fixed dark-mode amber. -->
-                                                <DataTrigger Binding="{Binding ModeBadgeText}" Value="Direct Send">
-                                                    <Setter TargetName="ModeBadgeBorder" Property="Background" Value="{DynamicResource SurfaceElevatedBrush}"/>
-                                                    <Setter TargetName="ModeText" Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                                </DataTrigger>
-                                            </DataTemplate.Triggers>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                            </ScrollViewer>
+                    <!-- Working-elsewhere notice: shown when the model is generating in a
+                         DIFFERENT chat than the one displayed, so this chat never looks frozen
+                         or broken — the user can see exactly where the model is and that their
+                         next message here will be queued until it finishes. -->
+                    <Border Background="{DynamicResource SurfaceElevatedBrush}"
+                            BorderBrush="{DynamicResource AccentSoftBrush}"
+                            BorderThickness="1" CornerRadius="8" Margin="0,0,0,10" Padding="10,8"
+                            Visibility="{Binding IsWorkingElsewhere, Converter={StaticResource BoolToVisConverter}}">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{DynamicResource AccentPrimaryBrush}"/>
+                            <TextBlock Text="{Binding WorkingElsewhereText}" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Border>
 
@@ -1257,28 +1426,63 @@
                                     <Rectangle Canvas.Left="1" Canvas.Top="7.75" Width="16" Height="2.5" RadiusX="1.25" RadiusY="1.25" Fill="{DynamicResource AccentPrimaryBrush}"/>
                                 </Canvas>
                             </Button>
-                            <ComboBox ItemsSource="{Binding AvailableRiskLevels}"
-                                      SelectedItem="{Binding SelectedRiskLevel}"
-                                      Width="90"
-                                      Height="40"
-                                      Background="{DynamicResource InputBackgroundBrush}"
-                                      Foreground="{DynamicResource TextPrimaryBrush}"
-                                      BorderBrush="{DynamicResource BorderMidBrush}"
-                                      BorderThickness="1"
-                                      ToolTip="Set Model Tool Execution Risk Level">
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding}" Padding="4,2"/>
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
-
-                            <Button Command="{Binding ToggleSelectedQueueModeCommand}" Margin="6,0,0,0" Height="40" Padding="8,0" Style="{DynamicResource SecondaryButton}" ToolTip="Toggle queue mode for sent/queued messages (Steer vs Direct Send)">
+                            <!-- Single inline chat-settings menu: tool risk + message mode +
+                                 personality in one popup, all applied instantly (no restart). -->
+                            <Button x:Name="ChatSettingsButton" Click="ChatSettingsButton_Click"
+                                    Height="40" Padding="10,0" Margin="0,0,6,0"
+                                    Style="{DynamicResource SecondaryButton}"
+                                    ToolTip="Chat settings — tool risk, message mode, and personality (apply instantly)">
                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                    <TextBlock Text="Mode: " FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
-                                    <TextBlock Text="{Binding SelectedQueueMode}" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                    <TextBlock Text="⚙ " FontSize="12" Foreground="{DynamicResource TextMutedBrush}"/>
+                                    <TextBlock Text="{Binding CurrentSettingsSummary}" FontSize="11" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
                                 </StackPanel>
                             </Button>
+
+                            <Popup x:Name="ChatSettingsPopup"
+                                   Placement="Top" StaysOpen="False" AllowsTransparency="True"
+                                   VerticalOffset="-4">
+                                <Border Background="{DynamicResource SurfaceElevatedBrush}"
+                                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10"
+                                        Padding="10,8" MaxHeight="440">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="20" ShadowDepth="4" Direction="270" Color="#000000" Opacity="0.5"/>
+                                    </Border.Effect>
+                                    <StackPanel Width="240">
+                                        <TextBlock Text="TOOL RISK" Style="{StaticResource SettingsMenuSectionHeader}" Margin="0,2,0,4"/>
+                                        <TextBlock Text="Controls whether tool calls execute or request approval." FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                                        <RadioButton Content="Safe" Style="{StaticResource SettingsOptionStyle}" GroupName="ChatSettingsRisk"
+                                                     IsChecked="{Binding SelectedRiskLevel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Safe}"/>
+                                        <RadioButton Content="Standard" Style="{StaticResource SettingsOptionStyle}" GroupName="ChatSettingsRisk"
+                                                     IsChecked="{Binding SelectedRiskLevel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Standard}"/>
+                                        <RadioButton Content="AutoPilot" Style="{StaticResource SettingsOptionStyle}" GroupName="ChatSettingsRisk"
+                                                     IsChecked="{Binding SelectedRiskLevel, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=AutoPilot}"/>
+
+                                        <TextBlock Text="MESSAGE MODE" Style="{StaticResource SettingsMenuSectionHeader}"/>
+                                        <TextBlock Text="How queued messages are handled: Steer lets the model pick the moment to incorporate them." FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                                        <RadioButton Content="Steer" Style="{StaticResource SettingsOptionStyle}" GroupName="ChatSettingsMode"
+                                                     IsChecked="{Binding SelectedQueueMode, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Steer}"/>
+                                        <RadioButton Content="Direct Send" Style="{StaticResource SettingsOptionStyle}" GroupName="ChatSettingsMode"
+                                                     IsChecked="{Binding SelectedQueueMode, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=DirectSend}"/>
+
+                                        <TextBlock Text="PERSONALITY" Style="{StaticResource SettingsMenuSectionHeader}"/>
+                                        <TextBlock Text="Switches the model's output style for the next generation." FontSize="9.5" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,0,0,2"/>
+                                        <ListBox ItemsSource="{Binding AvailablePersonalities}"
+                                                 SelectedItem="{Binding SelectedPersonality}"
+                                                 MaxHeight="150" Background="Transparent" BorderThickness="0"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                            <ListBox.ItemContainerStyle>
+                                                <Style TargetType="ListBoxItem" BasedOn="{StaticResource SettingsPersonalityItem}"/>
+                                            </ListBox.ItemContainerStyle>
+                                            <ListBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding}" FontSize="12" Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis"/>
+                                                </DataTemplate>
+                                            </ListBox.ItemTemplate>
+                                        </ListBox>
+                                    </StackPanel>
+                                </Border>
+                            </Popup>
                         </StackPanel>
 
                         <Grid Grid.Column="1" AllowDrop="True" PreviewDragOver="InputTextBox_PreviewDragOver" Drop="InputTextBox_Drop">

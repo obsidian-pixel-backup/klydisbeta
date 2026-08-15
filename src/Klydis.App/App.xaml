@@ -14,18 +14,23 @@
                 <ResourceDictionary Source="Themes/Backgrounds/OceanDark.xaml" />
                 <ResourceDictionary Source="Themes/Accents/FluorescentDark.xaml" />
                 <ResourceDictionary Source="Themes/ThemeStyles.xaml" />
+                <!-- Index 3: typography (font family/weight/style), hot-swapped by ThemeService. -->
+                <ResourceDictionary Source="Themes/Typography.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <converters:EnumToBooleanConverter x:Key="EnumToBooleanConverter" />
             <converters:BoolToColorConverter x:Key="BoolToColorConverter" />
             <converters:RoleToVisibilityConverter x:Key="RoleToVisibilityConverter" />
             <converters:StringToVisibilityConverter x:Key="StringToVisibilityConverter" />
+            <converters:StringEmptyToVisibilityConverter x:Key="StringEmptyToVisibilityConverter" />
             <converters:BoolToVisConverter x:Key="BoolToVisConverter" />
             <converters:InverseBoolToVisConverter x:Key="InverseBoolToVisConverter" />
             <converters:BoolToVisConverter x:Key="BooleanToVisibilityConverter" />
             <converters:InverseBoolToVisConverter x:Key="InverseBooleanToVisibilityConverter" />
             <converters:InverseBooleanConverter x:Key="InverseBooleanConverter" />
             <converters:PercentToDashOffsetConverter x:Key="PercentToDashOffsetConverter" />
+            <converters:SeverityToBrushConverter x:Key="SeverityToBrushConverter" />
+            <converters:ZeroToCollapsedConverter x:Key="ZeroToCollapsedConverter" />
             
             <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
                 <Setter Property="Width" Value="7"/>

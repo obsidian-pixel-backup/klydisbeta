@@ -11,6 +11,11 @@ using Microsoft.Extensions.Logging;
 
 namespace Klydis.App.ViewModels
 {
+    /// <summary>
+    /// A selectable search-scope option: either "All collections" or one specific workspace.
+    /// </summary>
+    public record CollectionFilterOption(string Label, string? Id);
+
     public partial class RagViewModel : ObservableObject, IDisposable
     {
         private readonly VectorStore _vectorStore;
@@ -44,9 +49,16 @@ namespace Klydis.App.ViewModels
         private string _searchQuery = string.Empty;
 
         [ObservableProperty]
-        private VectorCollectionRecord? _selectedCollection;
+        private CollectionFilterOption? _selectedCollectionFilter;
+
+        [ObservableProperty]
+        private bool _hasCollections;
+
+        [ObservableProperty]
+        private bool _hasSearchResults;
 
         public ObservableCollection<VectorCollectionRecord> Collections { get; } = new();
+        public ObservableCollection<CollectionFilterOption> CollectionFilters { get; } = new();
         public ObservableCollection<HybridSearchResult> SearchResults { get; } = new();
 
         public RagViewModel(
@@ -89,9 +101,21 @@ namespace Klydis.App.ViewModels
                 {
                     Collections.Add(col);
                 }
-
                 TotalVectorChunks = _vectorStore.GetTotalChunkCount();
                 TotalIndexedDocuments = Collections.Count;
+                HasCollections = Collections.Count > 0;
+
+                // Rebuild the search filter list, preserving the current selection when it
+                // still exists (e.g. after a refresh); otherwise fall back to "All collections".
+                string? previousId = SelectedCollectionFilter?.Id;
+                CollectionFilters.Clear();
+                CollectionFilters.Add(new CollectionFilterOption("All collections", null));
+                foreach (var col in Collections)
+                {
+                    CollectionFilters.Add(new CollectionFilterOption(col.Name, col.Id));
+                }
+                SelectedCollectionFilter = CollectionFilters.FirstOrDefault(f => f.Id == previousId)
+                    ?? CollectionFilters[0];
             }
             catch (Exception ex)
             {
@@ -150,6 +174,15 @@ namespace Klydis.App.ViewModels
 
                 ProgressMessage = $"Indexing complete! Created {chunksIndexed} vector chunks.";
                 await LoadCollectionsAsync();
+
+                // Auto-select the freshly indexed workspace in the search filter so the user
+                // can immediately probe its content.
+                var fresh = CollectionFilters.FirstOrDefault(f =>
+                    string.Equals(f.Label, name, StringComparison.OrdinalIgnoreCase) && f.Id != null);
+                if (fresh != null)
+                {
+                    SelectedCollectionFilter = fresh;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -198,7 +231,7 @@ namespace Klydis.App.ViewModels
 
             try
             {
-                string? filterId = SelectedCollection?.Id;
+                string? filterId = SelectedCollectionFilter?.Id;
                 var results = await _hybridRetriever.SearchAsync(SearchQuery, topK: 5, collectionIdFilter: filterId);
 
                 SearchResults.Clear();
@@ -206,8 +239,11 @@ namespace Klydis.App.ViewModels
                 {
                     SearchResults.Add(res);
                 }
+                HasSearchResults = SearchResults.Count > 0;
 
-                ProgressMessage = $"Found {results.Count} matching context chunks via RRF Hybrid Search.";
+                ProgressMessage = HasSearchResults
+                    ? $"Found {results.Count} matching context chunks in '{SelectedCollectionFilter?.Label ?? "all workspaces"}'."
+                    : $"No matching chunks found in '{SelectedCollectionFilter?.Label ?? "all workspaces"}' — try different wording or index more content.";
             }
             catch (Exception ex)
             {

@@ -5,9 +5,10 @@
          brush keys via DynamicResource only, so ThemeService can hot-swap the active
          palette (see App.xaml) without this dictionary needing to be reloaded. -->
 
-    <!-- Typography -->
-    <FontFamily x:Key="AppFontFamily">Segoe UI Variable, Segoe UI, sans-serif</FontFamily>
-    
+    <!-- Typography lives in Themes/Typography.xaml (merged after this dictionary) so
+         ThemeService can hot-swap AppFontFamily/AppFontWeight/AppFontStyle at runtime.
+         All references below are DynamicResource so the swap propagates live. -->
+
     <!-- Shared Animation -->
     <Storyboard x:Key="FadeIn">
         <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.2"/>
@@ -25,7 +26,11 @@
     <Style x:Key="KlydisWindow" TargetType="Window">
         <Setter Property="Background" Value="{DynamicResource WindowBackgroundBrush}"/>
         <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
+        <!-- Global font weight/style: inherited by all text that does not set its own,
+             so picking Bold/Italic/etc. restyles the whole app. -->
+        <Setter Property="FontWeight" Value="{DynamicResource AppFontWeight}"/>
+        <Setter Property="FontStyle" Value="{DynamicResource AppFontStyle}"/>
         <Setter Property="WindowStyle" Value="None"/>
         <Setter Property="AllowsTransparency" Value="True"/>
         <Setter Property="FontSize" Value="13"/>
@@ -49,7 +54,7 @@
     <Style x:Key="PrimaryButton" TargetType="Button">
         <Setter Property="Background" Value="{DynamicResource AccentPrimaryBrush}"/>
         <Setter Property="Foreground" Value="{DynamicResource TextInverse}"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Padding" Value="16,8"/>
         <Setter Property="Cursor" Value="Hand"/>
@@ -126,7 +131,7 @@
         <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
         <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
         <Setter Property="Padding" Value="16,8"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
@@ -202,7 +207,7 @@
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="6,3"/>
         <Setter Property="Cursor" Value="Hand"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
         <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
         <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
         <Setter Property="RenderTransform">
@@ -345,7 +350,7 @@
         <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="10,8"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
         <Setter Property="CaretBrush" Value="{DynamicResource TextPrimaryBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -449,7 +454,7 @@
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="8,5"/>
         <Setter Property="FontSize" Value="11.5"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
         <Setter Property="HasDropShadow" Value="False"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -577,7 +582,7 @@
         <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="10,8"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ComboBox">
@@ -686,7 +691,7 @@
         <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
         <Setter Property="Padding" Value="12,8"/>
         <Setter Property="FontSize" Value="13"/>
-        <Setter Property="FontFamily" Value="{StaticResource AppFontFamily}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Template">
             <Setter.Value>

@@ -18,6 +18,7 @@ public partial class ChatView : UserControl
 {
     private ScrollViewer? _scrollViewer;
     private bool _shouldAutoScrollToBottom = true;
+    private ChatSidePanelViewModel? _sidePanel;
 
     // Velocity-based (inertia) smooth scroll, driven by CompositionTarget.Rendering.
     // A real mouse wheel fires a burst of several notches within ~100-200ms; restarting
@@ -50,6 +51,15 @@ public partial class ChatView : UserControl
         GetMainScrollViewer();
         _shouldAutoScrollToBottom = true;
         ScrollToBottom(force: true);
+    }
+
+    private void ChatSettingsButton_Click(object sender, RoutedEventArgs e)
+    {
+        // PlacementTarget is set here rather than via an ElementName binding in XAML:
+        // Popup content lives in a separate visual tree, where ElementName lookups are
+        // unreliable. The button is guaranteed non-null (the click originates from it).
+        ChatSettingsPopup.PlacementTarget = ChatSettingsButton;
+        ChatSettingsPopup.IsOpen = !ChatSettingsPopup.IsOpen;
     }
 
     private void ChatView_PreviewMouseDown(object sender, MouseButtonEventArgs e)
@@ -85,6 +95,7 @@ public partial class ChatView : UserControl
             {
                 msg.PropertyChanged -= Message_PropertyChanged;
             }
+            DetachSidePanel(oldVm);
         }
 
         if (e.NewValue is ChatViewModel newVm)
@@ -95,9 +106,58 @@ public partial class ChatView : UserControl
             {
                 msg.PropertyChanged += Message_PropertyChanged;
             }
+            AttachSidePanel(newVm);
             _shouldAutoScrollToBottom = true;
             ScrollToBottom(force: true);
         }
+    }
+
+    // The right-side panel's column width and splitter follow SidePanel.IsPanelOpen; a
+    // collapsed (width 0) column would otherwise still reserve 360px of layout space.
+    private void AttachSidePanel(ChatViewModel vm)
+    {
+        _sidePanel = vm.SidePanel;
+        _sidePanel.PropertyChanged += SidePanel_PropertyChanged;
+        UpdateSidePanelVisibility();
+        UpdateSessionSidebarVisibility();
+    }
+
+    private void DetachSidePanel(ChatViewModel vm)
+    {
+        if (_sidePanel != null)
+        {
+            _sidePanel.PropertyChanged -= SidePanel_PropertyChanged;
+            _sidePanel = null;
+        }
+    }
+
+    private void SidePanel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ChatSidePanelViewModel.IsPanelOpen))
+        {
+            UpdateSidePanelVisibility();
+        }
+    }
+
+    private void UpdateSidePanelVisibility()
+    {
+        bool open = _sidePanel?.IsPanelOpen == true;
+        // MinWidth must follow too: WPF clamps a fixed column's final size to its MinWidth,
+        // so a 0-width column with MinWidth=280 would still occupy 280px of layout space.
+        SidePanelColumn.MinWidth = open ? 280 : 0;
+        SidePanelColumn.Width = open ? new GridLength(360) : new GridLength(0);
+        SidePanelHost.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        SidePanelSplitter.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // Left session-sidebar collapse: same pattern as the right panel — the column's width
+    // and MinWidth both drop to 0 when the chat list is hidden, and the splitter disappears.
+    private void UpdateSessionSidebarVisibility()
+    {
+        bool open = DataContext is ChatViewModel vm && vm.IsSessionSidebarOpen;
+        SessionSidebarColumn.MinWidth = open ? 150 : 0;
+        SessionSidebarColumn.Width = open ? new GridLength(250) : new GridLength(0);
+        SessionSidebarSplitter.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void Vm_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -106,6 +166,10 @@ public partial class ChatView : UserControl
         {
             _shouldAutoScrollToBottom = true;
             ScrollToBottom(force: true);
+        }
+        else if (e.PropertyName == nameof(ChatViewModel.IsSessionSidebarOpen))
+        {
+            UpdateSessionSidebarVisibility();
         }
     }
 

@@ -191,6 +191,25 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public bool LastGenerationHitMaxTokens { get; private set; }
 
     /// <summary>
+    /// True when the previous generation was aborted BEFORE decoding because the prompt already
+    /// filled the context window (recurrent architectures complete empty instead of overflowing
+    /// the native cache). ChatEngine must distinguish this from a genuinely degenerate model
+    /// output: injecting an empty-response correction here would GROW the prompt and make the
+    /// failure worse, when the only working remedies are context compression or a smaller prompt.
+    /// </summary>
+    public bool LastGenerationPromptFilledWindow { get; private set; }
+
+    /// <summary>
+    /// True when the most recent generation ended WITHOUT producing output because it was
+    /// cancelled (model switch/unload, user stop, or session teardown) rather than because the
+    /// model degenerated. Read after the token stream ends. ChatEngine must NOT treat a
+    /// cancelled-before-decode stream as a genuine empty response: injecting self-corrections
+    /// against an in-flight model load just rebuilds the context and re-triggers the cancel —
+    /// the observed "empty response self-correcting" banner storm during model alternation.
+    /// </summary>
+    public bool LastGenerationWasCancelled { get; private set; }
+
+    /// <summary>
     /// Raw GGUF chat template string if present.
     /// </summary>
     public string? RawChatTemplate { get; private set; }
@@ -889,6 +908,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 {
                     _logger.LogWarning("Prompt ({PromptTokens} tokens) already fills the recurrent context window ({Window}). Completing this generation empty; context compression must reduce the prompt.",
                         promptTokenCount, window);
+                    // Expose the cause to the caller (ChatEngine): this is NOT a degenerate model
+                    // output — the prompt itself cannot fit. Without this flag ChatEngine's
+                    // empty-response self-correction injects a correction message (growing the
+                    // prompt) and retries, which keeps failing identically — the observed
+                    // "Model produced an empty response — self-correcting…" banner loop.
+                    LastGenerationPromptFilledWindow = true;
 
                     var emptyTelemetry = new InferenceTelemetry(
                         RequestId: Guid.NewGuid().ToString("N"),
@@ -923,9 +948,13 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             // Reset the per-generation flags so stale state from a previous generation can
             // never leak into this one. LastGenerationLoopInfo is set (chat path only) when
             // GenerationLoopDetector fires; LastGenerationHitMaxTokens is set when the output
-            // budget is exhausted.
+            // budget is exhausted; LastGenerationPromptFilledWindow is set when the recurrent
+            // prompt fills the window and generation completes empty; LastGenerationWasCancelled
+            // is set when the stream ended early because the generation was cancelled.
             LastGenerationLoopInfo = null;
             LastGenerationHitMaxTokens = false;
+            LastGenerationPromptFilledWindow = false;
+            LastGenerationWasCancelled = false;
 
             Channel<Action>? eventChannel = null;
             Task? eventDispatcherTask = null;
@@ -1330,11 +1359,28 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 }
                 finally
                 {
+                    // Cancellation (model switch, user stop, teardown) aborts the stream before
+                    // it completes. Expose that to the caller so an empty cancelled stream is not
+                    // mistaken for a degenerate model output — ChatEngine must not fire the
+                    // empty-response correction cascade against an in-flight model load (each
+                    // correction rebuilds the context, re-triggering the cancel).
+                    LastGenerationWasCancelled = !completedNormally && generationToken.IsCancellationRequested;
+
+                    // A generation that failed/canceled BEFORE decoding a single token did not
+                    // dirty the context: it is still in the same clean state it was in after the
+                    // start-of-generation reset (or still holds the untouched prefix cache).
+                    // Resetting again is a full context dispose + recreate (on recurrent
+                    // architectures like qwen35 that cannot use the fast KV clear) with zero
+                    // benefit — the observed "alternating models / not loading" death spiral was
+                    // exactly this: a failed empty generation reset the context, the queue
+                    // auto-processed the next message, which reset again, forever. Skip the
+                    // rebuild when nothing was decoded; the next generation's prefix check
+                    // handles genuinely dirty caches.
                     if (isIsolated)
                     {
                         ResetContextInternal();
                     }
-                    else if (!completedNormally)
+                    else if (!completedNormally && tokenCount > 0)
                     {
                         ResetContextInternal();
                     }

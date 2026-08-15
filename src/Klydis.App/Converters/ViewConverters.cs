@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
+using System.Windows.Media;
 
 namespace Klydis.App.Converters;
 
@@ -74,4 +75,51 @@ public class InverseBooleanConverter : IValueConverter
     {
         return value is bool b ? !b : true;
     }
+}
+
+/// <summary>
+/// Visible when the bound string is empty/null, collapsed when it has content — the inverse
+/// of <see cref="StringToVisibilityConverter"/>. Used for text-box watermarks/placeholders.
+/// </summary>
+public class StringEmptyToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        return string.IsNullOrWhiteSpace(value?.ToString()) ? Visibility.Visible : Visibility.Collapsed;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+/// <summary>
+/// Collapsed when the bound numeric value is 0 (or null), Visible otherwise. Used to hide
+/// empty sections (e.g. no drives detected) without a code-behind bool.
+/// </summary>
+public class ZeroToCollapsedConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        double n = value is double d ? d : double.TryParse(value?.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var p) ? p : 0;
+        return n > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+/// <summary>
+/// Maps a severity string ("Normal" / "Warning" / "Critical") to the matching themed brush
+/// so monitor values can be colored amber/red at a glance.
+/// </summary>
+public class SeverityToBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        string severity = value?.ToString() ?? "Normal";
+        var app = System.Windows.Application.Current;
+        return severity switch
+        {
+            "Critical" => app?.TryFindResource("ErrorBrush") as Brush ?? Brushes.Red,
+            "Warning" => app?.TryFindResource("WarningBrush") as Brush ?? Brushes.Gold,
+            _ => app?.TryFindResource("TextPrimaryBrush") as Brush ?? Brushes.White
+        };
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
 }

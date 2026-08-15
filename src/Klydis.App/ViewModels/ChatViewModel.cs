@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Klydis.App.Services;
 using Klydis.Core.Chat;
 using Klydis.Core.Diagnostics;
 
@@ -31,6 +32,28 @@ public partial class SessionInfo : ObservableObject
 
     [ObservableProperty]
     private bool _isEditingTitle;
+
+    /// <summary>
+    /// True while the model is actively processing a request in this session — drives the
+    /// working indicator on the chat's sidebar item and header so the user can see which
+    /// chat the model is working on (including when they have switched to another chat).
+    /// </summary>
+    [ObservableProperty]
+    private bool _isWorking;
+
+    /// <summary>
+    /// Short human-readable status shown next to the working indicator, e.g. "Thinking…",
+    /// "Running tool: search_web", "Tool finished".
+    /// </summary>
+    [ObservableProperty]
+    private string _workingStatusText = string.Empty;
+
+    /// <summary>
+    /// Display name of the model currently processing this session (used for tooltips and
+    /// the "working elsewhere" notice).
+    /// </summary>
+    [ObservableProperty]
+    private string _workingModel = string.Empty;
 }
 
 /// <summary>
@@ -46,6 +69,17 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private bool _userExplicitlyUnloaded;
     private bool _isProcessingQueue;
     private EventHandler? _queueChangedHandler;
+
+    // The id of the session whose transcript is currently held in <see cref="Messages"/>.
+    // Used to snapshot a generating session's live transcript when the user switches away
+    // from it (at that point SelectedSession has already moved on, so the old session can't
+    // be identified from the selection alone).
+    private string? _displayedSessionId;
+
+    // Live transcript snapshot of the session whose generation is in flight, captured when
+    // the user switches away. Switching back to that chat restores this snapshot (the partial
+    // assistant text is not persisted until the turn ends, so a DB reload would show a gap).
+    private readonly Dictionary<string, List<ChatMessageViewModel>> _sessionTranscriptCache = new();
 
     // Session switching is serialized: rapid chat clicks cannot interleave two loads, a stale
     // (superseded) load never becomes the engine's active session, and a message sent right
@@ -72,6 +106,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private string _selectedModelId = string.Empty;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CurrentSettingsSummary))]
     private RiskLevel _selectedRiskLevel;
 
     [ObservableProperty]
@@ -79,6 +114,27 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private SessionInfo? _selectedSession;
+
+    /// <summary>
+    /// Right-side chat panel (queue / files / changes / preview / terminal / notes). Owned here
+    /// so it follows the selected session; the panel's view keeps ChatViewModel as its
+    /// DataContext so queue commands and message bindings keep working unchanged.
+    /// </summary>
+    public ChatSidePanelViewModel SidePanel { get; }
+
+    /// <summary>
+    /// True when the model is generating in a DIFFERENT chat than the one currently shown.
+    /// Drives a banner over the input so a "frozen" chat is explained instead of silently
+    /// queueing the user's next message behind an invisible background generation.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isWorkingElsewhere;
+
+    /// <summary>
+    /// Human-readable "working elsewhere" notice (which chat/model is busy).
+    /// </summary>
+    [ObservableProperty]
+    private string _workingElsewhereText = string.Empty;
 
     private TaskCompletionSource<bool>? _approvalTcs;
 
@@ -107,7 +163,31 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private string _alertMessage = string.Empty;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CurrentSettingsSummary))]
     private QueuedMessageMode _selectedQueueMode = QueuedMessageMode.Steer;
+
+    /// <summary>
+    /// Active personality mode for the chat (from UserStyle_Modes.md). Applied to the engine
+    /// in real time — the next generation uses it immediately.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CurrentSettingsSummary))]
+    private string _selectedPersonality = "Default";
+
+    /// <summary>
+    /// One-line summary of the current chat settings for the inline settings menu button,
+    /// e.g. "Standard · Steer · Default".
+    /// </summary>
+    public string CurrentSettingsSummary => $"{SelectedRiskLevel} · {SelectedQueueMode} · {SelectedPersonality}";
+
+    /// <summary>
+    /// True when the left session-sidebar (chat list) is expanded. Drives the collapse/expand
+    /// chevron in the chat header and the sidebar column width.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isSessionSidebarOpen = true;
+
+    public ObservableCollection<string> AvailablePersonalities { get; } = new();
 
     [ObservableProperty]
     private bool _hasQueuedMessages;
@@ -132,6 +212,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private readonly ToolExecutor _toolExecutor;
     private readonly ModelMessageQueue? _messageQueue;
     private readonly Klydis.Core.Skills.DynamicSkillSelector? _skillSelector;
+    private readonly ThemeService? _themeService;
     private readonly SemaphoreSlim _modelLoadGate = new(1, 1);
 
     public ChatViewModel(
@@ -144,7 +225,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         Klydis.Core.Memory.MessageStore messageStore,
         ToolExecutor toolExecutor,
         ModelMessageQueue? messageQueue = null,
-        Klydis.Core.Skills.DynamicSkillSelector? skillSelector = null)
+        Klydis.Core.Skills.DynamicSkillSelector? skillSelector = null,
+        ThemeService? themeService = null)
     {
         _chatEngine = chatEngine;
         _registry = registry;
@@ -156,6 +238,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         _toolExecutor = toolExecutor;
         _messageQueue = messageQueue;
         _skillSelector = skillSelector;
+        _themeService = themeService;
+
+        SidePanel = new ChatSidePanelViewModel(this, _messageStore, _toolExecutor);
 
         if (_messageQueue != null)
         {
@@ -169,6 +254,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         AvailableRiskLevels.Add(RiskLevel.Standard);
         AvailableRiskLevels.Add(RiskLevel.AutoPilot);
         SelectedRiskLevel = _toolExecutor.CurrentRiskLevel;
+
+        // Personality quick-switcher (UserStyle_Modes.md). Initialized from the persisted
+        // setting so the inline menu reflects what the engine is actually using.
+        foreach (var p in Klydis.Core.Chat.SystemPromptManager.GetAvailablePersonalities())
+        {
+            AvailablePersonalities.Add(p);
+        }
+        SelectedPersonality = _themeService?.SelectedPersonality ?? "Default";
+        if (AvailablePersonalities.Count > 0 && !AvailablePersonalities.Contains(SelectedPersonality))
+        {
+            SelectedPersonality = AvailablePersonalities[0];
+        }
         
         PendingAttachments.CollectionChanged += (_, _) => HasPendingAttachments = PendingAttachments.Count > 0;
 
@@ -180,6 +277,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        SidePanel?.Dispose();
         if (_messageQueue != null && _queueChangedHandler != null)
         {
             _messageQueue.QueueChanged -= _queueChangedHandler;
@@ -197,10 +295,21 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             IsModelReady = isLoaded;
             if (isLoaded && !string.IsNullOrEmpty(modelPath))
             {
-                var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.FilePath == modelPath);
-                if (modelInfo != null && SelectedModelId != modelInfo.DisplayName)
+                // Only sync the ComboBox when no user-initiated load is in flight. Otherwise
+                // every load completion writes SelectedModelId, which fires
+                // OnSelectedModelIdChanged -> LoadModelAsync -> ... -> another completion event,
+                // and the status bar/header flip between two model names forever (the observed
+                // "alternating between models" symptom, with six full weight loads in a row in
+                // the native log). While IsModelLoading is true the user's choice is what
+                // governs; the writeback only serves the ModelLibrary path that loads outside
+                // the chat ComboBox.
+                if (!IsModelLoading)
                 {
-                    SelectedModelId = modelInfo.DisplayName;
+                    var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.FilePath == modelPath);
+                    if (modelInfo != null && SelectedModelId != modelInfo.DisplayName)
+                    {
+                        SelectedModelId = modelInfo.DisplayName;
+                    }
                 }
             }
             else if (!isLoaded && !_userExplicitlyUnloaded)
@@ -322,6 +431,19 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
     }
 
+    partial void OnSelectedPersonalityChanged(string value)
+    {
+        string pName = string.IsNullOrWhiteSpace(value) ? "Default" : value;
+        _themeService?.SavePersonalitySetting(pName);
+        if (_chatEngine != null)
+        {
+            _chatEngine.SelectedPersonality = pName;
+        }
+        // Invalidate the KV cache so the next prompt rebuilds with the new personality
+        // directives (same behavior as the Settings page personality picker).
+        _inferenceEngine.ResetContext();
+    }
+
     private async Task InitializeSessionsAsync()
     {
         var dbSessions = await _messageStore.GetSessionsAsync();
@@ -363,6 +485,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (Sessions.Count > 0)
         {
             SelectedSession = Sessions[0];
+            _displayedSessionId = SelectedSession?.Id;
         }
         else
         {
@@ -866,6 +989,19 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         _generatingSessionId = localGeneratingSessionId;
         _generationCts = new CancellationTokenSource();
 
+        // Per-session working indicator: mark this chat as the one the model is working
+        // on, so the sidebar/header shows it even if the user switches away mid-turn.
+        if (localGeneratingSessionId != null)
+        {
+            var generatingSession = FindSession(localGeneratingSessionId);
+            if (generatingSession != null)
+            {
+                DispatcherSafe(() => { generatingSession.WorkingModel = string.IsNullOrWhiteSpace(SelectedModelId) ? "model" : SelectedModelId; });
+            }
+            UpdateSessionWorkingState(localGeneratingSessionId, true, "Working…");
+        }
+        UpdateWorkingElsewhereText();
+
         // Bubbles are created lazily and appended in the exact order events
         // arrive, so text, thinking and tool activity stay chronological even
         // when the engine runs multiple tool iterations.
@@ -873,6 +1009,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         ChatMessageViewModel? thoughtMessage = null;
         ToolCallViewModel? pendingToolCall = null;
         var fullAssistantText = new StringBuilder();
+        // A turn "produced output" when it yielded visible text OR executed at least one tool
+        // call (tool bubbles are real output even if the model wrote no final text). Gating the
+        // queue auto-processing on this — instead of only on visible text — keeps legit
+        // tool-driven turns chaining queued work while still halting the empty-response spiral.
+        bool turnProducedOutput = false;
 
         // The generating indicator lives in the transcript as the always-last
         // item, where the response will materialize — not pinned above the input.
@@ -1048,6 +1189,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     switch (evt.Type)
                     {
                         case ChatStreamEventType.Token:
+                            turnProducedOutput = true;
                             fullAssistantText.Append(evt.Content);
                             pendingVisibleText.Append(evt.Content);
                             // Flush in chunks to bound Dispatcher hops; the rest lands at
@@ -1058,6 +1200,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             }
                             break;
                         case ChatStreamEventType.ThinkingStart:
+                            UpdateSessionWorkingState(localGeneratingSessionId, true, "Thinking…");
                             FlushAllPendingText();
                             OnUi(() =>
                             {
@@ -1104,6 +1247,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             });
                             break;
                         case ChatStreamEventType.MemorySummarizing:
+                            UpdateSessionWorkingState(localGeneratingSessionId, true, "Summarizing context…");
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
@@ -1119,6 +1263,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             });
                             break;
                         case ChatStreamEventType.ToolCall:
+                            turnProducedOutput = true;
+                            UpdateSessionWorkingState(localGeneratingSessionId, true, $"Running tool: {evt.Content}");
                             FlushAllPendingText();
                             OnUi(() =>
                             {
@@ -1180,6 +1326,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             });
                             break;
                         case ChatStreamEventType.ToolResult:
+                            UpdateSessionWorkingState(localGeneratingSessionId, true, "Tool finished");
                             OnUi(() =>
                             {
                                 if (pendingToolCall != null)
@@ -1320,6 +1467,22 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             _generationCts?.Dispose();
             _generationCts = null;
 
+            // Clear the per-session working indicator and the live-transcript snapshot.
+            if (localGeneratingSessionId != null)
+            {
+                _sessionTranscriptCache.Remove(localGeneratingSessionId);
+            }
+            UpdateSessionWorkingState(localGeneratingSessionId, false, null);
+
+            // If the turn completed while the user was viewing another chat, the engine's
+            // in-memory cached history for this session may be a stale DB snapshot (taken
+            // mid-generation by a switch-back load). Converge it with the store so the model
+            // never answers this chat's next message without the finished turn in context.
+            if (!isCancelled && _chatEngine != null && localGeneratingSessionId != null)
+            {
+                FireAndForget.Observe(_chatEngine.ResyncSessionHistoryFromStoreAsync(localGeneratingSessionId), operation: "ResyncSessionHistoryFromStore");
+            }
+
             // Auto-rename chat if it is the first interaction
             var responseText = fullAssistantText.ToString();
             if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId && SessionTitle == "New Chat" && Messages.Count >= 2 && !string.IsNullOrWhiteSpace(responseText))
@@ -1339,8 +1502,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 }, operation: "GenerateTitleAsync");
             }
 
-            // If generation was not explicitly cancelled, auto-process next queued message
-            if (!isCancelled)
+            // If generation was not explicitly cancelled AND the turn actually produced output
+            // (visible text or an executed tool call), auto-process the next queued message.
+            // Gating on produced output is what stops the observed death spiral: a model that
+            // keeps producing EMPTY responses (qwen35 recurrent window-full) fails every turn,
+            // and auto-feeding the next of 64 queued messages into it turns a bounded per-turn
+            // correction budget into an unbounded full-context-rebuild loop until the app dies.
+            // A failed turn surfaces its error to the user instead of silently churning the queue.
+            if (!isCancelled && turnProducedOutput)
             {
                 ProcessNextQueuedMessageIfAvailable(localGeneratingSessionId);
             }
@@ -1597,6 +1766,75 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         DismissPendingApproval(false);
     }
 
+    private void DispatcherSafe(Action action)
+    {
+        if (System.Windows.Application.Current?.Dispatcher != null)
+        {
+            System.Windows.Application.Current.Dispatcher.InvokeAsync(action);
+        }
+        else
+        {
+            action();
+        }
+    }
+
+    private SessionInfo? FindSession(string? sessionId)
+        => Sessions.FirstOrDefault(s => s.Id == sessionId);
+
+    /// <summary>
+    /// Sets the per-session working indicator state. Always routed through the dispatcher
+    /// because stream events can arrive off the UI thread and SessionInfo is a bound
+    /// ObservableObject.
+    /// </summary>
+    private void UpdateSessionWorkingState(string? sessionId, bool working, string? status)
+    {
+        var session = FindSession(sessionId);
+        if (session == null) return;
+
+        DispatcherSafe(() =>
+        {
+            if (working)
+            {
+                session.IsWorking = true;
+                if (!string.IsNullOrWhiteSpace(status))
+                {
+                    session.WorkingStatusText = status;
+                }
+            }
+            else
+            {
+                session.IsWorking = false;
+                session.WorkingStatusText = string.Empty;
+            }
+            UpdateWorkingElsewhereText();
+        });
+    }
+
+    /// <summary>
+    /// Recomputes the "the model is working in another chat" banner state. Called whenever
+    /// generation starts/stops or the selected session changes.
+    /// </summary>
+    private void UpdateWorkingElsewhereText()
+    {
+        bool elsewhere = IsGenerating && _generatingSessionId != null && SelectedSession?.Id != _generatingSessionId;
+        if (elsewhere != IsWorkingElsewhere)
+        {
+            IsWorkingElsewhere = elsewhere;
+        }
+
+        if (elsewhere)
+        {
+            var session = FindSession(_generatingSessionId);
+            string model = !string.IsNullOrWhiteSpace(session?.WorkingModel) ? session!.WorkingModel : SelectedModelId;
+            string title = !string.IsNullOrWhiteSpace(session?.Title) ? session!.Title : "another chat";
+            WorkingElsewhereText = $"⏳ {model} is working in “{title}” — new messages here will be queued until it finishes.";
+        }
+        else if (!string.IsNullOrEmpty(WorkingElsewhereText))
+        {
+            WorkingElsewhereText = string.Empty;
+        }
+    }
+
     private void InsertSessionSorted(SessionInfo session)
     {
         int index = 0;
@@ -1622,6 +1860,33 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private async Task CreateNewSessionAsync()
     {
+        // Do not stack duplicate blank chats (observed: seven identical "New Chat" sidebar
+        // entries after spamming the + button). If a default-titled chat with no messages
+        // already exists — the one the user just made and abandoned, or the current one —
+        // select it instead of creating another. A chat is only "blank" when it has the
+        // default title AND zero persisted messages, so a chat the model is working in (a
+        // message was already sent/persisted) is never mistaken for one.
+        var existingBlank = Sessions.FirstOrDefault(s =>
+            string.Equals(s.Title?.Trim(), "New Chat", StringComparison.OrdinalIgnoreCase));
+        if (existingBlank != null)
+        {
+            try
+            {
+                int count = await _messageStore.GetMessageCountAsync(existingBlank.Id);
+                if (count == 0)
+                {
+                    // Setting SelectedSession triggers OnSelectedSessionChanged -> load; when
+                    // it is already the selected chat the setter is a no-op, which is fine.
+                    SelectedSession = existingBlank;
+                    return;
+                }
+            }
+            catch
+            {
+                // Store unavailable — fall through and create a fresh session.
+            }
+        }
+
         string title = "New Chat";
         string sessionId = await _messageStore.CreateSessionAsync(title, SelectedModelId);
         
@@ -1632,12 +1897,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             {
                 InsertSessionSorted(newSession);
                 SelectedSession = newSession;
+                _displayedSessionId = newSession.Id;
             });
         }
         else
         {
             InsertSessionSorted(newSession);
             SelectedSession = newSession;
+            _displayedSessionId = newSession.Id;
         }
     }
 
@@ -1666,9 +1933,22 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private async Task LoadSessionAsync(SessionInfo session, long seqId)
     {
         SessionTitle = session.Title;
+
+        // The user is switching away from the session whose generation is in flight: snapshot
+        // its live transcript BEFORE it is cleared, so returning to it restores the model's
+        // current state (partial assistant text is only persisted to the store when the turn
+        // ends). Keyed off _displayedSessionId because SelectedSession has already moved on.
+        if (_generatingSessionId != null &&
+            _displayedSessionId == _generatingSessionId &&
+            !_sessionTranscriptCache.ContainsKey(_generatingSessionId))
+        {
+            _sessionTranscriptCache[_generatingSessionId] = Messages.ToList();
+        }
+
         Messages.Clear();
         
         List<ChatMessage> chatEngineMessages;
+        var uiMessages = new List<ChatMessageViewModel>();
         try
         {
             var dbMessages = await _messageStore.GetMessagesAsync(session.Id, null);
@@ -1682,7 +1962,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     var (thinking, content) = SplitThinkingContent(msg.Content);
                     if (!string.IsNullOrEmpty(thinking))
                     {
-                        Messages.Add(new ChatMessageViewModel
+                        uiMessages.Add(new ChatMessageViewModel
                         {
                             Role = "thought",
                             Content = thinking,
@@ -1695,7 +1975,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     content = StripToolCallBlocks(content);
                     if (!string.IsNullOrWhiteSpace(content))
                     {
-                        Messages.Add(new ChatMessageViewModel
+                        uiMessages.Add(new ChatMessageViewModel
                         {
                             Role = "assistant",
                             Content = content,
@@ -1705,7 +1985,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 }
                 else
                 {
-                    Messages.Add(new ChatMessageViewModel
+                    uiMessages.Add(new ChatMessageViewModel
                     {
                         Role = roleStr,
                         Content = msg.Content,
@@ -1727,8 +2007,31 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         // Stale load: the user has since selected a different session — let that newer load win.
         if (seqId != Interlocked.Read(ref _sessionLoadSeq)) return;
 
+        // Returning to the chat the model is currently working on: restore the live in-flight
+        // transcript (with the typing indicator still in place) so the model's current state
+        // is shown the moment the user switches back, instead of a stale DB gap.
+        if (session.Id == _generatingSessionId && IsGenerating &&
+            _sessionTranscriptCache.TryGetValue(session.Id, out var liveTranscript) &&
+            liveTranscript.Count > 0)
+        {
+            foreach (var m in liveTranscript)
+            {
+                Messages.Add(m);
+            }
+        }
+        else
+        {
+            foreach (var m in uiMessages)
+            {
+                Messages.Add(m);
+            }
+        }
+        _displayedSessionId = session.Id;
+
         _chatEngine?.LoadHistory(chatEngineMessages, session.Id);
         RefreshQueueUI();
+        UpdateWorkingElsewhereText();
+        FireAndForget.Observe(SidePanel.OnSessionChangedAsync(session.Id), operation: nameof(SidePanel.OnSessionChangedAsync));
     }
 
     /// <summary>
@@ -1773,14 +2076,17 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         _messageQueue?.Clear(session.Id);
         await _messageStore.DeleteSessionAsync(session.Id);
         Sessions.Remove(session);
+        _sessionTranscriptCache.Remove(session.Id);
         if (Sessions.Count > 0)
         {
             SelectedSession = Sessions[0];
+            _displayedSessionId = SelectedSession?.Id;
         }
         else
         {
             await CreateNewSessionAsync();
         }
+        UpdateWorkingElsewhereText();
     }
 
     [RelayCommand]

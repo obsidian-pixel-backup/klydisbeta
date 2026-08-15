@@ -5,6 +5,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
              xmlns:services="clr-namespace:Klydis.App.Services"
+             xmlns:controls="clr-namespace:Klydis.App.Controls"
              mc:Ignorable="d"
              d:DesignHeight="800" d:DesignWidth="1000"
              Background="{DynamicResource PanelBackgroundBrush}">
@@ -396,6 +397,97 @@
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Custom colors: user-defined accent / background / font colors that
+                         override the active theme. Each picker also has a reset that returns
+                         control to the built-in theme color. -->
+                    <TextBlock Text="CUSTOM COLORS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,24,0,10"/>
+                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
+                        <StackPanel>
+                            <TextBlock Text="Pick your own colors for accents, background, and text. Changes apply instantly."
+                                       FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,16"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="12"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="12"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0" Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14">
+                                    <StackPanel>
+                                        <TextBlock Text="Accent color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                        <TextBlock Text="Buttons, highlights, links" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,10"/>
+                                        <controls:ColorPickerControl SelectedColor="{Binding CustomAccentColorHex, Mode=TwoWay}"/>
+                                        <Button Content="Reset to theme" Command="{Binding ResetCustomAccentColorCommand}"
+                                                Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4"
+                                                HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Grid.Column="2" Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14">
+                                    <StackPanel>
+                                        <TextBlock Text="Background color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                        <TextBlock Text="Windows, panels &amp; surfaces" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,10"/>
+                                        <controls:ColorPickerControl SelectedColor="{Binding CustomBackgroundColorHex, Mode=TwoWay}"/>
+                                        <Button Content="Reset to theme" Command="{Binding ResetCustomBackgroundColorCommand}"
+                                                Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4"
+                                                HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Grid.Column="4" Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14">
+                                    <StackPanel>
+                                        <TextBlock Text="Font / text color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                        <TextBlock Text="Primary text color" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,10"/>
+                                        <controls:ColorPickerControl SelectedColor="{Binding CustomFontColorHex, Mode=TwoWay}"/>
+                                        <Button Content="Reset to theme" Command="{Binding ResetCustomFontColorCommand}"
+                                                Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4"
+                                                HorizontalAlignment="Left" Margin="0,10,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Fonts & styles: app font family + global weight/style -->
+                    <TextBlock Text="FONTS &amp; STYLES" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,24,0,10"/>
+                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20">
+                        <StackPanel>
+                            <TextBlock Text="Choose the app font family and a global style. Bold / Italic restyle all text that doesn't set its own weight."
+                                       FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,16"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="220"/>
+                                    <ColumnDefinition Width="12"/>
+                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="Font family" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                    <ComboBox ItemsSource="{Binding AvailableFontFamilies}"
+                                              SelectedItem="{Binding SelectedFontFamily, Mode=TwoWay}"
+                                              FontSize="12.5" Padding="8,4"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="Style" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                    <ComboBox ItemsSource="{Binding AvailableFontStyles}"
+                                              SelectedItem="{Binding SelectedFontStyle, Mode=TwoWay}"
+                                              DisplayMemberPath="Label" FontSize="12.5" Padding="8,4"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="4" VerticalAlignment="Bottom">
+                                    <Button Content="Reset fonts" Command="{Binding ResetTypographyCommand}"
+                                            Style="{DynamicResource GhostButton}" FontSize="11" Padding="10,6"/>
+                                </StackPanel>
+                            </Grid>
+                            <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14,12" Margin="0,16,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="PREVIEW" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,8"/>
+                                    <TextBlock Text="The quick brown fox jumps over the lazy dog" FontSize="16" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                    <TextBlock Text="0123456789 · Klydis Desktop · ABCDEFGHIJKLMNOPQRSTUVWXYZ" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                     </Border>
                 </StackPanel>
