@@ -94,4 +94,6 @@ publish/
 .agents
 /tests
 .klydis
+.freebuff/
+
 
