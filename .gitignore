@@ -87,6 +87,11 @@ llama_native.log
 # Publish output
 publish/
 
+# SQLite runtime temporary files
+*.db-wal
+*.db-shm
+
 .agents
 /tests
 .klydis
+

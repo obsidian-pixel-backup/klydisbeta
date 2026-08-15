@@ -1,0 +1,11 @@
+[submodule "assets/skills/awesome-llm-skills"]
+	path = assets/skills/awesome-llm-skills
+	url = https://github.com/Prat011/awesome-llm-skills.git
+
+[submodule "assets/skills/nvidia-skills"]
+	path = assets/skills/nvidia-skills
+	url = https://github.com/NVIDIA/skills.git
+
+[submodule "third_party/LLamaSharp"]
+	path = third_party/LLamaSharp
+	url = https://github.com/SciSharp/LLamaSharp.git
