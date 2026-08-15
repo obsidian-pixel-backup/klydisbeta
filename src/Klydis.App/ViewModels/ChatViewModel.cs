@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Klydis.Core.Chat;
+using Klydis.Core.Diagnostics;
 
 namespace Klydis.App.ViewModels;
 
@@ -168,7 +169,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         RefreshModels();
         _registry.RegistryChanged += OnRegistryChanged;
         _inferenceEngine.ModelStateChanged += OnModelStateChanged;
-        _ = InitializeSessionsAsync();
+        FireAndForget.Observe(InitializeSessionsAsync(), operation: nameof(InitializeSessionsAsync));
     }
 
     public void Dispose()
@@ -433,17 +434,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
                     // Isolate speculative draft model attachment into background task so draft failures never break main model loading
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath);
-                        }
-                        catch (Exception draftEx)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"Speculative draft attachment failed: {draftEx}");
-                        }
-                    });
+                    FireAndForget.Run(
+                        () => _inferenceEngine.AttachSpeculativeDraftAsync(modelInfo.FilePath),
+                        operation: "AttachSpeculativeDraftAsync");
 
                     if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
@@ -484,18 +477,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     string nativeLog = "";
                     try
                     {
-                        if (System.IO.File.Exists("llama_native.log"))
+                        // Native log lives in %LOCALAPPDATA%\Klydis\logs (see KlydisLog).
+                        var tailText = Klydis.Core.Diagnostics.KlydisLog.ReadNativeLogTail();
+                        if (!string.IsNullOrWhiteSpace(tailText))
                         {
-                            using var fs = new System.IO.FileStream("llama_native.log", System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
-                            if (fs.Length > 0)
-                            {
-                                long offset = Math.Max(0, fs.Length - 4096);
-                                fs.Seek(offset, System.IO.SeekOrigin.Begin);
-                                using var reader = new System.IO.StreamReader(fs);
-                                var tailText = reader.ReadToEnd();
-                                var lines = tailText.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).TakeLast(10);
-                                nativeLog = "\n\nNative Log:\n" + string.Join("\n", lines);
-                            }
+                            var lines = tailText.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).TakeLast(10);
+                            nativeLog = "\n\nNative Log:\n" + string.Join("\n", lines);
                         }
                     }
                     catch { }
@@ -936,6 +923,79 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             }
         }
 
+        // ── Streaming UI batching ──────────────────────────────────────────────
+        // Per-token Dispatcher hops + `Content += token` string concatenation are O(n^2)
+        // on the UI thread and a hop per token. Accumulate into local builders and flush
+        // in chunks (or at every event boundary / stream end) instead.
+        var pendingVisibleText = new StringBuilder();
+        var pendingThoughtText = new StringBuilder();
+
+        void FlushVisibleText()
+        {
+            if (pendingVisibleText.Length == 0) return;
+            string chunk = pendingVisibleText.ToString();
+            pendingVisibleText.Clear();
+            OnUi(() =>
+            {
+                if (thoughtMessage != null)
+                {
+                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
+                    {
+                        Messages.Remove(thoughtMessage);
+                    }
+                    else
+                    {
+                        thoughtMessage.IsThinkingExpanded = false;
+                    }
+                    thoughtMessage = null;
+                }
+                if (assistantMessage == null)
+                {
+                    assistantMessage = new ChatMessageViewModel
+                    {
+                        Role = "assistant",
+                        Content = string.Empty,
+                        IsStreaming = true,
+                        Timestamp = DateTime.Now
+                    };
+                    AppendMessage(assistantMessage);
+                }
+                assistantMessage.Content += chunk;
+            });
+        }
+
+        void FlushThoughtText()
+        {
+            if (pendingThoughtText.Length == 0) return;
+            string chunk = pendingThoughtText.ToString();
+            pendingThoughtText.Clear();
+            OnUi(() =>
+            {
+                if (thoughtMessage == null)
+                {
+                    CloseAssistantBubble();
+                    thoughtMessage = new ChatMessageViewModel
+                    {
+                        Role = "thought",
+                        Content = string.Empty,
+                        IsStreaming = true,
+                        IsThinkingExpanded = true,
+                        Timestamp = DateTime.Now
+                    };
+                    AppendMessage(thoughtMessage);
+                }
+                thoughtMessage.Content += chunk;
+            });
+        }
+
+        // Flush both pending buffers, forcing any partial text to the UI before a
+        // non-text event (tag transitions, tool calls, errors, stream end).
+        void FlushAllPendingText()
+        {
+            FlushVisibleText();
+            FlushThoughtText();
+        }
+
         try
         {
             if (_chatEngine != null)
@@ -979,35 +1039,16 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     {
                         case ChatStreamEventType.Token:
                             fullAssistantText.Append(evt.Content);
-                            OnUi(() =>
+                            pendingVisibleText.Append(evt.Content);
+                            // Flush in chunks to bound Dispatcher hops; the rest lands at
+                            // the next event boundary or stream end.
+                            if (pendingVisibleText.Length >= 200)
                             {
-                                if (thoughtMessage != null)
-                                {
-                                    if (string.IsNullOrWhiteSpace(thoughtMessage.Content))
-                                    {
-                                        Messages.Remove(thoughtMessage);
-                                    }
-                                    else
-                                    {
-                                        thoughtMessage.IsThinkingExpanded = false;
-                                    }
-                                    thoughtMessage = null;
-                                }
-                                if (assistantMessage == null)
-                                {
-                                    assistantMessage = new ChatMessageViewModel
-                                    {
-                                        Role = "assistant",
-                                        Content = string.Empty,
-                                        IsStreaming = true,
-                                        Timestamp = DateTime.Now
-                                    };
-                                    AppendMessage(assistantMessage);
-                                }
-                                assistantMessage.Content += evt.Content;
-                            });
+                                FlushVisibleText();
+                            }
                             break;
                         case ChatStreamEventType.ThinkingStart:
+                            FlushAllPendingText();
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
@@ -1028,25 +1069,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             });
                             break;
                         case ChatStreamEventType.ThinkingToken:
-                            OnUi(() =>
+                            pendingThoughtText.Append(evt.Content);
+                            if (pendingThoughtText.Length >= 200)
                             {
-                                if (thoughtMessage == null)
-                                {
-                                    CloseAssistantBubble();
-                                    thoughtMessage = new ChatMessageViewModel
-                                    {
-                                        Role = "thought",
-                                        Content = string.Empty,
-                                        IsStreaming = true,
-                                        IsThinkingExpanded = true,
-                                        Timestamp = DateTime.Now
-                                    };
-                                    AppendMessage(thoughtMessage);
-                                }
-                                thoughtMessage.Content += evt.Content;
-                            });
+                                FlushThoughtText();
+                            }
                             break;
                         case ChatStreamEventType.ThinkingEnd:
+                            FlushAllPendingText();
                             OnUi(() =>
                             {
                                 if (thoughtMessage != null)
@@ -1079,6 +1109,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             });
                             break;
                         case ChatStreamEventType.ToolCall:
+                            FlushAllPendingText();
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
@@ -1155,6 +1186,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             });
                             break;
                         case ChatStreamEventType.Error:
+                            FlushAllPendingText();
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
@@ -1186,6 +1218,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             });
                             break;
                         case ChatStreamEventType.StreamEnd:
+                            FlushAllPendingText();
                             OnUi(() =>
                             {
                                 if (thoughtMessage != null)
@@ -1248,6 +1281,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
         finally
         {
+            // Flush any text still buffered in the chunked UI updates before the
+            // bubbles are closed/settled below.
+            FlushAllPendingText();
+
             if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
                 OnUi(() =>
@@ -1277,7 +1314,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             var responseText = fullAssistantText.ToString();
             if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId && SessionTitle == "New Chat" && Messages.Count >= 2 && !string.IsNullOrWhiteSpace(responseText))
             {
-                _ = Task.Run(async () =>
+                FireAndForget.Run(async () =>
                 {
                     var newTitle = CleanTitle(await _chatEngine!.GenerateTitleAsync(userMessage, responseText));
                     if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat" && SelectedSession?.Id == localGeneratingSessionId)
@@ -1289,7 +1326,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                         });
                         await _messageStore.UpdateSessionAsync(SelectedSession.Id, newTitle, null, null, null);
                     }
-                });
+                }, operation: "GenerateTitleAsync");
             }
 
             // If generation was not explicitly cancelled, auto-process next queued message

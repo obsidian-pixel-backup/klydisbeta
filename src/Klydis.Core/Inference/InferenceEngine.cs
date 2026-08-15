@@ -152,6 +152,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public GenerationLoopInfo? LastGenerationLoopInfo { get; private set; }
 
     /// <summary>
+    /// True when the most recent chat-path generation stopped because it exhausted its
+    /// MaxTokens output budget (the stream was cut at the cap, not by a stop token, user
+    /// cancellation, or the degenerate-loop detector). ChatEngine reads this after the token
+    /// stream ends to decide whether an auto-continuation is warranted — a response that
+    /// ends cleanly at the cap (even with a final period) is still truncated.
+    /// </summary>
+    public bool LastGenerationHitMaxTokens { get; private set; }
+
+    /// <summary>
     /// Raw GGUF chat template string if present.
     /// </summary>
     public string? RawChatTemplate { get; private set; }
@@ -194,6 +203,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     private INativeResourceDisposer? _nativeResourceDisposer;
 
     /// <summary>
+    /// True when the current load pinned the process to P-cores (CPU-only execution); the
+    /// affinity is restored in <see cref="UnloadModelInternal"/>.
+    /// </summary>
+    private bool _pCoreAffinityApplied;
+
+    /// <summary>
     /// Gets or sets the native resource disposer for offloading VRAM/handle cleanup off the UI thread.
     /// </summary>
     public INativeResourceDisposer? NativeResourceDisposer
@@ -225,12 +240,26 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
     private void SafeOffloadDisposal(params IDisposable?[] resources)
     {
-        var ordered = resources.Where(r => r != null)
-                               .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
-        foreach (var r in ordered)
+        // Native CUDA handle release (LLamaContext / LLamaWeights) can take hundreds of ms.
+        // Never run it on the calling thread: route it through the background disposer when
+        // registered, otherwise fall back to a fire-and-forget threadpool dispose. Callers
+        // that need the resources gone before proceeding (e.g. LoadModelAsync) drain the
+        // disposer explicitly via DrainAsync before allocating new native state.
+        if (_nativeResourceDisposer != null)
         {
-            try { r?.Dispose(); } catch { }
+            _nativeResourceDisposer.EnqueueForDisposal(resources);
+            return;
         }
+
+        var items = resources.Where(r => r != null).Select(r => r!).ToArray();
+        if (items.Length == 0) return;
+        Task.Run(() =>
+        {
+            foreach (var r in items)
+            {
+                try { r.Dispose(); } catch { }
+            }
+        });
     }
 
     /// <summary>
@@ -302,6 +331,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 if (offloadPlan.GpuLayers == 0)
                 {
                     Hardware.CpuAffinityHelper.ApplyPCoreAffinityToProcess();
+                    _pCoreAffinityApplied = true;
                 }
 
                 var metadata = Models.GgufMetadataReader.Parse(modelPath);
@@ -470,8 +500,11 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                             // only surface the error if no newer release is available (e.g. offline).
                             try
                             {
-                                bool updated = NativeEngineManager.TryAutoUpdateNativeEngineAsync(_logger, forceCheck: true)
-                                    .GetAwaiter().GetResult();
+                                // Properly awaited (LoadModelAsync runs on a threadpool task): the old
+                                // GetAwaiter().GetResult() blocked the calling thread for the duration
+                                // of a potentially minutes-long, hundreds-of-MB download.
+                                bool updated = await NativeEngineManager.TryAutoUpdateNativeEngineAsync(_logger, forceCheck: true)
+                                    .ConfigureAwait(false);
                                 if (updated)
                                 {
                                     _logger.LogInformation("Auto-updated native engine to support '{ModelFile}'. Restarting to apply.", Path.GetFileName(modelPath));
@@ -708,23 +741,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// </summary>
     private static string ReadNativeLogTail()
     {
-        try
-        {
-            const string logPath = "llama_native.log";
-            if (!File.Exists(logPath)) return string.Empty;
-
-            using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            if (fs.Length == 0) return string.Empty;
-
-            long offset = Math.Max(0, fs.Length - 4096);
-            fs.Seek(offset, SeekOrigin.Begin);
-            using var reader = new StreamReader(fs);
-            return reader.ReadToEnd();
-        }
-        catch
-        {
-            return string.Empty;
-        }
+        // Rotating log in %LOCALAPPDATA%\Klydis\logs (see KlydisLog).
+        return Klydis.Core.Diagnostics.KlydisLog.ReadNativeLogTail();
     }
 
     /// <summary>
@@ -860,14 +878,22 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
             _logger.LogDebug("Starting token generation.");
 
-            // Reset the degenerate-loop flag so a stale detection from a previous generation can
-            // never leak into this one. Set (chat path only) when GenerationLoopDetector fires.
+            // Reset the per-generation flags so stale state from a previous generation can
+            // never leak into this one. LastGenerationLoopInfo is set (chat path only) when
+            // GenerationLoopDetector fires; LastGenerationHitMaxTokens is set when the output
+            // budget is exhausted.
             LastGenerationLoopInfo = null;
+            LastGenerationHitMaxTokens = false;
 
             Channel<Action>? eventChannel = null;
             Task? eventDispatcherTask = null;
 
-            if (triggerEvents)
+            // The dispatcher only exists to serve TokenGenerated subscribers; without any, the
+            // channel + Task.Run per generation is pure overhead. Subscribing mid-generation is
+            // not a supported pattern, so the snapshot taken here is authoritative.
+            bool hasTokenSubscribers = triggerEvents && TokenGenerated != null;
+
+            if (hasTokenSubscribers)
             {
                 eventChannel = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions
                 {
@@ -918,6 +944,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 double ttftMs = 0;
                 int tokenCount = 0;
                 bool isSpeculationActive = false;
+                // Live tokens/sec tracker (EMA over per-token intervals) — see TokenSpeedTracker.
+                var tokenSpeed = new TokenSpeedTracker();
                 try
                 {
                     string textToEvaluate = prompt;
@@ -1002,6 +1030,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     // looped tail, injects a self-correction instruction and regenerates.
                     GenerationLoopDetector? loopDetector = null;
 
+                    // Seed think-block state from the prompt: qwen thinking templates end with an
+                    // OPEN <think> that the model continues, so reasoning content arrives before any
+                    // open tag is seen in the stream. Phrase-level loop detection is lenient inside
+                    // thinking blocks (planning restates ideas by design) and strict on visible text.
+                    bool startsInsideThink = GenerationLoopDetector.EndsInsideThinkBlock(prompt);
+
                     // Route through the speculative path when a draft model is loaded OR the
                     // zero-VRAM N-gram fallback is active (previously the fallback was advertised
                     // in the UI but never engaged because IsLoaded stayed false).
@@ -1030,7 +1064,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         // generations like titles have no correction loop to recover through).
                         if (!isIsolated && triggerEvents)
                         {
-                            loopDetector ??= new GenerationLoopDetector();
+                            loopDetector ??= new GenerationLoopDetector(startsInsideThink);
                             loopDetector.Append(token);
                             var loop = loopDetector.Detect();
                             if (loop != null)
@@ -1043,11 +1077,12 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         }
                         
                         double elapsedSec = genStopwatch.Elapsed.TotalSeconds;
-                        float tokensPerSecond = (tokenCount > 1 && elapsedSec > 0.001)
-                            ? (float)((tokenCount - 1) / elapsedSec)
-                            : (float)(1.0 / Math.Max(0.001, requestStopwatch.Elapsed.TotalSeconds));
+                        double emaTokensPerSecond = tokenSpeed.Update(elapsedSec, tokenCount);
+                        float tokensPerSecond = emaTokensPerSecond > 0
+                            ? (float)emaTokensPerSecond
+                            : (tokenCount > 1 && elapsedSec > 0.001 ? (float)((tokenCount - 1) / elapsedSec) : 0f);
 
-                        if (triggerEvents && TokenGenerated != null && eventChannel != null)
+                        if (hasTokenSubscribers && eventChannel != null && TokenGenerated != null)
                         {
                             var handlers = TokenGenerated;
                             string currentToken = token;
@@ -1063,18 +1098,28 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         // Update the state hash to include both the input prompt and exact generated response matching native KV cache
                         _lastEvaluatedPrompt = prompt + generatedContent.ToString();
                     }
+
+                    // Exhausted the output budget (n_predict reached, no stop token seen): the
+                    // stream was cut at the cap. Distinguish cap-hits from natural stops so
+                    // ChatEngine can auto-continue long-form generations (stories, reports)
+                    // across chunks instead of silently delivering a cut-off response.
+                    LastGenerationHitMaxTokens = inferenceParams.MaxTokens > 0 && tokenCount >= inferenceParams.MaxTokens;
                     completedNormally = true;
 
                     requestStopwatch.Stop();
                     genStopwatch.Stop();
 
-                    if (triggerEvents && TokenGenerated != null && eventChannel != null)
+                    if (hasTokenSubscribers && eventChannel != null && TokenGenerated != null)
                     {
                         var handlers = TokenGenerated;
                         double totalElapsedMs = requestStopwatch.Elapsed.TotalMilliseconds;
                         double genDurationMs = genStopwatch.Elapsed.TotalMilliseconds;
                         int totalGeneratedTokens = isFirstToken ? 0 : tokenCount + 1;
-                        double genTokSec = (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
+                        // Prefer the live EMA reading so the counter does not snap back to the
+                        // flat lifetime average when the final per-token event fires.
+                        double genTokSec = tokenSpeed.Current > 0
+                            ? tokenSpeed.Current
+                            : (genDurationMs > 0 && totalGeneratedTokens > 1) ? ((totalGeneratedTokens - 1) / (genDurationMs / 1000.0)) : (totalElapsedMs > 0 ? (totalGeneratedTokens / (totalElapsedMs / 1000.0)) : 0.0);
                         eventChannel.Writer.TryWrite(() => handlers.Invoke(string.Empty, (float)genTokSec));
                     }
                 }
@@ -1157,7 +1202,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                             genStopwatch.Start();
                                         }
                                         tokenCount++;
-                                        if (triggerEvents && TokenGenerated != null && eventChannel != null)
+                                        if (hasTokenSubscribers && eventChannel != null && TokenGenerated != null)
                                         {
                                             var handlers = TokenGenerated;
                                             string currentToken = token;
@@ -1188,12 +1233,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         _logger.LogError(ex, "Error in background generation");
                         generationException = ex;
                     }
-                    try
-                    {
-                        var logPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "chat_debug.log");
-                        System.IO.File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss.fff}] INFERENCE EXCEPTION: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}{Environment.NewLine}");
-                    }
-                    catch { }
+                    // Rotating log in %LOCALAPPDATA%\Klydis\logs (see KlydisLog).
+                    Klydis.Core.Diagnostics.KlydisLog.AppendChatDebug($"[{DateTime.Now:HH:mm:ss.fff}] INFERENCE EXCEPTION: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}{Environment.NewLine}");
                 }
                 finally
                 {
@@ -1266,7 +1307,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 // Otherwise, a canceled request might leave the background task running,
                 // and a subsequent request could dispose the context while it is still in use!
                 try { await generationTask.ConfigureAwait(false); } catch { }
-                if (triggerEvents && eventChannel != null && eventDispatcherTask != null)
+                if (eventChannel != null && eventDispatcherTask != null)
                 {
                     eventChannel.Writer.Complete();
                     try
@@ -1307,11 +1348,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// plus small frequency/presence penalties that actively suppress self-repeat. Dense models
     /// keep the proven default profile.
     /// </summary>
-    private LLama.Sampling.DefaultSamplingPipeline BuildSamplingPipeline()
+    private LLama.Sampling.ISamplingPipeline BuildSamplingPipeline()
     {
+        // Control/special tokens (e.g. qwen's <channel|> control token) must never stream to
+        // the user; llama.cpp's sampler chain does not exclude them. See
+        // SpecialTokenFilterPipeline.
         if (IsMixtureOfExperts)
         {
-            return new LLama.Sampling.DefaultSamplingPipeline
+            return new SpecialTokenFilterPipeline(new LLama.Sampling.DefaultSamplingPipeline
             {
                 Temperature = 0.6f,
                 TopP = 0.9f,
@@ -1319,16 +1363,19 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 RepeatPenalty = 1.25f,
                 FrequencyPenalty = 0.15f,
                 PresencePenalty = 0.15f
-            };
+            });
         }
 
-        return new LLama.Sampling.DefaultSamplingPipeline
+        return new SpecialTokenFilterPipeline(new LLama.Sampling.DefaultSamplingPipeline
         {
             Temperature = 0.7f,
             TopP = 0.9f,
             MinP = 0.05f,
-            RepeatPenalty = 1.1f
-        };
+            // 1.15 (was 1.1): thinking models in production stuttered "The The The..." on a
+            // cold first generation; a slightly stronger repeat penalty breaks that attractor
+            // without harming long-form quality.
+            RepeatPenalty = 1.15f
+        });
     }
 
     public async IAsyncEnumerable<string> StreamTokensAsync(string prompt, string[] stopTokens, int tokensKeep, [EnumeratorCancellation] CancellationToken ct = default)
@@ -1336,9 +1383,17 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         int maxKeep = (int)(ContextSize / 2);
         int safeTokensKeep = Math.Clamp(tokensKeep, 0, maxKeep);
 
+        // Bound chat generations so a degenerate or over-ambitious model cannot stream
+        // unboundedly (production logs show a 3-minute 10-chapter repetition and an 80-second
+        // garbage run). The degenerate-loop detector already stops repetition attractors in
+        // the chat path, so this cap only guards the truly unbounded case: 50% of context,
+        // clamped to [4096, 65536]. ChatEngine's auto-continuation loop (bounded per turn,
+        // keyed on LastGenerationHitMaxTokens) resumes long responses across chunks.
+        int maxChatTokens = Math.Clamp((int)(ContextSize * 0.50), 4096, 65536);
+
         var inferenceParams = new InferenceParams 
         { 
-            MaxTokens = -1,
+            MaxTokens = maxChatTokens,
             TokensKeep = safeTokensKeep,
             AntiPrompts = stopTokens.ToList(),
             // Native KV shifting (TruncateAndReprefill) is unsupported on recurrent/M-RoPE
@@ -1498,6 +1553,37 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             _lastEvaluatedPrompt = string.Empty;
             if (_weights != null && _modelParams != null)
             {
+                var context = _context;
+
+                // Fast path: clear the native KV cache in place with MemorySequenceRemove and
+                // re-instantiate the executor. This avoids the full context dispose + recreate
+                // (VRAM realloc + graph re-init, hundreds of ms) that used to run on EVERY
+                // isolated background generation and every compression event — which also wiped
+                // the freshly-built chat KV cache right after the first exchange.
+                //
+                // Recurrent/M-RoPE architectures (qwen35, mamba, rwkv, jamba) are excluded:
+                // their recurrent memory module ignores llama_kv_cache_seq_rm, so the cache
+                // would keep stale positions while a fresh executor starts at 0, and
+                // llama_decode fails (M-RoPE requires position monotonicity).
+                if (!IsRecurrentArchitecture &&
+                    context != null &&
+                    context.NativeHandle != null &&
+                    !context.NativeHandle.IsClosed &&
+                    !context.NativeHandle.IsInvalid)
+                {
+                    try
+                    {
+                        context.NativeHandle.MemorySequenceRemove((LLamaSeqId)0, (LLamaPos)0, (LLamaPos)(-1));
+                        _executor = new InteractiveExecutor(context);
+                        _logger?.LogDebug("Fast KV cache clear completed in ResetContextInternal.");
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Fast KV cache clear failed; falling back to full context recreation.");
+                    }
+                }
+
                 var oldContext = _context;
                 _context = null;
                 _executor = null;
@@ -1561,23 +1647,34 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         "<|end|>"
     };
 
+    /// <summary>
+    /// The static turn-ending stop tokens, pre-sorted longest-first. The base set is the common
+    /// case, so we only pay for a full re-sort when anti-prompts contribute anything new.
+    /// </summary>
+    private static readonly string[] TurnEndingStopTokensSorted = TurnEndingStopTokens
+        .OrderByDescending(s => s.Length)
+        .ToArray();
+
     internal string StripLeadingStopTokens(string delta, IEnumerable<string>? antiPrompts)
     {
         if (string.IsNullOrEmpty(delta)) return delta;
 
         var candidateStopTokens = new HashSet<string>(TurnEndingStopTokens, StringComparer.Ordinal);
+        bool addedAny = false;
         if (antiPrompts != null)
         {
             foreach (var ap in antiPrompts)
             {
                 if (!string.IsNullOrWhiteSpace(ap) && !ap.Contains("start", StringComparison.OrdinalIgnoreCase))
                 {
-                    candidateStopTokens.Add(ap);
+                    addedAny |= candidateStopTokens.Add(ap);
                 }
             }
         }
 
-        var orderedStopTokens = candidateStopTokens.OrderByDescending(s => s.Length).ToList();
+        var orderedStopTokens = addedAny
+            ? candidateStopTokens.OrderByDescending(s => s.Length).ToArray()
+            : TurnEndingStopTokensSorted;
 
         bool strippedAny = true;
         while (strippedAny && !string.IsNullOrEmpty(delta))
@@ -1765,6 +1862,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         CurrentModelPath = null;
         RawChatTemplate = null;
         FineTuneName = null;
+
+        // A CPU-only load pinned the process to P-cores; release that so the rest of the app
+        // (and later GPU loads) can use the full processor set again.
+        if (_pCoreAffinityApplied)
+        {
+            Hardware.CpuAffinityHelper.RestoreProcessAffinity();
+            _pCoreAffinityApplied = false;
+        }
 
         if (ctx != null || weights != null)
         {

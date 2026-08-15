@@ -10,9 +10,10 @@ public class Program
     [STAThread]
     public static void Main()
     {
-        // Configure process environment
-        Environment.SetEnvironmentVariable("GGML_CUDA_FORCE_CUBLAS", "1");
-        Environment.SetEnvironmentVariable("GGML_CUDA_DMMV_F16", "1");
+        // NOTE: The legacy GGML_CUDA_FORCE_CUBLAS / GGML_CUDA_DMMV_F16 env vars were removed:
+        // on modern llama.cpp builds they force the cuBLAS / f16 DMMV kernels, which are
+        // measurably slower than the default native CUDA kernels on most models. Leave the
+        // defaults alone unless benchmarking proves otherwise on your specific GPU.
 
         try
         {
@@ -45,7 +46,7 @@ public class Program
                         if (Directory.Exists(candidatePath) && !pathParts.Contains(candidatePath, StringComparer.OrdinalIgnoreCase))
                         {
                             pathParts.Insert(0, candidatePath);
-                            try { File.AppendAllText("llama_native.log", $"[CUDA] Added to PATH: {candidatePath}{Environment.NewLine}"); } catch {}
+                            Klydis.Core.Diagnostics.KlydisLog.AppendNativeLog($"[CUDA] Added to PATH: {candidatePath}{Environment.NewLine}");
                         }
                     }
                 }
@@ -101,11 +102,7 @@ public class Program
         catch (Exception ex)
         {
             Console.WriteLine("FATAL ERROR: " + ex.ToString());
-            try
-            {
-                File.AppendAllText("llama_native.log", $"FATAL ERROR: {ex}{Environment.NewLine}");
-            }
-            catch {}
+            Klydis.Core.Diagnostics.KlydisLog.AppendNativeLog($"FATAL ERROR: {ex}{Environment.NewLine}");
         }
     }
 }

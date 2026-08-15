@@ -73,7 +73,10 @@ public class MessageStore
         string dbDirectory = Path.GetDirectoryName(dbPath) ?? ".";
         Directory.CreateDirectory(dbDirectory);
         
-        _connectionString = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared";
+        // Pooling=True lets ADO.NET reuse native SQLite connections across the per-call
+        // SqliteConnection instances this store creates, instead of opening/closing a native
+        // handle for every operation.
+        _connectionString = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared;Pooling=True";
     }
 
     /// <summary>
@@ -163,6 +166,20 @@ public class MessageStore
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
         {
             // Column already exists, ignore
+        }
+
+        // GetMessagesAsync / GetMessageCountAsync filter by session_id and order by id: without
+        // this index they full-scan the messages table (which includes every tool output) as
+        // sessions grow to tens of thousands of rows.
+        try
+        {
+            await using var indexCmd = connection.CreateCommand();
+            indexCmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id);";
+            await indexCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Index already exists, ignore
         }
     }
 
@@ -612,14 +629,10 @@ public class MessageStore
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync();
         
+        // One batched UPDATE instead of one round-trip per row (the old N+1). Ids come from the
+        // database itself (AUTOINCREMENT integers), so inlining them is injection-safe.
         await using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE messages SET is_consolidated = 1 WHERE id = @id";
-        var idParam = command.Parameters.Add("@id", SqliteType.Integer);
-        
-        foreach (var id in messageIds)
-        {
-            idParam.Value = id;
-            await command.ExecuteNonQueryAsync();
-        }
+        command.CommandText = $"UPDATE messages SET is_consolidated = 1 WHERE id IN ({string.Join(",", messageIds)})";
+        await command.ExecuteNonQueryAsync();
     }
 }

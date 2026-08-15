@@ -369,13 +369,16 @@ public class StealthBrowserService : IAsyncDisposable
                 Environment.SetEnvironmentVariable("PLAYWRIGHT_DRIVER_SEARCH_PATH", baseDir);
             }
 
-            await Task.Run(() =>
+            var exitCode = await Task.Run(() =>
+                Microsoft.Playwright.Program.Main(new[] { "install", "chromium" }));
+            _logger.LogInformation("Playwright Chromium auto-install finished with exit code {ExitCode}.", exitCode);
+            // Only remember success when the install actually completed; a failed download must
+            // not be cached as success, or every later crawl would skip the install silently.
+            _installSucceeded = exitCode == 0;
+            if (!_installSucceeded)
             {
-                var exitCode = Microsoft.Playwright.Program.Main(new[] { "install", "chromium" });
-                _logger.LogInformation("Playwright Chromium auto-install finished with exit code {ExitCode}.", exitCode);
-            });
-
-            _installSucceeded = true;
+                _logger.LogWarning("Playwright Chromium auto-install reported a non-zero exit code ({ExitCode}); browser-based crawling will retry the install on next use.", exitCode);
+            }
         }
         catch (Exception ex)
         {

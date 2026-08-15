@@ -30,7 +30,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            System.IO.File.WriteAllText("hard_log.txt", "INIT ERROR: " + ex.ToString());
+            Klydis.Core.Diagnostics.KlydisLog.AppendHardLog("INIT ERROR: " + ex + Environment.NewLine);
             Environment.Exit(1);
         }
     }
@@ -41,7 +41,7 @@ public partial class App : Application
 
         this.DispatcherUnhandledException += (s, args) =>
         {
-            System.IO.File.WriteAllText("fatal_error.txt", args.Exception.ToString());
+            Klydis.Core.Diagnostics.KlydisLog.AppendFatalError(args.Exception + Environment.NewLine);
             args.Handled = true;
             Current.Shutdown();
         };
@@ -160,10 +160,11 @@ public partial class App : Application
                 sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
                 sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>()
             );
-            // AutoPilot: app-level policy - no approval gates, no risky-keyword
-            // blocklist. This is Klydis's own risk gating, independent of OS
-            // privileges (the app itself runs asInvoker, no UAC elevation).
-            toolExecutor.CurrentRiskLevel = RiskLevel.AutoPilot;
+            // Default to Standard (approval gate for risky/flagged tools). AutoPilot mode
+            // executes arbitrary PowerShell with no approval gate, which combined with
+            // prompt-injection surface from RAG docs and crawled pages is unsafe as a default;
+            // users who want the fully autonomous mode switch to it in the UI selector.
+            toolExecutor.CurrentRiskLevel = RiskLevel.Standard;
             return toolExecutor;
         });
         services.AddSingleton<ChatEngine>(sp =>

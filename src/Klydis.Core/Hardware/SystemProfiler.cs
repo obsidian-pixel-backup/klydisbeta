@@ -85,6 +85,13 @@ public class SystemProfiler
     }
 
     /// <summary>
+    /// Cached static hardware facts (CPU name/cores/clock, total RAM). These never change at
+    /// runtime, so after the first successful query they are reused instead of re-running the
+    /// expensive Win32_Processor / Win32_ComputerSystem WMI queries on every poll tick.
+    /// </summary>
+    private static SystemInfo? _cachedStaticInfo;
+
+    /// <summary>
     /// Queries the system CPU and RAM information asynchronously.
     /// </summary>
     /// <returns>A <see cref="SystemInfo"/> record.</returns>
@@ -93,33 +100,57 @@ public class SystemProfiler
         // WMI calls can be slow and synchronous, so we offload them to a background thread.
         return Task.Run(() =>
         {
-            string cpuName = "Unknown CPU";
-            int coreCount = 0;
-            int logicalProcessors = 0;
-            int clockSpeed = 0;
-            double totalRamGb = 0;
+            var cached = Volatile.Read(ref _cachedStaticInfo);
+            string cpuName = cached?.CpuName ?? "Unknown CPU";
+            int coreCount = cached?.CoreCount ?? 0;
+            int logicalProcessors = cached?.LogicalProcessorCount ?? 0;
+            int clockSpeed = cached?.ClockSpeedMHz ?? 0;
+            double totalRamGb = cached?.TotalRamGb ?? 0;
             double availableRamGb = 0;
             double cpuUsagePercent = 0;
             double processCpuPercent = GetProcessCpuUsagePercent();
 
             try
             {
-                using var processorSearcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, LoadPercentage FROM Win32_Processor");
-                foreach (var obj in processorSearcher.Get())
+                if (cached == null)
                 {
-                    cpuName = obj["Name"]?.ToString() ?? cpuName;
-                    coreCount = Convert.ToInt32(obj["NumberOfCores"] ?? 0);
-                    logicalProcessors = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? 0);
-                    clockSpeed = Convert.ToInt32(obj["MaxClockSpeed"] ?? 0);
-                    cpuUsagePercent = Convert.ToDouble(obj["LoadPercentage"] ?? 0);
-                    break; // Just grab the first CPU
+                    // One-time static probe: CPU identity + total RAM.
+                    using var processorSearcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed FROM Win32_Processor");
+                    foreach (var obj in processorSearcher.Get())
+                    {
+                        cpuName = obj["Name"]?.ToString() ?? cpuName;
+                        coreCount = Convert.ToInt32(obj["NumberOfCores"] ?? 0);
+                        logicalProcessors = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? 0);
+                        clockSpeed = Convert.ToInt32(obj["MaxClockSpeed"] ?? 0);
+                        break; // Just grab the first CPU
+                    }
+
+                    using var computerSystemSearcher = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem");
+                    foreach (var obj in computerSystemSearcher.Get())
+                    {
+                        ulong totalRamBytes = Convert.ToUInt64(obj["TotalPhysicalMemory"] ?? 0);
+                        totalRamGb = totalRamBytes / (1024.0 * 1024.0 * 1024.0);
+                        break;
+                    }
+
+                    // Benign race: concurrent first calls may both compute, both write the same values.
+                    Volatile.Write(ref _cachedStaticInfo, new SystemInfo(
+                        CpuName: cpuName,
+                        CoreCount: coreCount,
+                        LogicalProcessorCount: logicalProcessors,
+                        ClockSpeedMHz: clockSpeed,
+                        TotalRamGb: Math.Round(totalRamGb, 2),
+                        AvailableRamGb: 0,
+                        CpuUsagePercent: 0,
+                        ProcessCpuUsagePercent: 0
+                    ));
                 }
 
-                using var computerSystemSearcher = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem");
-                foreach (var obj in computerSystemSearcher.Get())
+                // Per-tick dynamic probes only: CPU load + free RAM.
+                using var loadSearcher = new ManagementObjectSearcher("SELECT LoadPercentage FROM Win32_Processor");
+                foreach (var obj in loadSearcher.Get())
                 {
-                    ulong totalRamBytes = Convert.ToUInt64(obj["TotalPhysicalMemory"] ?? 0);
-                    totalRamGb = totalRamBytes / (1024.0 * 1024.0 * 1024.0);
+                    cpuUsagePercent = Convert.ToDouble(obj["LoadPercentage"] ?? 0);
                     break;
                 }
 

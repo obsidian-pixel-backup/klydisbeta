@@ -7,7 +7,7 @@ namespace Klydis.Core.Chat;
 /// <summary>
 /// Describes a degenerate output loop detected mid-stream by <see cref="GenerationLoopDetector"/>.
 /// </summary>
-/// <param name="Reason">Machine-readable reason: "TagSpam", "ToolCallSpam", "RepetitionStutter", "NGramLoop", or "PaddingLoop".</param>
+/// <param name="Reason">Machine-readable reason: "TagSpam", "ToolCallSpam", "RepetitionStutter", "NGramLoop", "SemanticLoop", "JunkOutput" or "PaddingLoop".</param>
 /// <param name="LoopStartChar">Character offset (relative to the generated content) where the looped tail begins. Everything at or after this offset is garbage and should be discarded.</param>
 /// <param name="GeneratedTokenCount">Total tokens generated at the moment the loop was detected.</param>
 public sealed record GenerationLoopInfo(
@@ -19,7 +19,15 @@ public sealed record GenerationLoopInfo(
 /// Detects degenerate output loops in a live token stream. MoE models (qwen3.6-14B-A3B /
 /// qwen35moe, mixtral, deepseek-v2/v3, ...) and thinking models can fall into repetition
 /// attractors under stress: spamming an opening tag (&lt;think&gt;&lt;think&gt;&lt;think&gt;...),
-/// stuttering the same token ("I I I I I"), or cycling the same n-gram ("yes no yes no yes no").
+/// stuttering the same token ("I I I I I"), cycling the same n-gram ("yes no yes no yes no"),
+/// repeating whole paragraphs, or emitting punctuation-only garbage.
+///
+/// The phrase-level detectors (n-gram, semantic) are deliberately LENIENT inside thinking
+/// blocks: planning and reasoning legitimately restate ideas, consider alternatives, and hedge
+/// ("Maybe X? No, let's go with Y"). A repeated phrase whose loop BEGINS inside a think block is
+/// exploration, not a degenerate attractor — while the hard degenerate signals (token stutter,
+/// tag spam, junk, padding) still fire everywhere. Visible output is always checked strictly.
+///
 /// This detector runs after every generated token and reports the earliest strong evidence of
 /// such a loop, including the character offset where the loop began so the caller can discard
 /// the garbage tail and self-correct instead of streaming it to the user.
@@ -59,6 +67,31 @@ public sealed class GenerationLoopDetector
     };
 
     /// <summary>
+    /// Open/close pairs for THINKING blocks only (from <see cref="TagFamilies"/>), used to track
+    /// which character ranges of the stream were produced inside a think block so the
+    /// phrase-level loop detectors (n-gram, semantic) can be lenient there.
+    /// </summary>
+    private static readonly (string Open, string Close)[] ThinkTagPairs = BuildThinkTagPairs();
+
+    private static (string Open, string Close)[] BuildThinkTagPairs()
+    {
+        var list = new List<(string, string)>();
+        foreach (var (open, close, reason) in TagFamilies)
+        {
+            if (reason == "TagSpam")
+            {
+                list.Add((open, close));
+            }
+        }
+        return list.ToArray();
+    }
+
+    /// <summary>
+    /// Characters that can begin a tag; used as a cheap pre-filter before per-token tag scanning.
+    /// </summary>
+    private static readonly char[] TagCharHints = { '<', '[', '{' };
+
+    /// <summary>
     /// Maximum number of recent tokens kept for n-gram / stutter analysis.
     /// </summary>
     private const int MaxWindowTokens = 300;
@@ -76,6 +109,25 @@ public sealed class GenerationLoopDetector
     private const int NGramLength = 5;
     private const int NGramMinMatches = 3;
 
+    /// <summary>Number of recent tokens scanned by the punctuation-junk detector.</summary>
+    private const int JunkWindowTokens = 60;
+
+    /// <summary>Junk detection never runs below this many recent tokens.</summary>
+    private const int JunkMinTokens = 40;
+
+    /// <summary>
+    /// Minimum number of punctuation-only tokens in the junk window (out of 60) before the
+    /// output is treated as garbage. Calibrated against the observed log garbage, which was
+    /// ~75% punctuation-only over a 60-token window.
+    /// </summary>
+    private const int JunkMinPunctOnly = 30;
+
+    /// <summary>
+    /// Maximum number of alphanumeric-bearing tokens allowed in the junk window — real text,
+    /// code, and markdown are far above this; pure junk is far below.
+    /// </summary>
+    private const int JunkMaxAlphaTokens = 18;
+
     /// <summary>
     /// For an n-gram "loop" to count, the SECOND-most-recent occurrence must be within this many
     /// tokens of the end of the window. True degenerate loops cycle tightly and keep repeating
@@ -86,9 +138,12 @@ public sealed class GenerationLoopDetector
     private const int NGramActiveTailTokens = 40;
 
     /// <summary>
-    /// Character span scanned for semantic repetition (repeated sentences / lines).
+    /// Character span scanned for semantic repetition (repeated sentences / lines). Must be
+    /// large enough to hold THREE copies of a typical paragraph: the observed "10 chapter"
+    /// failure repeated the same ~600-char paragraph per chapter, and a 900-char window only
+    /// ever contained 2 copies (below the 3-repeat threshold), so the loop streamed for pages.
     /// </summary>
-    private const int SemanticScanChars = 900;
+    private const int SemanticScanChars = 3000;
 
     /// <summary>
     /// A normalized sentence must be at least this long to count toward semantic-loop
@@ -102,18 +157,78 @@ public sealed class GenerationLoopDetector
     private const int SemanticMinRepeats = 3;
 
     /// <summary>
-    /// The SECOND occurrence of the repeated sentence must fall within this many characters of
+    /// The occurrence that completes the repeat count must fall within this many characters of
     /// the end of the scanned span. True semantic loops paraphrase the same content back-to-back
-    /// right now; echoing an earlier sentence after writing several paragraphs of new content is
-    /// normal prose, not a loop.
+    /// right now; echoing a sentence long ago and then writing new prose is normal, not a loop.
+    /// In the live stream the detector runs after every token, so the sentence that completes the
+    /// repeat is (by definition) at the very end of the current output — this bound only excludes
+    /// echoes where the repeats happened early and new content followed. Kept at 500: the
+    /// observed paragraph-level chapter loop completes its third repeat within one paragraph
+    /// (~500 chars) of the end, while an echo test with repeats ~660 chars before the end must
+    /// not fire.
     /// </summary>
     private const int SemanticActiveTailChars = 500;
 
     private readonly List<(string Token, int CharOffset)> _window = new();
     private readonly StringBuilder _text = new();
 
+    /// <summary>
+    /// Character ranges of the stream that were produced inside an open think block. Bounded to
+    /// the tail (see <see cref="TrimThinkRanges"/>); only the recent output is ever analyzed.
+    /// </summary>
+    private readonly List<(int Start, int End)> _closedThinkRanges = new();
+
+    /// <summary>
+    /// Character offset where the currently-open think block began, or -1 when no think block is
+    /// open.
+    /// </summary>
+    private int _openThinkStart = -1;
+
     /// <summary>Number of tokens fed to the detector so far.</summary>
     public int TokenCount => _window.Count;
+
+    /// <summary>
+    /// True while the stream is currently inside an open thinking block.
+    /// </summary>
+    public bool IsInThinkBlock => _openThinkStart >= 0;
+
+    /// <summary>
+    /// Creates the detector. Pass <paramref name="startsInsideThinkBlock"/> when the generation
+    /// prompt already ends with an OPEN thinking tag (qwen thinking models: the template appends
+    /// an unclosed "&lt;think&gt;" for the model to continue) — otherwise reasoning content would
+    /// be treated as visible output and strict phrase-loop thresholds applied to it.
+    /// </summary>
+    public GenerationLoopDetector(bool startsInsideThinkBlock = false)
+    {
+        if (startsInsideThinkBlock)
+        {
+            // The open <think> lives in the prompt; everything the model streams is inside it
+            // until it emits the closing tag. Offset 0 is correct: all generated content is
+            // in-think until the close arrives.
+            _openThinkStart = 0;
+        }
+    }
+
+    /// <summary>
+    /// True when <paramref name="text"/> ends inside an unclosed thinking block (its last
+    /// thinking open tag appears after its last close). Used to seed the detector for models
+    /// whose prompt template appends an OPEN thinking tag.
+    /// </summary>
+    public static bool EndsInsideThinkBlock(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+
+        int lastOpen = -1;
+        int lastClose = -1;
+        foreach (var (open, close) in ThinkTagPairs)
+        {
+            int openPos = text.LastIndexOf(open, StringComparison.OrdinalIgnoreCase);
+            int closePos = text.LastIndexOf(close, StringComparison.OrdinalIgnoreCase);
+            if (openPos > lastOpen) lastOpen = openPos;
+            if (closePos > lastClose) lastClose = closePos;
+        }
+        return lastOpen >= 0 && lastOpen > lastClose;
+    }
 
     /// <summary>
     /// Feeds one generated token into the detector. Call after every token, then inspect
@@ -121,20 +236,113 @@ public sealed class GenerationLoopDetector
     /// </summary>
     public void Append(string token)
     {
-        _window.Add((token, _text.Length));
+        int tokenStart = _text.Length;
+        _window.Add((token, tokenStart));
         _text.Append(token);
+
+        // Keep think-block ranges in sync with the token stream so phrase-level detection can
+        // be lenient while the model is reasoning. Cheap pre-filter: tags start with one of a
+        // small set of characters, and most tokens never contain any.
+        if (token.IndexOfAny(TagCharHints) >= 0)
+        {
+            UpdateThinkRanges(token, tokenStart);
+        }
 
         // Bound memory: only the tail of the window is ever analyzed.
         if (_window.Count > MaxWindowTokens)
         {
             _window.RemoveRange(0, _window.Count - MaxWindowTokens);
         }
+
+        TrimThinkRanges();
+    }
+
+    /// <summary>
+    /// Processes one token for think-tag open/close transitions, in the order the tags appear
+    /// inside the token (a token can contain both, e.g. "&lt;/think&gt;&lt;think&gt;").
+    /// </summary>
+    private void UpdateThinkRanges(string token, int tokenStart)
+    {
+        int pos = 0;
+        while (pos < token.Length)
+        {
+            int bestOpen = -1;
+            int bestOpenLen = 0;
+            int bestClose = -1;
+            int bestCloseLen = 0;
+
+            foreach (var (open, close) in ThinkTagPairs)
+            {
+                int openIdx = token.IndexOf(open, pos, StringComparison.OrdinalIgnoreCase);
+                if (openIdx >= 0 && (bestOpen < 0 || openIdx < bestOpen))
+                {
+                    bestOpen = openIdx;
+                    bestOpenLen = open.Length;
+                }
+                int closeIdx = token.IndexOf(close, pos, StringComparison.OrdinalIgnoreCase);
+                if (closeIdx >= 0 && (bestClose < 0 || closeIdx < bestClose))
+                {
+                    bestClose = closeIdx;
+                    bestCloseLen = close.Length;
+                }
+            }
+
+            if (bestOpen < 0 && bestClose < 0) break;
+
+            if (bestClose >= 0 && (bestOpen < 0 || bestClose < bestOpen))
+            {
+                // Close comes first (or only): end the current think block at the close tag.
+                if (_openThinkStart >= 0)
+                {
+                    _closedThinkRanges.Add((_openThinkStart, tokenStart + bestClose + bestCloseLen));
+                    _openThinkStart = -1;
+                }
+                pos = bestClose + bestCloseLen;
+            }
+            else
+            {
+                // Open comes first (or only): start a think block at the open tag.
+                if (_openThinkStart < 0)
+                {
+                    _openThinkStart = tokenStart + bestOpen;
+                }
+                pos = bestOpen + bestOpenLen;
+            }
+        }
+    }
+
+    /// <summary>
+    /// True when the character at <paramref name="charOffset"/> was produced inside a think
+    /// block (either a closed range or the currently-open block).
+    /// </summary>
+    private bool IsCharInThink(int charOffset)
+    {
+        if (_openThinkStart >= 0 && charOffset >= _openThinkStart) return true;
+        foreach (var (start, end) in _closedThinkRanges)
+        {
+            if (charOffset >= start && charOffset < end) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Drops think ranges entirely outside the analysis tail so the range list cannot grow
+    /// unbounded on long generations. Ranges are only consulted for offsets in the recent
+    /// window, so anything far in the past is irrelevant.
+    /// </summary>
+    private void TrimThinkRanges()
+    {
+        int minRelevant = _text.Length - (SemanticScanChars + 1024);
+        if (minRelevant <= 0) return;
+        _closedThinkRanges.RemoveAll(r => r.End < minRelevant);
     }
 
     /// <summary>
     /// Returns a <see cref="GenerationLoopInfo"/> if the current output shows strong evidence of a
     /// degenerate loop, otherwise null. Thresholds are deliberately conservative: a false positive
     /// costs one self-correction regeneration, but a missed loop costs an infinite tag-soup stream.
+    /// Phrase-level checks (n-gram, semantic) are skipped when the loop would BEGIN inside a
+    /// thinking block — that is exploratory reasoning, not a degenerate attractor.
     /// </summary>
     public GenerationLoopInfo? Detect()
     {
@@ -181,8 +389,43 @@ public sealed class GenerationLoopDetector
             }
         }
 
-        // 3. N-gram loop: the last N tokens appearing repeatedly inside the recent window. This
+        // 3. Punctuation-junk output: a broken token stream dominated by punctuation-only
+        //    fragments (": for:", ":::", "|.") with almost no real words — the "80 seconds of
+        //    garbage" failure mode from production logs. Token stutter and n-gram checks miss
+        //    it because the junk has variety; its information content is simply near zero.
+        //    Runs before the n-gram/semantic checks because it is the strongest stop signal.
+        int junkWindow = Math.Min(count, JunkWindowTokens);
+        if (junkWindow >= JunkMinTokens)
+        {
+            int punctOnly = 0;
+            int alphaTokens = 0;
+            for (int i = count - junkWindow; i < count; i++)
+            {
+                var tok = _window[i].Token;
+                bool hasAlpha = false;
+                foreach (char c in tok)
+                {
+                    if (char.IsLetterOrDigit(c))
+                    {
+                        hasAlpha = true;
+                        break;
+                    }
+                }
+                if (hasAlpha) alphaTokens++;
+                else if (!string.IsNullOrWhiteSpace(tok)) punctOnly++;
+            }
+            if (punctOnly >= JunkMinPunctOnly && alphaTokens <= JunkMaxAlphaTokens)
+            {
+                int startOffset = _window[count - junkWindow].CharOffset;
+                return new GenerationLoopInfo("JunkOutput", startOffset, count);
+            }
+        }
+
+        // 4. N-gram loop: the last N tokens appearing repeatedly inside the recent window. This
         //    catches alternating cycles ("yes no yes no yes no") that token stutter misses.
+        //    Skipped when the loop would BEGIN inside a thinking block — reasoning and planning
+        //    legitimately restate phrases ("Let's go with X", "Maybe the key is..."), which is
+        //    exploratory, not a degenerate attractor.
         int window = Math.Min(count, NGramWindowTokens);
         if (window >= NGramLength * 3)
         {
@@ -213,20 +456,24 @@ public sealed class GenerationLoopDetector
             // True loops are ACTIVE: the repeated phrase must be cycling right now (a second
             // occurrence within the tight tail), not merely present somewhere in the window.
             int secondLastFromEnd = window - secondLastMatchStart;
-            if (matches >= NGramMinMatches && secondLastMatchStart >= 0 && secondLastFromEnd <= NGramActiveTailTokens)
+            bool loopBeginsInThink = secondLastMatchStart >= 0 &&
+                                     IsCharInThink(_window[secondLastMatchStart].CharOffset);
+            if (!loopBeginsInThink && matches >= NGramMinMatches && secondLastMatchStart >= 0 && secondLastFromEnd <= NGramActiveTailTokens)
             {
                 return new GenerationLoopInfo("NGramLoop", _window[secondLastMatchStart].CharOffset, count);
             }
         }
 
-        // 4. Semantic repetition: the same normalized sentence or line appearing repeatedly.
+        // 5. Semantic repetition: the same normalized sentence or line appearing repeatedly.
         //    This is the classic "psychotic loop" that exact-token checks miss — the model
         //    paraphrases the same content over and over with different words ("The cat sat on
         //    the mat. A cat was sitting on the mat. There is a cat on the mat.").
+        //    Skipped when the loop would BEGIN inside a thinking block, for the same reason as
+        //    the n-gram check: planning restates ideas in different words by design.
         int semStart = Math.Max(0, _text.Length - SemanticScanChars);
         string semText = _text.ToString(semStart, _text.Length - semStart);
         int semanticOffset = DetectSemanticRepetition(semText);
-        if (semanticOffset >= 0)
+        if (semanticOffset >= 0 && !IsCharInThink(semStart + semanticOffset))
         {
             return new GenerationLoopInfo("SemanticLoop", semStart + semanticOffset, count);
         }

@@ -61,7 +61,7 @@ namespace Klydis.App.ViewModels
             _logger = logger;
 
             _ingestionEngine.ProgressChanged += OnIngestionProgressChanged;
-            _ = LoadCollectionsAsync();
+            Klydis.Core.Diagnostics.FireAndForget.Observe(LoadCollectionsAsync(), _logger, nameof(LoadCollectionsAsync));
         }
 
         private void OnIngestionProgressChanged(object? sender, IngestionProgressEventArgs e)

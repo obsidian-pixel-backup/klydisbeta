@@ -10,11 +10,13 @@ namespace Klydis.App.ViewModels;
 /// <summary>
 /// ViewModel for monitoring system resources such as GPU, CPU, and RAM.
 /// </summary>
-public partial class SystemMonitorViewModel : ObservableObject
+public partial class SystemMonitorViewModel : ObservableObject, IDisposable
 {
     private readonly DispatcherTimer _timer;
     private readonly Klydis.Core.Hardware.SystemProfiler _systemProfiler;
     private readonly Klydis.Core.Inference.InferenceEngine _inferenceEngine;
+    private bool _refreshing;
+    private bool _isDisposed;
 
     [ObservableProperty]
     private string _gpuName = "Unknown GPU";
@@ -84,6 +86,28 @@ public partial class SystemMonitorViewModel : ObservableObject
     [ObservableProperty]
     private string _tokenUsageSummary = "↑ 0 in · ↓ 0 out";
 
+    // ---- Context window ring (bottom-right status bar) ----
+    // "Used" = prompt + generated tokens of the most recent chat generation (isolated
+    // background work is excluded, matching the token counters). "Remaining" = total context
+    // size minus used; the ring depletes as the window fills.
+    [ObservableProperty]
+    private long _contextWindowUsedTokens;
+
+    [ObservableProperty]
+    private long _contextWindowTotalTokens;
+
+    [ObservableProperty]
+    private double _contextWindowRemainingPercent = 100.0;
+
+    [ObservableProperty]
+    private string _contextWindowSummary = "Context window: no model loaded";
+
+    [ObservableProperty]
+    private string _contextWindowSeverity = "Normal";
+
+    private int _currentPromptTokens;
+    private int _currentGeneratedTokens;
+
     [ObservableProperty]
     private string _tokenUsageTooltip = "Session token usage appears here once the model generates.";
 
@@ -108,12 +132,31 @@ public partial class SystemMonitorViewModel : ObservableObject
         _inferenceEngine.TokenGenerated += OnTokenGenerated;
         _inferenceEngine.InferenceStarted += OnInferenceStarted;
         _inferenceEngine.InferenceCompleted += OnInferenceCompleted;
+        // 2s interval: system monitors don't need 1Hz updates, and each tick previously paid
+        // WMI + nvidia-smi probes (SystemProfiler now caches the static half of those).
         _timer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromSeconds(1)
+            Interval = TimeSpan.FromSeconds(2)
         };
         _timer.Tick += OnTimerTick;
         _timer.Start();
+    }
+
+    /// <summary>
+    /// Stops the poll timer and unsubscribes from the singleton engine's events. Without this,
+    /// the transient ViewModel kept a live subscription (and a running timer) forever.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_isDisposed) return;
+        _isDisposed = true;
+
+        _timer.Stop();
+        _timer.Tick -= OnTimerTick;
+
+        _inferenceEngine.TokenGenerated -= OnTokenGenerated;
+        _inferenceEngine.InferenceStarted -= OnInferenceStarted;
+        _inferenceEngine.InferenceCompleted -= OnInferenceCompleted;
     }
 
     private void OnTokenGenerated(string token, float tokensPerSecond)
@@ -137,6 +180,12 @@ public partial class SystemMonitorViewModel : ObservableObject
                     TokensPerSecondHistory.RemoveAt(0);
                 }
             }
+
+            if (!string.IsNullOrEmpty(token))
+            {
+                _currentGeneratedTokens++;
+                UpdateContextWindow();
+            }
         });
     }
 
@@ -155,6 +204,12 @@ public partial class SystemMonitorViewModel : ObservableObject
             // zero (the observed in/out swap).
             TotalTokensIn += telemetry.PromptTokenCount;
             UpdateTokenUsageDisplay();
+
+            // Start a fresh context-window reading for this generation: prompt tokens are
+            // known up front, generated tokens accumulate via OnTokenGenerated.
+            _currentPromptTokens = telemetry.PromptTokenCount;
+            _currentGeneratedTokens = 0;
+            UpdateContextWindow();
         });
     }
 
@@ -172,8 +227,36 @@ public partial class SystemMonitorViewModel : ObservableObject
             LastGenerationTokensIn = telemetry.PromptTokenCount;
             LastGenerationTokensOut = telemetry.GeneratedTokenCount;
             UpdateTokenUsageDisplay();
+
+            // Final exact reading for the finished generation.
+            _currentPromptTokens = telemetry.PromptTokenCount;
+            _currentGeneratedTokens = telemetry.GeneratedTokenCount;
+            UpdateContextWindow();
         });
     }
+
+    private void UpdateContextWindow()
+    {
+        // Total context can change (model load / ReapplyModelParametersAsync) — read it fresh.
+        ContextWindowTotalTokens = _inferenceEngine.ContextSize;
+        long used = Math.Max(0, (long)_currentPromptTokens + _currentGeneratedTokens);
+        ContextWindowUsedTokens = used;
+
+        if (ContextWindowTotalTokens <= 0)
+        {
+            ContextWindowRemainingPercent = 100;
+            ContextWindowSummary = "Context window: unknown";
+            ContextWindowSeverity = "Normal";
+            return;
+        }
+
+        long remaining = Math.Max(0, ContextWindowTotalTokens - used);
+        ContextWindowRemainingPercent = Math.Round(remaining * 100.0 / ContextWindowTotalTokens, 1);
+        ContextWindowSummary = $"Context window: {FormatTokens(used)} used · {FormatTokens(remaining)} remaining of {FormatTokens(ContextWindowTotalTokens)}";
+        ContextWindowSeverity = ContextWindowRemainingPercent < 10 ? "Critical" : ContextWindowRemainingPercent < 30 ? "Warning" : "Normal";
+    }
+
+    private static string FormatTokens(long tokens) => tokens >= 1000 ? $"{tokens / 1000.0:F1}K" : tokens.ToString("N0");
 
     private void UpdateTokenUsageDisplay()
     {
@@ -205,6 +288,22 @@ public partial class SystemMonitorViewModel : ObservableObject
 
     [RelayCommand]
     private async Task RefreshAsync()
+    {
+        // Skip overlapping ticks (a slow WMI/nvidia-smi probe while the previous tick is still
+        // running would otherwise stack refresh tasks every interval).
+        if (_refreshing) return;
+        _refreshing = true;
+        try
+        {
+            await RefreshCoreAsync();
+        }
+        finally
+        {
+            _refreshing = false;
+        }
+    }
+
+    private async Task RefreshCoreAsync()
     {
         var profile = await _systemProfiler.GetHardwareProfileAsync();
 

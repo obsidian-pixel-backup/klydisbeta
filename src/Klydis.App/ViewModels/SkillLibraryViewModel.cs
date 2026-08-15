@@ -107,7 +107,7 @@ public partial class SkillLibraryViewModel : ObservableObject
         AvailableComplexities.Add(SkillComplexity.Complex);
         AvailableComplexities.Add(SkillComplexity.Specialized);
 
-        _ = RefreshSkillsAsync();
+        Klydis.Core.Diagnostics.FireAndForget.Observe(RefreshSkillsAsync(), operation: nameof(RefreshSkillsAsync));
     }
 
     private void OnSkillsChanged()
@@ -119,7 +119,7 @@ public partial class SkillLibraryViewModel : ObservableObject
         }
         else
         {
-            _ = RefreshSkillsAsync();
+            Klydis.Core.Diagnostics.FireAndForget.Observe(RefreshSkillsAsync(), operation: nameof(RefreshSkillsAsync));
         }
     }
 

@@ -378,6 +378,10 @@ public class SystemPromptManager
     /// </summary>
     public string BuildCompactSystemPrompt(
         string toolsSchema,
+        string worldStateHeader = "",
+        string queueNotice = "",
+        string ragNotice = "",
+        string skillHeader = "",
         string? personalityMode = null,
         bool isGoalMode = false)
     {
@@ -429,6 +433,19 @@ public class SystemPromptManager
             sb.AppendLine("You MUST strictly adhere to this personality style for all responses:");
             sb.AppendLine(personalityContent.Trim());
         }
+
+        // Long-horizon memory and context headers MUST reach every model class. The compact
+        // path is used for MoE / thinking models (qwen3.6-14B-A3B and friends) — the same
+        // models that rely on rolling compression. Without these headers the WorldState
+        // (summarized older context), pending queued messages, RAG workspace collections, and
+        // active skill directives are silently dropped from the prompt, so once compression
+        // prunes the raw history the model loses all memory of the session (observed: a
+        // multi-turn story continuation forgot the premise entirely and drifted into a new
+        // generic plot).
+        if (!string.IsNullOrWhiteSpace(worldStateHeader)) sb.Append(worldStateHeader);
+        if (!string.IsNullOrWhiteSpace(queueNotice)) sb.Append(queueNotice);
+        if (!string.IsNullOrWhiteSpace(ragNotice)) sb.Append(ragNotice);
+        if (!string.IsNullOrWhiteSpace(skillHeader)) sb.Append(skillHeader);
 
         return sb.ToString().Trim();
     }

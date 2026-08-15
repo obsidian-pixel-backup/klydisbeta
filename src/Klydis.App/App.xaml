@@ -25,6 +25,7 @@
             <converters:BoolToVisConverter x:Key="BooleanToVisibilityConverter" />
             <converters:InverseBoolToVisConverter x:Key="InverseBooleanToVisibilityConverter" />
             <converters:InverseBooleanConverter x:Key="InverseBooleanConverter" />
+            <converters:PercentToDashOffsetConverter x:Key="PercentToDashOffsetConverter" />
             
             <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
                 <Setter Property="Width" Value="7"/>

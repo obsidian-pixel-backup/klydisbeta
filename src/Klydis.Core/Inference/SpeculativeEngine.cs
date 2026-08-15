@@ -104,12 +104,24 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
 
     private void SafeOffloadDisposal(params IDisposable?[] resources)
     {
-        var ordered = resources.Where(r => r != null)
-                               .OrderBy(r => r is LLamaWeights || r!.GetType().Name.Contains("Weights") ? 2 : (r is LLamaContext || r!.GetType().Name.Contains("Context") ? 0 : 1));
-        foreach (var r in ordered)
+        // Draft context/weights disposal must never run on the calling thread (UI). Route
+        // through the background disposer when registered; otherwise fire-and-forget on the
+        // threadpool (draft resources are small and their disposal overlaps the next load).
+        if (NativeResourceDisposer != null)
         {
-            try { r?.Dispose(); } catch { }
+            NativeResourceDisposer.EnqueueForDisposal(resources);
+            return;
         }
+
+        var items = resources.Where(r => r != null).Select(r => r!).ToArray();
+        if (items.Length == 0) return;
+        Task.Run(() =>
+        {
+            foreach (var r in items)
+            {
+                try { r.Dispose(); } catch { }
+            }
+        });
     }
 
     public Task LoadDraftModelAsync(string draftPath, Hardware.OffloadPlan offloadPlan)
@@ -481,7 +493,14 @@ public sealed class SpeculativeEngine : IDisposable, IAsyncDisposable
         // target's sampling pipeline instance: DefaultSamplingPipeline keeps mutable RNG state
         // and is not safe for concurrent sampling from two executors. Build a fresh pipeline
         // with the same sampling parameters (props are init-only, hence the initializer).
-        var targetPipeline = targetInferenceParams.SamplingPipeline as LLama.Sampling.DefaultSamplingPipeline;
+        // The chat path wraps the pipeline in SpecialTokenFilterPipeline, so unwrap it to
+        // read the underlying DefaultSamplingPipeline properties.
+        var effectiveTargetPipeline = targetInferenceParams.SamplingPipeline;
+        if (effectiveTargetPipeline is SpecialTokenFilterPipeline filtered)
+        {
+            effectiveTargetPipeline = filtered.Inner;
+        }
+        var targetPipeline = effectiveTargetPipeline as LLama.Sampling.DefaultSamplingPipeline;
         var draftPipeline = new LLama.Sampling.DefaultSamplingPipeline
         {
             Temperature = targetPipeline?.Temperature ?? 0.7f,

@@ -386,7 +386,7 @@ public partial class SettingsViewModel : ObservableObject
         if (!string.IsNullOrEmpty(_inferenceEngine.CurrentModelPath))
         {
             var modelPath = _inferenceEngine.CurrentModelPath;
-            _ = Task.Run(async () => await _inferenceEngine.AttachSpeculativeDraftAsync(modelPath));
+            Klydis.Core.Diagnostics.FireAndForget.Run(() => _inferenceEngine.AttachSpeculativeDraftAsync(modelPath), operation: "AttachSpeculativeDraftAsync");
         }
     }
 
@@ -398,7 +398,7 @@ public partial class SettingsViewModel : ObservableObject
         if (!string.IsNullOrEmpty(_inferenceEngine.CurrentModelPath))
         {
             var modelPath = _inferenceEngine.CurrentModelPath;
-            _ = Task.Run(async () => await _inferenceEngine.AttachSpeculativeDraftAsync(modelPath));
+            Klydis.Core.Diagnostics.FireAndForget.Run(() => _inferenceEngine.AttachSpeculativeDraftAsync(modelPath), operation: "AttachSpeculativeDraftAsync");
         }
     }
 
@@ -448,7 +448,7 @@ public partial class SettingsViewModel : ObservableObject
         SelectedContextSizeFormatted = ContextBuckets[closestIdx].Label;
         if (_inferenceEngine.IsModelLoaded)
         {
-            _ = Task.Run(async () => await _inferenceEngine.ReapplyModelParametersAsync());
+            Klydis.Core.Diagnostics.FireAndForget.Run(() => _inferenceEngine.ReapplyModelParametersAsync(), operation: "ReapplyModelParametersAsync");
         }
     }
 
@@ -487,7 +487,7 @@ public partial class SettingsViewModel : ObservableObject
         _inferenceEngine.UserBatchSize = (uint)value;
         if (_inferenceEngine.IsModelLoaded)
         {
-            _ = Task.Run(async () => await _inferenceEngine.ReapplyModelParametersAsync());
+            Klydis.Core.Diagnostics.FireAndForget.Run(() => _inferenceEngine.ReapplyModelParametersAsync(), operation: "ReapplyModelParametersAsync");
         }
     }
 
@@ -497,7 +497,7 @@ public partial class SettingsViewModel : ObservableObject
         _inferenceEngine.UserUBatchSize = (uint)value;
         if (_inferenceEngine.IsModelLoaded)
         {
-            _ = Task.Run(async () => await _inferenceEngine.ReapplyModelParametersAsync());
+            Klydis.Core.Diagnostics.FireAndForget.Run(() => _inferenceEngine.ReapplyModelParametersAsync(), operation: "ReapplyModelParametersAsync");
         }
     }
 }

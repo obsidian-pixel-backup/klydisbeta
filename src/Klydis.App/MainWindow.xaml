@@ -318,6 +318,37 @@
                             </ToolTip>
                         </Button.ToolTip>
                     </Button>
+
+                    <!-- Context window progress ring (bottom-right corner): shows how much of the
+                         model's context window is still free. The ring depletes as the window
+                         fills; the center number is the % remaining. Amber below 30%, red below 10%. -->
+                    <Grid Width="24" Height="24" Margin="10,0,0,0" VerticalAlignment="Center"
+                          ToolTip="{Binding SystemMonitorViewModel.ContextWindowSummary}">
+                        <Ellipse Stroke="{DynamicResource TextMutedBrush}" StrokeThickness="3" Opacity="0.22"/>
+                        <Ellipse StrokeThickness="3" StrokeDashArray="66 66"
+                                 StrokeDashOffset="{Binding SystemMonitorViewModel.ContextWindowRemainingPercent, Converter={StaticResource PercentToDashOffsetConverter}, ConverterParameter=66}"
+                                 RenderTransformOrigin="0.5,0.5">
+                            <Ellipse.RenderTransform>
+                                <RotateTransform Angle="-90"/>
+                            </Ellipse.RenderTransform>
+                            <Ellipse.Style>
+                                <Style TargetType="Ellipse">
+                                    <Setter Property="Stroke" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Warning">
+                                            <Setter Property="Stroke" Value="{DynamicResource WarningBrush}"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding SystemMonitorViewModel.ContextWindowSeverity}" Value="Critical">
+                                            <Setter Property="Stroke" Value="{DynamicResource ErrorBrush}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Ellipse.Style>
+                        </Ellipse>
+                        <TextBlock Text="{Binding SystemMonitorViewModel.ContextWindowRemainingPercent, StringFormat={}{0:F0}%}"
+                                   FontSize="8" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </Grid>
                 </StackPanel>
             </Grid>
         </Border>

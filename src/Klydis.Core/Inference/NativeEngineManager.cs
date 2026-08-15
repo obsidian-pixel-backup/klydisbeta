@@ -80,11 +80,8 @@ public static class NativeEngineManager
                     .WithCuda(enableCuda)
                     .WithVulkan(enableVulkan)
                     .WithLogCallback((level, message) => {
-                        try
-                        {
-                            File.AppendAllText("llama_native.log", $"[{level}] {message}{Environment.NewLine}");
-                        }
-                        catch { /* Ignore logging errors if file is locked */ }
+                        // Rotating log in %LOCALAPPDATA%\Klydis\logs — never blocks or throws.
+                        Klydis.Core.Diagnostics.KlydisLog.AppendNativeLog($"[{level}] {message}{Environment.NewLine}");
                     });
 
                 // Make the wrapper search the custom native engine directory FIRST whenever one
@@ -577,9 +574,19 @@ public static class NativeEngineManager
                 logger?.LogInformation("Downloading updated native engine package from {Url}...", url);
                 statusCallback?.Invoke("Downloading updated native engine — this can take a few minutes…");
 
+                // Stream to disk instead of buffering the whole zip in RAM: llama.cpp release
+                // zips are hundreds of MB, and GetByteArrayAsync would hold all of that in
+                // memory at once. ResponseHeadersRead + CopyToAsync keeps peak memory flat.
                 var tempZipPath = Path.Combine(Path.GetTempPath(), $"llama_native_{Guid.NewGuid():N}.zip");
-                var zipBytes = await httpClient.GetByteArrayAsync(url, ct);
-                await File.WriteAllBytesAsync(tempZipPath, zipBytes);
+                using (var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
+                {
+                    response.EnsureSuccessStatusCode();
+                    await using (var contentStream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
+                    await using (var fileStream = new FileStream(tempZipPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+                    {
+                        await contentStream.CopyToAsync(fileStream, ct).ConfigureAwait(false);
+                    }
+                }
 
                 var tempExtractDir = Path.Combine(Path.GetTempPath(), $"llama_extracted_{Guid.NewGuid():N}");
                 Directory.CreateDirectory(tempExtractDir);

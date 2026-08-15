@@ -8,7 +8,7 @@
 
 [![Official Website](https://img.shields.io/badge/Website-klydis.co-00F5A0?style=for-the-badge&logo=globe&logoColor=0D0D0D)](https://klydis.co)
 [![Documentation](https://img.shields.io/badge/Docs-docs.klydis.com-00E6A8?style=for-the-badge&logo=gitbook&logoColor=0D0D0D)](https://docs.klydis.com)
-[![Framework](https://img.shields.io/badge/.NET-9.0-7015E6?style=for-the-badge&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![Framework](https://img.shields.io/badge/.NET-10.0-7015E6?style=for-the-badge&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Platform](https://img.shields.io/badge/Platform-Windows_x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![CUDA](https://img.shields.io/badge/GPU_Acceleration-CUDA_12-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://nvidia.com)
 
@@ -18,7 +18,7 @@
 
 ## 🚀 Overview
 
-**KlydisBeta** is a modern, dark-themed WPF desktop application engineered for zero-latency, private Large Language Model (LLM) execution directly on local Windows hardware. Powered by **.NET 9** and **LLamaSharp**, Klydis operates with an **in-process inference engine**, eliminating the overhead, network leaks, and IPC latency of external local servers (like Ollama or LM Studio).
+**KlydisBeta** is a modern, dark-themed WPF desktop application engineered for zero-latency, private Large Language Model (LLM) execution directly on local Windows hardware. Powered by **.NET 10** and a vendored fork of **LLamaSharp** (see `patches/README.md`), Klydis operates with an **in-process inference engine**, eliminating the overhead, network leaks, and IPC latency of external local servers (like Ollama or LM Studio).
 
 Klydis is part of the [klydis.co](https://klydis.co) ecosystem, combining deep hardware awareness with advanced RAG, agentic skill orchestration, and non-blocking asynchronous VRAM lifecycle management.
 
@@ -33,7 +33,7 @@ Klydis is part of the [klydis.co](https://klydis.co) ecosystem, combining deep h
 - 📚 **Local RAG (Retrieval-Augmented Generation)**: Index local documents (PDF, TXT, Markdown, Code) into vector stores with SQLite persistence for context-aware querying.
 - 🛠️ **Agentic Skill Orchestration**: Create, manage, and execute custom prompt skills, system personas, and automated workflow routines.
 - 🎨 **Mint & Dark Modern UI**: Built with custom XAML design system featuring Obsidian, Midnight, and Ocean backgrounds paired with Forest Mint, Fluorescent Cyan, and Amber accent themes.
-- 💾 **Stateless Multi-Turn Chat**: Utilizes `StatelessExecutor` and SQLite context persistence to keep multi-turn conversations pristine without cache corruption.
+- 💾 **Prefix-Cached Multi-Turn Chat**: Uses `InteractiveExecutor` with native KV-cache prefix reuse (exact + partial), fast in-place context resets (`llama_kv_cache_seq_rm`), and SQLite persistence to keep multi-turn conversations fast without cache corruption.
 
 <div align="center">
   <img src="assets/ui_mockup.png" alt="Klydis UI Mockup" width="85%">
@@ -58,7 +58,7 @@ Explore official resources and documentation from [klydis.co](https://klydis.co)
 
 ### Prerequisites
 - **Operating System**: Windows 10 / 11 (64-bit)
-- **SDK**: [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or higher
+- **SDK**: [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) or higher
 - **GPU Acceleration (Optional)**: NVIDIA GPU with CUDA 12 drivers installed. *(Automatic CPU fallback available via AVX2/AVX-512)*.
 
 ---
@@ -169,7 +169,7 @@ Contributions, bug reports, and feature requests are welcome!
 ---
 
 <div align="center">
-  <sub>Built with ❤️ by the Klydis team. Powered by C#, .NET 9, and LLamaSharp.</sub>
+  <sub>Built with ❤️ by the Klydis team. Powered by C#, .NET 10, and a vendored LLamaSharp fork.</sub>
   <br>
   <sub>Official Website: <a href="https://klydis.co">klydis.co</a></sub>
 </div>

@@ -445,12 +445,19 @@ public partial class ChatView : UserControl
 
         Style Res(string key) => (Style)viewer.FindResource(key);
 
-        if (viewer.FindResource("TextPrimaryBrush") is Brush textBrush)
+        // Respect an explicitly-set foreground (e.g. the muted secondary brush used by the
+        // thinking bubble) and fall back to the primary brush otherwise.
+        var foreground = TextElement.GetForeground(viewer);
+        if (foreground == null && viewer.FindResource("TextPrimaryBrush") is Brush textBrush)
         {
-            TextElement.SetForeground(viewer, textBrush);
+            foreground = textBrush;
+        }
+        if (foreground != null)
+        {
+            TextElement.SetForeground(viewer, foreground);
             if (viewer.Document != null)
             {
-                viewer.Document.Foreground = textBrush;
+                viewer.Document.Foreground = foreground;
             }
         }
 
@@ -486,7 +493,7 @@ public partial class ChatView : UserControl
             viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, content);
         }
 
-        if (viewer.Document != null && viewer.FindResource("TextPrimaryBrush") is Brush finalBrush)
+        if (viewer.Document != null && TextElement.GetForeground(viewer) is Brush finalBrush)
         {
             viewer.Document.Foreground = finalBrush;
         }

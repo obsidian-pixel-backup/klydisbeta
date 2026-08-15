@@ -130,7 +130,7 @@ public partial class ModelLibraryViewModel : ObservableObject
     {
         if (value != null && !value.IsLoaded)
         {
-            _ = LoadModelAsync(value.ModelId);
+            Klydis.Core.Diagnostics.FireAndForget.Observe(LoadModelAsync(value.ModelId), operation: nameof(LoadModelAsync));
         }
     }
 
@@ -207,9 +207,9 @@ public partial class ModelLibraryViewModel : ObservableObject
         _registry.RegistryChanged += OnRegistryChanged;
         _inferenceEngine.ModelStateChanged += OnModelStateChanged;
         
-        _ = ScanAsync();
-        _ = LoadHfModelsAsync();
-        _ = ResumeActiveDownloadsAsync();
+        Klydis.Core.Diagnostics.FireAndForget.Observe(ScanAsync(), operation: nameof(ScanAsync));
+        Klydis.Core.Diagnostics.FireAndForget.Observe(LoadHfModelsAsync(), operation: nameof(LoadHfModelsAsync));
+        Klydis.Core.Diagnostics.FireAndForget.Observe(ResumeActiveDownloadsAsync(), operation: nameof(ResumeActiveDownloadsAsync));
 
         _timer = new DispatcherTimer
         {
@@ -257,7 +257,7 @@ public partial class ModelLibraryViewModel : ObservableObject
     {
         if (System.Windows.Application.Current != null)
         {
-            System.Windows.Application.Current.Dispatcher.Invoke(() => { _ = PopulateModelsAsync(); });
+            System.Windows.Application.Current.Dispatcher.Invoke(() => { Klydis.Core.Diagnostics.FireAndForget.Observe(PopulateModelsAsync(), operation: nameof(PopulateModelsAsync)); });
         }
     }
 
@@ -266,7 +266,7 @@ public partial class ModelLibraryViewModel : ObservableObject
         var activeDownloads = await _registry.GetActiveDownloadsAsync();
         foreach (var download in activeDownloads)
         {
-            _ = StartDownloadAsync(download.RepoId, download.FileName, download.DestinationPath);
+            Klydis.Core.Diagnostics.FireAndForget.Observe(StartDownloadAsync(download.RepoId, download.FileName, download.DestinationPath), operation: nameof(StartDownloadAsync));
         }
     }
 
@@ -575,7 +575,7 @@ public partial class ModelLibraryViewModel : ObservableObject
 
         if (active)
         {
-            _ = TriggerHfSearchAsync();
+            Klydis.Core.Diagnostics.FireAndForget.Observe(TriggerHfSearchAsync(), operation: nameof(TriggerHfSearchAsync));
         }
         else
         {
@@ -651,7 +651,7 @@ public partial class ModelLibraryViewModel : ObservableObject
             IsThinking = isThinking
         };
 
-        _ = LoadGgufFilesAsync(card, info.RepoId);
+        Klydis.Core.Diagnostics.FireAndForget.Observe(LoadGgufFilesAsync(card, info.RepoId), operation: nameof(LoadGgufFilesAsync));
         return card;
     }
 

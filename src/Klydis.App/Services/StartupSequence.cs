@@ -123,8 +123,8 @@ public sealed class StartupSequence
         var modelRegistry = _services.GetRequiredService<ModelRegistry>();
         var modelDiscovery = _services.GetRequiredService<ModelDiscoveryService>();
 
-        modelDiscovery.ModelDiscovered += path => { _ = modelRegistry.SyncWithDiskAsync(); };
-        modelDiscovery.ModelDeleted += path => { _ = modelRegistry.SyncWithDiskAsync(); };
+        modelDiscovery.ModelDiscovered += path => { Klydis.Core.Diagnostics.FireAndForget.Observe(modelRegistry.SyncWithDiskAsync(), _logger, "ModelRegistry.SyncWithDiskAsync"); };
+        modelDiscovery.ModelDeleted += path => { Klydis.Core.Diagnostics.FireAndForget.Observe(modelRegistry.SyncWithDiskAsync(), _logger, "ModelRegistry.SyncWithDiskAsync"); };
 
         await modelRegistry.LoadAsync();
         await modelRegistry.SyncWithDiskAsync();

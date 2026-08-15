@@ -409,8 +409,20 @@ public class ToolExecutor(
 
     private ToolResult ProcessToolOutputOffload(ToolResult result)
     {
+        // Paths that never reach the offload branch (failed tools with giant error blobs,
+        // empty output, or offloading disabled): hard-truncate in place so a runaway command's
+        // output cannot blow up the context window or the chat UI.
         if (!EnableOutputOffloading || !result.Success || string.IsNullOrEmpty(result.Output))
+        {
+            if (result.Output.Length > MaxToolOutputChars)
+            {
+                return result with
+                {
+                    Output = result.Output[..MaxToolOutputChars] + $"\n...[truncated: {result.Output.Length - MaxToolOutputChars} more chars]"
+                };
+            }
             return result;
+        }
 
         if (result.Output.Length <= MaxToolOutputChars)
             return result;
@@ -449,6 +461,14 @@ public class ToolExecutor(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to offload tool output to disk for {ToolName}", result.ToolName);
+            // Offload failed: fall back to in-place truncation so the context stays bounded.
+            if (result.Output.Length > MaxToolOutputChars)
+            {
+                return result with
+                {
+                    Output = result.Output[..MaxToolOutputChars] + $"\n...[truncated: {result.Output.Length - MaxToolOutputChars} more chars]"
+                };
+            }
             return result;
         }
     }
@@ -1033,12 +1053,29 @@ public class ToolExecutor(
         var finalMessage = string.IsNullOrWhiteSpace(lastError)
             ? "Failed to crawl URL."
             : $"Failed to crawl URL. {lastError}";
-        if (lastError != null && lastError.Contains("Executable doesn't exist"))
+        if (IsBrowserMissingError(lastError))
         {
-            finalMessage = "Browser binaries are not installed and the automatic installation failed, so the page could not be fetched either directly or via a browser.";
+            // Do not surface raw Playwright installer instructions to the model — tell it the
+            // browser is being installed on first use and to retry shortly.
+            finalMessage = "Browser binaries are missing and the automatic one-time installation (a ~160 MB download) has not completed, so the page could not be fetched via a browser. Please call crawl_url again in a minute; meanwhile the direct HTTP fetch path continues to work for static pages.";
         }
 
         return new ToolResult(request.Name, false, "", finalMessage);
+    }
+
+    /// <summary>
+    /// True when a browser exception means Playwright's binaries are not installed yet
+    /// (as opposed to a page-level navigation/network failure).
+    /// </summary>
+    private static bool IsBrowserMissingError(string? message)
+    {
+        if (string.IsNullOrEmpty(message)) return false;
+        return message.Contains("browser binaries not found", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("executable doesn't exist", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("executable path doesn't exist", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("playwright.ps1", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("ms-playwright", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("host executable doesn't exist", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

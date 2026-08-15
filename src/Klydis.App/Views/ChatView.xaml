@@ -731,10 +731,13 @@
                                         <Border Background="{DynamicResource ThinkingBubbleBackgroundBrush}"
                                                 BorderBrush="{DynamicResource AccentSoftBrush}" BorderThickness="2,0,0,0"
                                                 Padding="12,8" CornerRadius="0,8,8,0" Margin="4,4,0,0">
-                                            <ScrollViewer MaxHeight="320" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                                <TextBlock Text="{Binding Content}" FontStyle="Italic" TextWrapping="Wrap" FontSize="12.5"
-                                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
-                                            </ScrollViewer>
+                                            <mdxam:MarkdownScrollViewer Markdown="{Binding RenderedContent}"
+                                                                        MaxHeight="320"
+                                                                        VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                                                        Foreground="{DynamicResource TextSecondaryBrush}"
+                                                                        TextElement.Foreground="{DynamicResource TextSecondaryBrush}"
+                                                                        FontSize="12.5" Margin="0" Padding="0"
+                                                                        Loaded="MarkdownViewer_Loaded"/>
                                         </Border>
                                     </Expander>
                                 </Border>

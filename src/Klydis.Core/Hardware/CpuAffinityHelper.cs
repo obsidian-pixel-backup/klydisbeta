@@ -90,8 +90,11 @@ public static class CpuAffinityHelper
         return new IntPtr(mask);
     }
 
+    private static IntPtr? _savedAffinity;
+
     /// <summary>
-    /// Locks the current process execution to physical P-Cores.
+    /// Locks the current process execution to physical P-Cores, remembering the previous mask so
+    /// <see cref="RestoreProcessAffinity"/> can put it back once the CPU-only model unloads.
     /// </summary>
     public static void ApplyPCoreAffinityToProcess()
     {
@@ -99,8 +102,30 @@ public static class CpuAffinityHelper
         {
             if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
             {
-                IntPtr pCoreMask = GetPCoreAffinityMask();
-                Process.GetCurrentProcess().ProcessorAffinity = pCoreMask;
+                var process = Process.GetCurrentProcess();
+                _savedAffinity ??= process.ProcessorAffinity;
+                process.ProcessorAffinity = GetPCoreAffinityMask();
+            }
+        }
+        catch
+        {
+            // Ignore if OS permissions restrict process affinity modification
+        }
+    }
+
+    /// <summary>
+    /// Restores the process affinity mask that was in place before
+    /// <see cref="ApplyPCoreAffinityToProcess"/> was called. No-op when affinity was never
+    /// changed (or the OS rejected the change).
+    /// </summary>
+    public static void RestoreProcessAffinity()
+    {
+        try
+        {
+            if (_savedAffinity.HasValue && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
+            {
+                Process.GetCurrentProcess().ProcessorAffinity = _savedAffinity.Value;
+                _savedAffinity = null;
             }
         }
         catch

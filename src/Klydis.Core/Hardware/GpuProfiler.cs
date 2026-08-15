@@ -203,6 +203,11 @@ public class GpuProfiler
     /// <returns>A <see cref="VramUsage"/> record with free and used VRAM, or null if query fails.</returns>
     public async Task<VramUsage?> GetRealTimeVramUsageAsync()
     {
+        // Fast NVML path first (sub-millisecond, no subprocess) — the same order GetGpuInfoAsync
+        // uses. Previously this method always spawned nvidia-smi, paying a process launch every call.
+        var nvml = GetVramUsageFromNvml();
+        if (nvml != null) return nvml;
+
         try
         {
             var output = await RunNvidiaSmiAsync("--query-gpu=memory.free,memory.used --format=csv,noheader,nounits");
@@ -222,6 +227,28 @@ public class GpuProfiler
             _logger?.LogWarning(ex, "Failed to query real-time VRAM usage via nvidia-smi.");
         }
 
+        return null;
+    }
+
+    private VramUsage? GetVramUsageFromNvml()
+    {
+        try
+        {
+            EnsureNvmlInitialized();
+            if (!_isNvmlInitialized || _nvmlDeviceHandle == IntPtr.Zero) return null;
+
+            if (NvmlNative.nvmlDeviceGetMemoryInfo(_nvmlDeviceHandle, out var mem) == 0)
+            {
+                return new VramUsage(
+                    FreeVramMb: (int)(mem.Free / (1024 * 1024)),
+                    UsedVramMb: (int)(mem.Used / (1024 * 1024))
+                );
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "NVML native VRAM query failed.");
+        }
         return null;
     }
 

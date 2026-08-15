@@ -16,6 +16,12 @@
          (no UAC prompt) so dotnet run / Start-Klydis.bat work from a normal
          terminal. Elevated operations are handled per-action, not per-process. -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- Runtime knobs: TieredPgo layers the JIT profile-guided optimizations for the
+         inference hot loops; ServerGarbageCollection uses per-core heaps, which suits the
+         app's large native working set + parallel generation tasks better than workstation GC. -->
+    <TieredPgo>true</TieredPgo>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
