@@ -334,6 +334,56 @@ public class ChatEngine(
     public bool IsGoalMode { get; set; } = true;
     public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
 
+    private Klydis.Core.Protocol.ModelProfile? _currentModelProfile;
+    private string? _profileBuiltForModel;
+
+    /// <summary>
+    /// The P1 model profile for the currently loaded model — the authoritative description of
+    /// how THIS model communicates (template, reasoning protocol, tool protocol, capability
+    /// levels). Built lazily from the inference engine's metadata via
+    /// <see cref="Klydis.Core.Protocol.ModelProfileFactory"/>; the protocol fingerprint is
+    /// logged once per model so every session starts with a visible protocol decision.
+    /// Null when no model is loaded or the profile cannot be built.
+    /// </summary>
+    public Klydis.Core.Protocol.ModelProfile? CurrentModelProfile
+    {
+        get
+        {
+            if (!inferenceEngine.IsModelLoaded || string.IsNullOrWhiteSpace(inferenceEngine.CurrentModelPath))
+            {
+                return null;
+            }
+            if (_profileBuiltForModel != inferenceEngine.CurrentModelPath)
+            {
+                _profileBuiltForModel = inferenceEngine.CurrentModelPath;
+                _currentModelProfile = null;
+                try
+                {
+                    var profile = Klydis.Core.Protocol.ModelProfileFactory.Build(
+                        inferenceEngine.CurrentModelPath,
+                        inferenceEngine.CurrentModelPath,
+                        inferenceEngine.Architecture ?? "unknown",
+                        rawChatTemplate: inferenceEngine.RawChatTemplate,
+                        declaredTemplate: null,
+                        explicitOverride: null);
+                    _currentModelProfile = profile;
+                    var protocolKey = Klydis.Core.Protocol.ProtocolRegistry.ResolveProtocolKey(profile) ?? "legacy-fallback";
+                    logger.LogInformation(
+                        "ModelProfile: id={Model} arch={Arch} template={Template} reasoning={Reasoning} tools={ToolProtocol} fingerprint={Fingerprint} protocol={ProtocolKey}",
+                        System.IO.Path.GetFileNameWithoutExtension(inferenceEngine.CurrentModelPath),
+                        profile.Architecture, profile.Template, profile.Reasoning, profile.ToolProtocol,
+                        profile.Fingerprint, protocolKey);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to build model profile; using legacy protocol fallback.");
+                    _currentModelProfile = null;
+                }
+            }
+            return _currentModelProfile;
+        }
+    }
+
     /// <summary>
     /// Deterministic completion evidence for the goal loop's verification gate: the persisted
     /// plan is the authoritative checklist, so "done" requires every item to be checked off.
@@ -2677,9 +2727,12 @@ public class ChatEngine(
         // while the current step demanded a write_file). The correction instead re-states the
         // current step and demands ONE executable action. The "current step" is read from the
         // live plan (the same source the no-action repair uses).
-        string autonomousDirective = currentStep != null
-            ? $"Execute exactly ONE tool call that advances the current step '{currentStep}'. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute."
-            : "Execute exactly ONE tool call that advances the current task. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute.";
+        //
+        // Not every step demands a tool call: a verification step needs evidence (build/test/
+        // inspection) and a summarize step needs a textual deliverable. For those, demanding a
+        // raw tool call is just as wrong as banning tools on an implementation step — the
+        // directive follows the step's expected action instead of assuming tool_call.
+        string autonomousDirective = BuildAutonomousDirective(currentStep);
 
         return attempt >= 3
             ? mode == InteractionMode.Autonomous
@@ -2703,6 +2756,46 @@ public class ChatEngine(
                 _ => "[System Self-Correction: You began looping on the same output. Stop immediately, re-read the user's message, and continue with new, non-repeating content that fulfills the user's request.]"
             };
     }
+
+    /// <summary>
+    /// Builds the action directive for an autonomous loop correction from the current step
+    /// text. The directive follows the step's expected action instead of assuming a tool
+    /// call: implementation/inspection steps demand ONE tool call; verification steps demand
+    /// evidence (build, tests, inspection); summary/presentation steps demand the final
+    /// deliverable as text.
+    ///
+    /// TEMPORARY BRIDGE (P0): this derives execution semantics from English step text.
+    /// P1 replaces it with data-driven TaskStep contracts (ExpectedAction / AllowedTools /
+    /// VerificationCriteria / CompletionCondition) so the directive becomes a pure switch on
+    /// TaskStep.ExpectedAction with no phrase matching. Deliberately conservative: only
+    /// explicit verification/summarization markers switch the directive, everything else
+    /// defaults to the tool-call demand.
+    /// </summary>
+    private static string BuildAutonomousDirective(string? currentStep)
+    {
+        if (string.IsNullOrWhiteSpace(currentStep))
+        {
+            return "Execute exactly ONE tool call that advances the current task. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute.";
+        }
+
+        string step = currentStep.ToLowerInvariant();
+        bool isVerificationStep = ContainsAny(step,
+            "verify", "verification", "build", "test", "run the", "preview", "inspect the result");
+        bool isSummaryStep = ContainsAny(step, "summarize", "present the", "finalize");
+
+        if (isSummaryStep)
+        {
+            return $"The current step '{currentStep}' requires the final deliverable. Produce it NOW as your response — write it to a file if it is code or a document ('write_file'), then present the result. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — deliver.";
+        }
+        if (isVerificationStep)
+        {
+            return $"The current step '{currentStep}' requires verification EVIDENCE. Execute the verification now — run the build/tests or inspect the files ('run_command', 'read_file') and report the factual result. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — verify.";
+        }
+        return $"Execute exactly ONE tool call that advances the current step '{currentStep}'. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute.";
+    }
+
+    private static bool ContainsAny(string text, params string[] markers)
+        => markers.Any(m => text.Contains(m, StringComparison.Ordinal));
 
     /// <summary>
     /// Short human-readable description of a loop reason, used for the user-visible notice.
