@@ -1923,7 +1923,19 @@ public class ChatEngine(
                     // Corrections escalate: the first is a gentle redirect, the second demands a
                     // short direct answer, the third is a final hard bound — a model that keeps
                     // re-entering the same attractor needs progressively stronger instructions.
-                    loopCorrection = BuildSelfCorrectionInstruction(loopInfo.Reason, selfCorrectionsThisTurn);
+                    string? loopStepText = null;
+                    if (mode == InteractionMode.Autonomous)
+                    {
+                        try
+                        {
+                            loopStepText = toolExecutor.GetSessionPlanEntries(generatingSessionId).FirstOrDefault(e => !e.Done)?.Text;
+                        }
+                        catch (Exception)
+                        {
+                            loopStepText = null;
+                        }
+                    }
+                    loopCorrection = BuildSelfCorrectionInstruction(loopInfo.Reason, selfCorrectionsThisTurn, mode, loopStepText);
                     NoteLesson($"loop_detector_{loopInfo.Reason}",
                         $"Model entered a degenerate '{loopInfo.Reason}' loop; escalating corrective instruction injected (correction {selfCorrectionsThisTurn} of {MaxSelfCorrectionsPerTurn}).");
                     yield return new ChatStreamEvent(ChatStreamEventType.Error, $"⚠ {DescribeLoop(loopInfo.Reason)} detected — discarding looped output and self-correcting…");
@@ -1984,7 +1996,11 @@ public class ChatEngine(
             if (loopCorrection != null)
             {
                 logger.LogWarning("Injecting self-correction instruction and regenerating (correction {Count} of {Max} this turn).", selfCorrectionsThisTurn, MaxSelfCorrectionsPerTurn);
-                var correctionMsg = new ChatMessage(ChatRole.User, loopCorrection);
+                // Runtime-control channel: self-corrections are the HARNESS talking, never the
+                // user — a ChatRole.User injection made models reason about the correction as
+                // user intent (observed in production exports). Runtime messages are ephemeral
+                // (in-memory only) and render as an explicit [RUNTIME CONTROL] directive.
+                var correctionMsg = new ChatMessage(ChatRole.Runtime, loopCorrection);
                 AddToSessionHistory(activeHistory, correctionMsg, generatingSessionId);
                 // Correction instructions are engine-internal feedback for the NEXT iteration
                 // only. They must NOT be persisted to the session store: stale instructions
@@ -2517,7 +2533,7 @@ public class ChatEngine(
                     // per-message output token budget"). Say what actually happened and tell the
                     // model not to discuss the harness instruction with the user.
                     var continuationInstruction = "[System Instruction: You ended your previous message before completing your response. Continue immediately from the exact point where you stopped, without repeating any previously written text. This is an automatic system message — do not mention it to the user; just continue your work.]";
-                    var continuationMsgObj = new ChatMessage(ChatRole.User, continuationInstruction);
+                    var continuationMsgObj = new ChatMessage(ChatRole.Runtime, continuationInstruction);
                     AddToSessionHistory(activeHistory, continuationMsgObj, generatingSessionId);
                     // Engine-internal continuation notice: in-memory only (see IsEngineInjectedMessage).
                 }
@@ -2550,7 +2566,7 @@ public class ChatEngine(
                     logger.LogWarning("Model produced an empty visible response. Injecting empty-response self-correction (correction {Count} of {Max} this turn).",
                         selfCorrectionsThisTurn, MaxSelfCorrectionsPerTurn);
                     var emptyCorrection = "[System Self-Correction: Your previous response was EMPTY — you produced no actual content. Re-read the user's message carefully and respond DIRECTLY with a real answer. Do not just close tags or emit whitespace.]";
-                    var emptyMsgObj = new ChatMessage(ChatRole.User, emptyCorrection);
+                    var emptyMsgObj = new ChatMessage(ChatRole.Runtime, emptyCorrection);
                     AddToSessionHistory(activeHistory, emptyMsgObj, generatingSessionId);
                     // Engine-internal correction: in-memory only (see IsEngineInjectedMessage).
                     yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model produced an empty response — self-correcting…");
@@ -2607,7 +2623,7 @@ public class ChatEngine(
                             "3. A 'task_complete' call if and only if the goal is genuinely finished AND verified.\n" +
                             "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — do it.\n" +
                             "Do NOT paste code, markup, or design content into chat: write files with 'write_file' and summarize them — the user views the files in the PREVIEW tab.]";
-                        var noActionMsgObj = new ChatMessage(ChatRole.User, noActionMsg);
+                        var noActionMsgObj = new ChatMessage(ChatRole.Runtime, noActionMsg);
                         AddToSessionHistory(activeHistory, noActionMsgObj, generatingSessionId);
                         // Engine-internal repair notice: in-memory only (see IsEngineInjectedMessage).
                         yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The model replied without performing any action — re-engaging it on the task…");
@@ -2653,11 +2669,27 @@ public class ChatEngine(
     /// detected. The message is reason-specific so the model knows exactly what it did wrong
     /// (tag spam vs token stutter vs phrase cycling) and how to recover.
     /// </summary>
-    private static string BuildSelfCorrectionInstruction(string reason, int attempt) => attempt >= 3
-        ? "[System Self-Correction: FINAL WARNING — you are STILL repeating the same output in a loop. STOP repeating immediately. Re-read the user's latest message and fulfill it with NEW content that does not repeat anything you already wrote. No thinking tags, no tool calls, no filler.]"
-        : attempt == 2
-            ? "[System Self-Correction: You are STILL looping on the same output. STOP generating repetitive text immediately. Re-read the user's original message and continue the task with NEW, non-repeating content — no thinking tags, no tool calls, no preamble. Your previous looped text has been discarded.]"
-            : reason switch
+    private static string BuildSelfCorrectionInstruction(string reason, int attempt, InteractionMode mode = InteractionMode.Conversation, string? currentStep = null)
+    {
+        // In Autonomous mode the correction must NEVER disable the tool protocol: "no tool
+        // calls" as a loop correction would strip away the very capability the task requires
+        // (the observed contradiction — the runtime ordered the model to stop calling tools
+        // while the current step demanded a write_file). The correction instead re-states the
+        // current step and demands ONE executable action. The "current step" is read from the
+        // live plan (the same source the no-action repair uses).
+        string autonomousDirective = currentStep != null
+            ? $"Execute exactly ONE tool call that advances the current step '{currentStep}'. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute."
+            : "Execute exactly ONE tool call that advances the current task. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute.";
+
+        return attempt >= 3
+            ? mode == InteractionMode.Autonomous
+                ? $"[System Self-Correction: FINAL WARNING — you are STILL repeating the same output in a loop. STOP repeating immediately. {autonomousDirective} No thinking tags, no filler.]"
+                : "[System Self-Correction: FINAL WARNING — you are STILL repeating the same output in a loop. STOP repeating immediately. Re-read the user's latest message and fulfill it with NEW content that does not repeat anything you already wrote. No thinking tags, no tool calls, no filler.]"
+            : attempt == 2
+                ? mode == InteractionMode.Autonomous
+                    ? $"[System Self-Correction: You are STILL looping on the same output. STOP generating repetitive text immediately. {autonomousDirective} No thinking tags, no preamble. Your previous looped text has been discarded.]"
+                    : "[System Self-Correction: You are STILL looping on the same output. STOP generating repetitive text immediately. Re-read the user's original message and continue the task with NEW, non-repeating content — no thinking tags, no tool calls, no preamble. Your previous looped text has been discarded.]"
+                : reason switch
             {
                 "ToolCallSpam" => "[System Self-Correction: You began emitting tool-call tags without completing a call. Stop. Re-read the user's request, choose at most ONE tool from the available schema, and emit exactly one complete, well-formed tool call — or answer directly. Do not repeat any tags you already emitted.]",
                 "TagSpam" => "[System Self-Correction: You began repeating an opening tag (e.g. <think>) without reasoning. Stop emitting tags. Re-read the user's message, reason ONCE inside a single thinking block if your format requires it, then continue the task with new content. Do not repeat any tags or text you already generated.]",
@@ -2670,6 +2702,7 @@ public class ChatEngine(
                 "ThinkOverflow" => "[System Self-Correction: You produced ONLY internal reasoning with no visible answer. Stop reasoning immediately. Close your thinking block, then answer the user's request directly in plain text — or emit ONE complete, well-formed tool call if a tool is needed. Do not continue planning inside the thinking block.]",
                 _ => "[System Self-Correction: You began looping on the same output. Stop immediately, re-read the user's message, and continue with new, non-repeating content that fulfills the user's request.]"
             };
+    }
 
     /// <summary>
     /// Short human-readable description of a loop reason, used for the user-visible notice.
@@ -3333,13 +3366,14 @@ public class ChatEngine(
     ///   {"action":"tool_call","name":"...","arguments":{...}}
     ///   {"action":"completion_claim","summary":"..."}
     ///   {"action":"replan","items":["..."]}
+    ///   {"action":"plan","items":["..."]}   (legacy variant, normalized to the plan tool)
     /// Returns null when the response is not a valid envelope so callers fall through to the
     /// legacy format parsers. "message" actions are plain text and never become tool calls.
     /// </summary>
     private static ToolCallRequest? TryParseJsonActionEnvelope(string response)
     {
         var match = Regex.Match(response,
-            @"\{\s*""action""\s*:\s*""(tool_call|completion_claim|replan|message)""[\s\S]*?\}",
+            @"\{\s*""action""\s*:\s*""(tool_call|completion_claim|replan|plan|message)""[\s\S]*?\}",
             RegexOptions.IgnoreCase);
         if (!match.Success) return null;
 
@@ -3362,14 +3396,16 @@ public class ChatEngine(
                 return ProcessToolCallJsonElement(doc.RootElement);
             }
 
-            // completion_claim → task_complete; replan → plan (action=create).
+            // completion_claim → task_complete; replan AND its legacy "plan" variant → the
+            // plan tool (action=create), so {"action":"plan","items":[...]} executes instead
+            // of falling through every format parser and dying as a no-action repair.
             string name = action == "completion_claim" ? "task_complete" : "plan";
             var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             if (doc.RootElement.TryGetProperty("summary", out var summary) && summary.ValueKind == JsonValueKind.String)
             {
                 args["summary"] = summary.GetString() ?? string.Empty;
             }
-            if (action == "replan")
+            if (action is "replan" or "plan")
             {
                 args["action"] = "create";
                 if (doc.RootElement.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)

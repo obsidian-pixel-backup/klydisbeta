@@ -16,7 +16,16 @@ public enum ChatRole
     /// <summary>Assistant response</summary>
     Assistant,
     /// <summary>Tool observation/result</summary>
-    Tool
+    Tool,
+    /// <summary>
+    /// Engine-injected orchestration control (self-corrections, continuation notices,
+    /// no-action repairs). Distinct from <see cref="User"/> so runtime recovery instructions
+    /// are NEVER presented as the user's conversational intent — the observed failure mode
+    /// where the model reasoned about a self-correction as if the user had sent it.
+    /// Runtime messages are ephemeral (in-memory only; see ChatEngine.IsEngineInjectedMessage)
+    /// and render as an explicit control directive, never as a user turn.
+    /// </summary>
+    Runtime
 }
 
 /// <summary>
@@ -78,11 +87,14 @@ public class PromptTemplateEngine
                         ChatRole.User => "user",
                         ChatRole.Assistant => "assistant",
                         ChatRole.Tool => "user",
+                        ChatRole.Runtime => "system",
                         _ => "user"
                     };
                     string content = msg.Role == ChatRole.Tool 
                         ? (string.IsNullOrEmpty(msg.Name) ? $"<tool_response>\n{msg.Content}\n</tool_response>" : $"<tool_response>\n[Tool Result for '{msg.Name}']:\n{msg.Content}\n</tool_response>")
-                        : msg.Content;
+                        : msg.Role == ChatRole.Runtime
+                            ? BuildRuntimeDirective(msg.Content)
+                            : msg.Content;
                     sb.Append($"<|im_start|>{roleStr}\n{content}<|im_end|>\n");
                 }
                 sb.Append("<|im_start|>assistant\n");
@@ -98,11 +110,14 @@ public class PromptTemplateEngine
                         ChatRole.User => "user",
                         ChatRole.Assistant => "assistant",
                         ChatRole.Tool => "ipython",
+                        ChatRole.Runtime => "system",
                         _ => "user"
                     };
                     string content = msg.Role == ChatRole.Tool && !string.IsNullOrEmpty(msg.Name) 
                         ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" 
-                        : msg.Content;
+                        : msg.Role == ChatRole.Runtime
+                            ? BuildRuntimeDirective(msg.Content)
+                            : msg.Content;
                     sb.Append($"<|start_header_id|>{roleStr}<|end_header_id|>\n\n{content}<|eot_id|>\n");
                 }
                 sb.Append("<|start_header_id|>assistant<|end_header_id|>\n\n");
@@ -112,9 +127,9 @@ public class PromptTemplateEngine
                 string llama2Sys = "";
                 foreach (var msg in messages)
                 {
-                    if (msg.Role == ChatRole.System)
+                    if (msg.Role == ChatRole.System || msg.Role == ChatRole.Runtime)
                     {
-                        llama2Sys += msg.Content + "\n\n";
+                        llama2Sys += (msg.Role == ChatRole.Runtime ? BuildRuntimeDirective(msg.Content) : msg.Content) + "\n\n";
                     }
                     else if (msg.Role == ChatRole.User)
                     {
@@ -143,9 +158,9 @@ public class PromptTemplateEngine
                 string mistralSys = "";
                 foreach (var msg in messages)
                 {
-                    if (msg.Role == ChatRole.System)
+                    if (msg.Role == ChatRole.System || msg.Role == ChatRole.Runtime)
                     {
-                        mistralSys += msg.Content + "\n\n";
+                        mistralSys += (msg.Role == ChatRole.Runtime ? BuildRuntimeDirective(msg.Content) : msg.Content) + "\n\n";
                     }
                     else if (msg.Role == ChatRole.User)
                     {
@@ -180,11 +195,14 @@ public class PromptTemplateEngine
                         ChatRole.User => "user",
                         ChatRole.Assistant => "model",
                         ChatRole.Tool => "user",
+                        ChatRole.Runtime => "user",
                         _ => "user"
                     };
                     string content = msg.Role == ChatRole.Tool 
                         ? (!string.IsNullOrEmpty(msg.Name) ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" : $"[Tool Result]:\n{msg.Content}")
-                        : msg.Content;
+                        : msg.Role == ChatRole.Runtime
+                            ? BuildRuntimeDirective(msg.Content)
+                            : msg.Content;
                     sb.Append($"<start_of_turn>{roleStr}\n{content}<end_of_turn>\n");
                 }
                 sb.Append("<start_of_turn>model\n");
@@ -199,11 +217,14 @@ public class PromptTemplateEngine
                         ChatRole.User => "user",
                         ChatRole.Assistant => "assistant",
                         ChatRole.Tool => "user",
+                        ChatRole.Runtime => "system",
                         _ => "user"
                     };
                     string content = msg.Role == ChatRole.Tool 
                         ? (!string.IsNullOrEmpty(msg.Name) ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" : $"[Tool Result]:\n{msg.Content}")
-                        : msg.Content;
+                        : msg.Role == ChatRole.Runtime
+                            ? BuildRuntimeDirective(msg.Content)
+                            : msg.Content;
                     sb.Append($"<|{roleStr}|>\n{content}<|end|>\n");
                 }
                 sb.Append("<|assistant|>\n");
@@ -218,11 +239,14 @@ public class PromptTemplateEngine
                         ChatRole.User => "USER",
                         ChatRole.Assistant => "CHATBOT",
                         ChatRole.Tool => "USER",
+                        ChatRole.Runtime => "SYSTEM",
                         _ => "USER"
                     };
                     string content = msg.Role == ChatRole.Tool
                         ? $"[Tool Result]: {msg.Content}"
-                        : msg.Content;
+                        : msg.Role == ChatRole.Runtime
+                            ? BuildRuntimeDirective(msg.Content)
+                            : msg.Content;
                     sb.Append($"<|START_OF_TURN_TOKEN|><|{roleToken}_TOKEN|>{content}<|END_OF_TURN_TOKEN|>");
                 }
                 sb.Append("<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>");
@@ -232,9 +256,9 @@ public class PromptTemplateEngine
                 string alpacaSys = "";
                 foreach (var msg in messages)
                 {
-                    if (msg.Role == ChatRole.System)
+                    if (msg.Role == ChatRole.System || msg.Role == ChatRole.Runtime)
                     {
-                        alpacaSys += msg.Content + "\n\n";
+                        alpacaSys += (msg.Role == ChatRole.Runtime ? BuildRuntimeDirective(msg.Content) : msg.Content) + "\n\n";
                     }
                     else if (msg.Role == ChatRole.User)
                     {
@@ -256,9 +280,9 @@ public class PromptTemplateEngine
                 string vicunaSys = "";
                 foreach (var msg in messages)
                 {
-                    if (msg.Role == ChatRole.System)
+                    if (msg.Role == ChatRole.System || msg.Role == ChatRole.Runtime)
                     {
-                        vicunaSys += msg.Content + "\n\n";
+                        vicunaSys += (msg.Role == ChatRole.Runtime ? BuildRuntimeDirective(msg.Content) : msg.Content) + "\n\n";
                     }
                     else if (msg.Role == ChatRole.User)
                     {
@@ -283,6 +307,7 @@ public class PromptTemplateEngine
                     string prefix = msg.Role switch
                     {
                         ChatRole.Tool => !string.IsNullOrEmpty(msg.Name) ? $"Tool ({msg.Name})" : "Tool",
+                        ChatRole.Runtime => "[RUNTIME CONTROL]",
                         _ => msg.Role.ToString()
                     };
                     sb.Append($"{prefix}: {msg.Content}\n");
@@ -298,6 +323,18 @@ public class PromptTemplateEngine
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Renders a runtime-control directive (ChatRole.Runtime) as an explicit, self-labeled
+    /// orchestration instruction — never as a user turn. The marker makes it unambiguous to
+    /// the model that this is the harness talking, so recovery instructions are obeyed as
+    /// control signals instead of being misread as the user's conversational intent (the
+    /// observed failure where the model reasoned about a self-correction as a user message).
+    /// </summary>
+    private static string BuildRuntimeDirective(string content)
+        => content.StartsWith("[RUNTIME CONTROL]", StringComparison.Ordinal)
+            ? content
+            : "[RUNTIME CONTROL] " + content.Trim();
 
     /// <summary>
     /// Builds the Qwen-native tool-calling prelude — the exact text the embedded Qwen3.5/3.6

@@ -42,16 +42,22 @@ public static class ToolActionParser
         if (string.IsNullOrWhiteSpace(response)) return ToolActionKind.NoAction;
 
         // JSON action envelope — explicit, validated protocol first
-        // ({"action":"tool_call"|"completion_claim"|"replan"|"message", ...}).
+        // ({"action":"tool_call"|"completion_claim"|"replan"|"plan"|"message", ...}).
+        // "plan" is a legacy variant of the replan envelope: models that were steered toward
+        // {"action":"plan","items":[...]} (the action CONTRACT of earlier prompts) emit it
+        // instead of the canonical tool form. Normalize it to the same Replan kind the
+        // canonical {"action":"replan"} and <tool_call>{"name":"plan"} forms produce, so a
+        // plan action is never misread as NoAction (the observed failure: the model emitted
+        // {"action":"plan"} and the runtime repaired it as a no-action protocol violation).
         var envelope = Regex.Match(response,
-            @"\{\s*""action""\s*:\s*""(tool_call|completion_claim|replan|message)""",
+            @"\{\s*""action""\s*:\s*""(tool_call|completion_claim|replan|plan|message)""",
             RegexOptions.IgnoreCase);
         if (envelope.Success)
         {
             return envelope.Groups[1].Value.ToLowerInvariant() switch
             {
                 "completion_claim" => ToolActionKind.CompletionClaim,
-                "replan" => ToolActionKind.Replan,
+                "replan" or "plan" => ToolActionKind.Replan,
                 "tool_call" => ToolActionKind.ToolCall,
                 _ => ToolActionKind.NoAction // "message" = plain text
             };
