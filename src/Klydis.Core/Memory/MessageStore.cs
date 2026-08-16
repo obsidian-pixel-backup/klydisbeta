@@ -846,6 +846,47 @@ public class MessageStore
         return result;
     }
 
+    /// <summary>
+    /// Loads the factual change log for a TASK (newest first, bounded for UI display). The
+    /// right-side workbench is a projection of task execution state, so the panel must query
+    /// by task_id — never by session_id — otherwise switching tasks in the same chat leaks
+    /// the previous task's changes into the new task's panel.
+    /// </summary>
+    public async Task<List<FileChange>> GetFileChangesByTaskAsync(string taskId, int limit = 100)
+    {
+        var result = new List<FileChange>();
+
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT change_id, session_id, task_id, path, tool, before_hash, after_hash, diff, added_lines, deleted_lines, created_at
+            FROM file_changes WHERE task_id = @taskId
+            ORDER BY created_at DESC LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        command.Parameters.AddWithValue("@limit", limit);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new FileChange(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                reader.GetInt32(8),
+                reader.GetInt32(9),
+                DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+        }
+
+        return result;
+    }
+
     #endregion
 
     /// <summary>

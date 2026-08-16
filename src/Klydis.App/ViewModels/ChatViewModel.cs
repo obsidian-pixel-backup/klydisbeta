@@ -244,6 +244,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private readonly ThemeService? _themeService;
     private readonly SemaphoreSlim _modelLoadGate = new(1, 1);
 
+    /// <summary>
+    /// The task the chat engine is currently executing (null for conversation turns or when
+    /// no task is active). The right-side workbench reads this to scope its projections
+    /// (Changes, Files, Preview, Terminal) to the ACTIVE task — never session-wide state.
+    /// </summary>
+    public string? CurrentTaskId => _chatEngine?.CurrentTaskId;
+
     public ChatViewModel(
         ChatEngine chatEngine,
         Klydis.Core.Models.ModelRegistry registry,

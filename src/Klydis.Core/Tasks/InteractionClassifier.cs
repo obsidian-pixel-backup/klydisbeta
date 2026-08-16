@@ -130,9 +130,15 @@ public static class InteractionClassifier
         //    ("explain how to build X" asks for an explanation, it does not build X).
         if (ContainsAny(tokens, ExplanationMarkers)) return InteractionMode.Conversation;
 
-        // 2b. Imperative / continuation commands → Task (tools available). Checked before the
-        //     verb lists so "begin building the project" never degrades to a chat reply.
-        if (ContainsAny(tokens, CommandMarkers)) return InteractionMode.Task;
+        // 2b. COMPOUND imperative: a command marker FOLLOWED by an autonomous verb
+        //     ("begin building", "start implementing", "continue developing",
+        //     "proceed with fixing") is an execution command, not a bounded steer — the
+        //     autonomous verb dominates the marker, so it routes to Autonomous (goal mode on,
+        //     full execution framing) instead of a plain Tool-using Task turn.
+        if (ContainsAny(tokens, CommandMarkers) && HasAutonomousVerbAfterCommand(normalized))
+        {
+            return InteractionMode.Autonomous;
+        }
 
         // 3. Strong build/fix verbs → Autonomous.
         if (ContainsAny(tokens, AutonomousVerbs)) return InteractionMode.Autonomous;
@@ -143,11 +149,39 @@ public static class InteractionClassifier
             return InteractionMode.Autonomous;
         }
 
+        // 2c. Plain imperative / continuation commands WITHOUT an execution verb ("continue",
+        //     "go ahead", "start working on it") → Task (tools available). Checked after the
+        //     verb tiers so "build the site, then start" still hits Autonomous via "build".
+        if (ContainsAny(tokens, CommandMarkers)) return InteractionMode.Task;
+
         // 5. Analysis / research verbs → Task.
         if (ContainsAny(tokens, TaskVerbs)) return InteractionMode.Task;
 
         // 6. Fallback: short messages are conversation; anything substantial defaults to Task.
         return normalized.Length < 40 ? InteractionMode.Conversation : InteractionMode.Task;
+    }
+
+    /// <summary>
+    /// True when an autonomous execution verb (build/implement/fix/...) appears AFTER the
+    /// earliest command marker in the normalized message — "begin building" yes, "build a
+    /// site, then start" no (the latter is caught by the strong-verb tier instead).
+    /// </summary>
+    private static bool HasAutonomousVerbAfterCommand(string normalized)
+    {
+        int commandPos = int.MaxValue;
+        foreach (var marker in CommandMarkers)
+        {
+            int idx = normalized.IndexOf(marker, StringComparison.Ordinal);
+            if (idx >= 0 && idx < commandPos) commandPos = idx;
+        }
+        if (commandPos == int.MaxValue) return false;
+
+        foreach (var verb in AutonomousVerbs)
+        {
+            int idx = normalized.IndexOf(verb, StringComparison.Ordinal);
+            if (idx > commandPos) return true;
+        }
+        return false;
     }
 
     private static string Normalize(string message)

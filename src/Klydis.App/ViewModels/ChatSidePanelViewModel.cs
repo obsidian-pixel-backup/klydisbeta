@@ -324,15 +324,28 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         await LoadNotesAsync();
     }
 
+    // Serializes the Files/Changes/Preview refreshes: the 2s timer tick and tab switches can
+    // overlap, and un-serialized async refreshes could complete out of order (A starts, B
+    // starts, B finishes, A finishes → the panel ends up showing stale B data). A tick that
+    // lands while a refresh chain is still running is skipped; the chain re-reads the latest
+    // state at its next invocation anyway.
+    private Task _refreshChain = Task.CompletedTask;
+
     /// <summary>
     /// Rebuilds the Files / Changes / Preview tabs from this session's recorded tool activity
     /// only. Cheap (all in-memory except File.Exists checks) and safe to call on the UI thread.
     /// </summary>
     private void RefreshSessionData()
     {
-        RefreshSessionFilesAsync();
-        RefreshChangesAsync();
-        RefreshSessionArtifactsAsync();
+        if (!_refreshChain.IsCompleted) return;
+        _refreshChain = RefreshAllCoreAsync();
+    }
+
+    private async Task RefreshAllCoreAsync()
+    {
+        await RefreshSessionFilesAsync();
+        await RefreshChangesAsync();
+        await RefreshSessionArtifactsAsync();
     }
 
     /// <summary>
@@ -523,11 +536,17 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
 
         string sessionId = _currentSessionId ?? string.Empty;
 
-        // Factual change log — durable, task-scoped, rebuilt after restarts.
+        // Factual change log — durable and TASK-SCOPED: the active task's changes only, so
+        // switching tasks in the same chat never leaks the previous task's diffs into the new
+        // task's panel (file_changes carries task_id; the UI read path now honors it). Falls
+        // back to the session-wide log only when no task is active.
         List<FileChange> changes = new();
+        string? activeTaskId = _owner.CurrentTaskId;
         try
         {
-            changes = await _messageStore.GetFileChangesAsync(sessionId);
+            changes = activeTaskId != null
+                ? await _messageStore.GetFileChangesByTaskAsync(activeTaskId)
+                : await _messageStore.GetFileChangesAsync(sessionId);
         }
         catch (Exception ex)
         {
@@ -553,7 +572,9 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         ChangesBadge = changes.Count;
         ChangesSummary = changes.Count == 0
             ? "No file changes recorded yet — files the agent writes (write_file) appear here with real diffs."
-            : $"{changes.Count} file change(s) this chat";
+            : activeTaskId != null
+                ? $"{changes.Count} file change(s) for task {activeTaskId}"
+                : $"{changes.Count} file change(s) this chat";
 
         // Chronological timeline of tool actions (kept from the activity feed).
         var records = _toolExecutor.GetSessionToolActivity(sessionId);

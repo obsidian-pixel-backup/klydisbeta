@@ -75,6 +75,17 @@ public static class AgentSupervisor
             return new SupervisorDecision(ExecutionDecision.FailTask, ContinuationReason.Error);
         }
 
+        // Autonomous-mode protocol failure: the model produced text but NO action (no tool
+        // call, no completion claim, no replan). This is the dominant failure from the live
+        // export — the model understood the request but answered with a greeting/permission
+        // ask instead of entering the tool protocol. Repair the protocol with a compact
+        // action-required instruction rather than accepting the text as a completed turn.
+        if (outcome == GenerationOutcome.NoActionProduced && openCount > 0)
+        {
+            return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced,
+                SelectNextStep(plan));
+        }
+
         // A model that keeps claiming completion while work stays open is the "same action
         // without progress" failure — halt before cycling forever.
         if (completionRejections >= maxCompletionRejections)

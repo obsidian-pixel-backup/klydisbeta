@@ -252,7 +252,13 @@ public class ChatEngine(
     // on wholesale history mutations (LoadHistory/ClearHistory) and re-derived when the message
     // count changes (messages are append-only otherwise).
     private long _lastSystemPromptTokens;
-    private long _estimatedSystemPromptOnce = -1;
+    // Per-mode fallback estimates for the idle context gauge (index = InteractionMode).
+    // Conversation-mode prompts are deliberately minimal (no tools), so a single global
+    // agent-prompt estimate overstates usage and misbudgets history for chat turns. The
+    // EXACT token count from the last prompt build (_lastSystemPromptTokens) dominates once
+    // a build has run; these are only the pre-first-build fallbacks.
+    private long[] _estimatedSystemPromptByMode = { -1, -1, -1 };
+    private InteractionMode _lastPromptMode = InteractionMode.Conversation;
     private long _cachedHistoryTokens = -1;
     private int _cachedHistoryCount = -1;
     private readonly List<(string ToolName, string ArgsHash, string PriorResult)> _recentTools = new();
@@ -653,7 +659,10 @@ public class ChatEngine(
         long systemTokens = Interlocked.Read(ref _lastSystemPromptTokens);
         if (systemTokens <= 0)
         {
-            systemTokens = await EstimateSystemPromptTokensOnceAsync(ct);
+            // Fall back to a per-mode estimate matching how the NEXT prompt would actually be
+            // built (the last turn's mode), not a global agent-prompt estimate that overstates
+            // conversation turns.
+            systemTokens = await EstimateSystemPromptTokensOnceAsync(ct, _lastPromptMode);
         }
 
         long historyTokens;
@@ -682,17 +691,27 @@ public class ChatEngine(
         return systemTokens + capped;
     }
 
-    private async Task<long> EstimateSystemPromptTokensOnceAsync(CancellationToken ct)
+    private async Task<long> EstimateSystemPromptTokensOnceAsync(CancellationToken ct, InteractionMode mode)
     {
-        long cached = Interlocked.Read(ref _estimatedSystemPromptOnce);
+        int idx = Math.Clamp((int)mode, 0, _estimatedSystemPromptByMode.Length - 1);
+        long cached = Interlocked.Read(ref _estimatedSystemPromptByMode[idx]);
         if (cached > 0) return cached;
         try
         {
-            var tools = await toolExecutor.GetToolDefinitionsAsync();
-            var schema = toolExecutor.FormatToolsForPrompt(tools);
-            var text = new SystemPromptManager().BuildCompactSystemPrompt(schema, personalityMode: SelectedPersonality);
+            string text;
+            if (mode == InteractionMode.Conversation)
+            {
+                // Conversation turns build the minimal conversational prompt (no tools).
+                text = new SystemPromptManager().BuildConversationalSystemPrompt(personalityMode: SelectedPersonality);
+            }
+            else
+            {
+                var tools = await toolExecutor.GetToolDefinitionsAsync();
+                var schema = toolExecutor.FormatToolsForPrompt(tools);
+                text = new SystemPromptManager().BuildCompactSystemPrompt(schema, personalityMode: SelectedPersonality);
+            }
             long estimate = contextOrchestrator.EstimateTokens(text) + 64; // template application + safety
-            Interlocked.Exchange(ref _estimatedSystemPromptOnce, estimate);
+            Interlocked.Exchange(ref _estimatedSystemPromptByMode[idx], estimate);
             return estimate;
         }
         catch (Exception ex)
@@ -732,6 +751,16 @@ public class ChatEngine(
         // and the task contract from the prompt entirely (see StreamResponseInternalAsync).
         InteractionMode mode = InteractionClassifier.Classify(userMessage);
         bool isConversationTurn = mode == InteractionMode.Conversation;
+
+        // Remember the mode for the idle context gauge: its fallback system-prompt estimate
+        // must match how the NEXT prompt would actually be built (per-mode), not a global
+        // agent-prompt estimate.
+        _lastPromptMode = mode;
+
+        // Fail-closed latch: set when task resolution/storage throws for a Task/Autonomous
+        // turn. The turn then runs with NO task state and NO tools, and a runtime notice is
+        // surfaced instead of silently degrading to legacy session-scoped behavior.
+        bool taskLayerFailed = false;
 
         // Goal-mode directives are driven by the INTERACTION MODE, not the app-level default.
         // Previously IsGoalMode defaulted to TRUE and nothing ever drove it, so every message
@@ -777,6 +806,13 @@ public class ChatEngine(
                 var task = await _taskManager.ResolveOrCreateCurrentTaskAsync(generatingSessionId, userMessage);
                 if (task.TaskId != previousTaskId)
                 {
+                    // A NEW task replaced the previous one: close the previous task's run as
+                    // Suspended (its task is still active/resumable) so each task's run truly
+                    // spans its own execution attempt and no two tasks share one open run.
+                    if (_runtime != null && previousTaskId != null)
+                    {
+                        await _runtime.EndRunAsync(previousTaskId, Klydis.Core.Tasks.RunStatus.Suspended);
+                    }
                     try
                     {
                         string? newTaskPlan = await _taskManager.GetPlanAsync(task.TaskId);
@@ -798,9 +834,16 @@ public class ChatEngine(
             }
             catch (Exception ex)
             {
-                // Task layer failures degrade to legacy session-scoped behavior — never a
-                // broken turn.
-                logger.LogDebug(ex, "Task resolution failed for session {SessionId}; continuing without task scoping.", generatingSessionId);
+                // FAIL CLOSED: a task-identity/storage failure must NEVER resurrect legacy
+                // session-scoped state (old plan, old queue, old task contract) — that is the
+                // exact contamination this architecture exists to prevent. Clear all task
+                // state, disable tools for the turn, and surface the runtime error instead of
+                // silently degrading to an un-scoped agent turn.
+                logger.LogWarning(ex, "Task layer unavailable for session {SessionId}; failing closed (no task scoping, no tool execution this turn).", generatingSessionId);
+                CurrentTaskId = null;
+                CurrentTaskObjective = null;
+                toolExecutor.CurrentTaskId = null;
+                taskLayerFailed = true;
             }
         }
 
@@ -810,7 +853,7 @@ public class ChatEngine(
         // model remembering to call the 'plan' tool. Runs once per user message — see
         // SeedInitialPlanIfNeededAsync for the new-task-vs-steer boundary. Never for
         // conversation turns: a greeting must not acquire a plan.
-        if (!isConversationTurn)
+        if (!isConversationTurn && !taskLayerFailed)
         {
             await SeedInitialPlanIfNeededAsync(generatingSessionId, userMessage);
         }
@@ -852,7 +895,7 @@ public class ChatEngine(
 
         await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
         
-        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, userMessage, ct, skillContext, activeGoalMode, mode).GetAsyncEnumerator(ct);
+        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, userMessage, ct, skillContext, activeGoalMode, mode, taskLayerFailed).GetAsyncEnumerator(ct);
         try
         {
             while (true)
@@ -893,11 +936,21 @@ public class ChatEngine(
             await enumerator.DisposeAsync();
             if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
             {
-                // The run ends with the turn: Completed when the supervisor sealed the task,
-                // otherwise the run is closed as a partial attempt (the task itself stays
-                // Running and resumable).
-                await _runtime.EndRunAsync(CurrentTaskId,
-                    _goalCompletedThisTurn ? Klydis.Core.Tasks.RunStatus.Completed : Klydis.Core.Tasks.RunStatus.Cancelled);
+                // A Run is one CONTINUOUS execution attempt spanning many turns: it is closed
+                // ONLY on a terminal outcome (supervisor-sealed completion) or a hard
+                // interruption (user stop / cancellation). An ordinary turn end leaves the
+                // run open so the next user turn continues the SAME run — the old behavior
+                // opened and immediately Cancelled a fresh run around every turn, so telemetry
+                // reported "Run cancelled" whenever the model simply stopped early while the
+                // task remained active.
+                if (_goalCompletedThisTurn)
+                {
+                    await _runtime.EndRunAsync(CurrentTaskId, Klydis.Core.Tasks.RunStatus.Completed);
+                }
+                else if (ct.IsCancellationRequested)
+                {
+                    await _runtime.EndRunAsync(CurrentTaskId, Klydis.Core.Tasks.RunStatus.Interrupted);
+                }
             }
             toolExecutor.CurrentTaskUserMessage = null;
             toolExecutor.CurrentTaskId = null;
@@ -912,7 +965,8 @@ public class ChatEngine(
         [EnumeratorCancellation] CancellationToken ct,
         string? skillContext = null,
         bool isGoalMode = false,
-        InteractionMode mode = InteractionMode.Autonomous)
+        InteractionMode mode = InteractionMode.Autonomous,
+        bool taskLayerFailed = false)
     {
         // Conversation mode: the model is having a chat, not executing work. No tool schema
         // is exposed (so no tool format instructions, no qwen tools prelude, no grammar
@@ -921,6 +975,9 @@ public class ChatEngine(
         // The prompt becomes BuildConversationalSystemPrompt — persona + conversation rules
         // + World State + user notes only.
         bool isConversation = mode == InteractionMode.Conversation;
+        // Fail-closed: when the task layer itself failed, the turn runs with tools disabled
+        // and no task context (same exposure as conversation) plus an explicit runtime notice.
+        bool toolsDisabled = isConversation || taskLayerFailed;
 
         var templateType = promptEngine.DetectTemplate(
             inferenceEngine.Architecture, 
@@ -930,8 +987,8 @@ public class ChatEngine(
         var nativeStopTokens = promptEngine.GetStopTokens(templateType);
         var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
-        var tools = isConversation ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
-        var toolsSchema = isConversation ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
+        var tools = toolsDisabled ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
+        var toolsSchema = toolsDisabled ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
 
         // Qwen3.5/Qwen3.6 thinking models (qwen35 / qwen35moe architectures): their embedded chat
         // template expects (a) tools presented as an OpenAI-style JSON schema inside a <tools>
@@ -950,10 +1007,10 @@ public class ChatEngine(
         // the native format repeatedly (recorded automatically by the parse-failure escalation)
         // is switched to JSON automatically on the NEXT session — the system evolves per model.
         string modelName = Klydis.Core.Learning.AdaptiveLearningService.DeriveModelName(inferenceEngine.CurrentModelPath);
-        string lessonsSection = isConversation
+        string lessonsSection = toolsDisabled
             ? string.Empty
             : await (_adaptiveLearning?.BuildLessonsSectionAsync(modelName, ct: ct) ?? Task.FromResult(string.Empty));
-        bool useQwenNativePrelude = !isConversation && isQwenThinkingModel && !string.IsNullOrWhiteSpace(toolsSchema);
+        bool useQwenNativePrelude = !toolsDisabled && isQwenThinkingModel && !string.IsNullOrWhiteSpace(toolsSchema);
         if (_adaptiveLearning != null && useQwenNativePrelude)
         {
             useQwenNativePrelude = !await _adaptiveLearning.HasNativeToolFormatIssuesAsync(modelName, ct);
@@ -1016,6 +1073,15 @@ public class ChatEngine(
         int eosDeclinesThisTurn = 0;
         const int MaxConsecutiveEosDeclines = 2;
         const int MaxSelfCorrectionsPerTurn = 3;
+
+        // Autonomous no-action repair budget (protocol reliability, review §11–§14): a
+        // text-only response in Autonomous mode is NOT a successful turn — the model may
+        // understand the request yet refuse to enter the tool protocol ("Good morning!
+        // Please tell me what you want next"). Each repair injects a COMPACT action-required
+        // instruction and regenerates; the budget bounds the churn, after which the turn
+        // ends with an explicit diagnostic and the task stays active.
+        int noActionRepairsThisTurn = 0;
+        const int MaxNoActionRepairs = 3;
 
         // Rescue mode: after escalating corrections are exhausted and the model is STILL
         // degenerate, one final generation strips the tools and the pre-opened think block and
@@ -1194,7 +1260,7 @@ public class ChatEngine(
 
         // Conversation turns never see the queue — queued messages are execution-state, not
         // conversation context.
-        var pendingQueue = isConversation ? null : MessageQueue?.GetPending(generatingSessionId, CurrentTaskId);
+        var pendingQueue = toolsDisabled ? null : MessageQueue?.GetPending(generatingSessionId, CurrentTaskId);
         var queueNotice = (pendingQueue != null && pendingQueue.Count > 0)
             ? "\n\n[PENDING QUEUED USER MESSAGES AVAILABLE]\n" +
               "You have pending queued message(s) from the user waiting in the queue:\n" +
@@ -1209,7 +1275,7 @@ public class ChatEngine(
         // task/agent context, and injecting them is exactly what made the model treat a
         // greeting as an agent turn.
         string ragNotice = "";
-        if (!isConversation && VectorStore != null)
+        if (!toolsDisabled && VectorStore != null)
         {
             try
             {
@@ -1225,7 +1291,7 @@ public class ChatEngine(
             catch { }
         }
 
-        var skillHeader = !isConversation && !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
+        var skillHeader = !toolsDisabled && !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
 
         var sysPromptManager = new SystemPromptManager();
 
@@ -1260,12 +1326,18 @@ public class ChatEngine(
         // window (see the budget check below), in which case they also fall back to the compact
         // prompt so session history is never starved out of the context window.
         string sysPrompt;
-        if (isConversation)
+        if (toolsDisabled)
         {
             // Conversation mode: minimal prompt — persona, personality, World State (background
             // history), plus user notes appended below. No tools, no task contract, no plan, no
             // queue, no RAG, no skill brain, no goal workflow.
             sysPrompt = sysPromptManager.BuildConversationalSystemPrompt(worldStateHeader, SelectedPersonality);
+            if (taskLayerFailed)
+            {
+                // Fail-closed runtime notice: the task layer was unavailable this turn, so no
+                // tools, plan, queue or task contract exist and none may be executed.
+                sysPrompt += "\n\n[RUNTIME NOTICE] The task layer is temporarily unavailable this turn: task state could not be loaded, tool execution is disabled, and no plan or queue is in effect. Reply informatively from available knowledge only — do not attempt tool calls, and do not act on any earlier task.";
+            }
         }
         else if (useQwenNativePrelude)
         {
@@ -1305,7 +1377,7 @@ public class ChatEngine(
         }
         else
         {
-            var fullPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode);
+            var fullPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode, useThinkingTags: isQwenThinkingModel);
             int fullPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(fullPrompt) : contextOrchestrator.EstimateTokens(fullPrompt);
             sysPrompt = fullPromptTokens > maxTotalPromptTokens - minUserBudget
                 ? sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode)
@@ -1338,7 +1410,7 @@ public class ChatEngine(
         {
             var artifacts = toolExecutor.GetSessionArtifactPaths(generatingSessionId);
             // Artifact/workbench context is task context — not injected for conversation turns.
-            if (!isConversation && artifacts.Count > 0)
+            if (!toolsDisabled && artifacts.Count > 0)
             {
                 var artifactHeader = "\n\nARTIFACTS PRODUCED IN THIS CHAT (files you wrote — shown in the PREVIEW tab; HTML, Markdown and JSON render live for the user):\n" +
                     string.Join("\n", artifacts.Take(15).Select(p => $"  - {p}"));
@@ -1375,7 +1447,7 @@ public class ChatEngine(
             var currentPlan = toolExecutor.GetSessionPlan(generatingSessionId);
             // Conversation turns have no plan: even a previous task's checklist must not leak
             // into a greeting's prompt (it would re-raise the old task as work).
-            if (!isConversation && currentPlan.Count > 0)
+            if (!toolsDisabled && currentPlan.Count > 0)
             {
                 int planProgress = toolExecutor.GetSessionPlanProgress(generatingSessionId);
                 // Task boundary: a plan is CURRENT when it belongs to the task this turn is
@@ -1431,6 +1503,31 @@ public class ChatEngine(
         catch (Exception ex)
         {
             logger.LogDebug(ex, "Failed to load current task plan for prompt context.");
+        }
+
+        // AUTONOMOUS ACTION CONTRACT — highest-salience instruction, injected in the LAST
+        // system position (immediately above the user history, directly preceding the model's
+        // generation). Pins the current step and forbids the no-action failure pattern: the
+        // model must not have to infer that it is supposed to act (review §31/§16).
+        if (isGoalMode && !toolsDisabled)
+        {
+            string nextStepText;
+            try
+            {
+                var planNow = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                nextStepText = planNow.FirstOrDefault(e => !e.Done)?.Text
+                    ?? "no open plan step — verify the result and call 'task_complete'";
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Failed to read plan for the autonomous action contract.");
+                nextStepText = "inspect the workspace and proceed with the task";
+            }
+            sysPrompt = sysPrompt.TrimEnd() + "\n\n### CURRENT ACTION CONTRACT (AUTONOMOUS MODE — READ IMMEDIATELY BEFORE RESPONDING)\n" +
+                "CURRENT STEP: " + nextStepText + "\n" +
+                "REQUIRED OUTPUT THIS TURN: perform a tool action now — inspect, modify, or verify. Text alone is NOT accepted as task progress.\n" +
+                "DO NOT: greet the user, ask permission, ask what to do next, or describe what you would do. Execute the next action.\n" +
+                "If the goal is finished and verified, call 'task_complete'. If the plan is wrong, revise it with 'plan' (action=create).";
         }
 
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
@@ -1930,8 +2027,9 @@ public class ChatEngine(
                 !fullResponse.Contains("<|/think|>", StringComparison.OrdinalIgnoreCase) &&
                 !fullResponse.Contains("</thought>", StringComparison.OrdinalIgnoreCase);
             // Conversation mode: no tools exist, so tool tags (if the model emits any) are
-            // never parsed or executed — the whole output is delivered as the reply.
-            var toolCallRequests = isConversation ? new List<ToolCallRequest>() : ParseToolCalls(visibleResponse);
+            // never parsed or executed — the whole output is delivered as the reply. The same
+            // gate applies when the task layer failed (fail-closed: nothing may execute).
+            var toolCallRequests = toolsDisabled ? new List<ToolCallRequest>() : ParseToolCalls(visibleResponse);
 
             // After repeated malformed tool calls, block execution entirely and force a direct
             // answer. The notice is injected once; subsequent iterations with tool tags just
@@ -2280,6 +2378,36 @@ public class ChatEngine(
                         ? ContinuationReason.ModelEndedEarly
                         : ContinuationReason.StepIncomplete;
 
+                // NO-ACTION detection (shared by the supervisor outcome and the repair guard
+                // below): a text-only response in Autonomous mode is a protocol failure ONLY
+                // when it is a refusal/filler (greetings, permission seeking, "I am a text-only
+                // agent" — the live export's failure pattern) or a short commitment that
+                // advances nothing while plan steps remain open. A long structured text
+                // response (a report, a doc) is a legitimate deliverable and never repaired.
+                bool refusalLike = ToolActionParser.IsActionRefusal(visibleResponse);
+                bool openStepsRemain;
+                try
+                {
+                    openStepsRemain = toolExecutor.GetSessionPlanEntries(generatingSessionId).Any(e => !e.Done);
+                }
+                catch (Exception)
+                {
+                    openStepsRemain = false;
+                }
+                // A text-only response is only repaired when it LACKS deliverable structure:
+                // markdown headers/bullets/numbering, code fences, or real length are signs of
+                // substantive output (a report, a doc) that must be delivered as-is — never
+                // re-engaged as "no action".
+                bool hasDeliverableStructure =
+                    visibleResponse.Length >= 400 ||
+                    visibleResponse.Contains("```", StringComparison.Ordinal) ||
+                    Regex.IsMatch(visibleResponse, @"(?m)^#{1,6}\s") ||
+                    Regex.IsMatch(visibleResponse, @"(?m)^\s*[-*+]\s") ||
+                    Regex.IsMatch(visibleResponse, @"(?m)^\s*\d{1,3}[.)]\s");
+                bool shortCommitmentNoAction = !hasDeliverableStructure && openStepsRemain;
+                bool noActionProducedThisTurn = isGoalMode && !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
+                    (refusalLike || shortCommitmentNoAction);
+
                 // Supervisor: classify the generation outcome and record the runtime's decision
                 // against the durable task state. The branch mechanics below implement the
                 // decision; the decision itself is owned by the supervisor, so the loop's
@@ -2296,7 +2424,8 @@ public class ChatEngine(
                             inferenceEngine.LastGenerationWasCancelled,
                             endedOnOwnStopToken,
                             inferenceEngine.LastGenerationPromptFilledWindow,
-                            visibleEmpty);
+                            visibleEmpty,
+                            noActionProduced: noActionProducedThisTurn);
                         var planNow = toolExecutor.GetSessionPlanEntries(generatingSessionId);
                         var pendingNow = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId).Count ?? 0;
                         var decision = await _runtime.DecideAfterTurnAsync(
@@ -2443,7 +2572,43 @@ public class ChatEngine(
                 }
                 else
                 {
-                    // No tool calls, no tool call tag attempted, and response is complete
+                    // No tool calls, no tool call tag attempted, and the response is complete.
+
+                    // AUTONOMOUS NO-ACTION GUARD (protocol reliability, review §11–§14): a
+                    // refusal/filler or short no-progress commitment in Autonomous mode is a
+                    // protocol failure, NOT a completed turn — the model understands the
+                    // request yet refuses to enter the tool protocol (the observed "Good
+                    // morning! Please tell me what you want next" pattern). Repair: inject a
+                    // COMPACT action-required instruction and regenerate, bounded. Pure text is
+                    // only accepted after the budget is exhausted — and even then with an
+                    // explicit diagnostic, never silently as successful task progress.
+                    if (noActionProducedThisTurn &&
+                        noActionRepairsThisTurn < MaxNoActionRepairs &&
+                        ToolActionParser.Classify(visibleResponse) == ToolActionKind.NoAction)
+                    {
+                        noActionRepairsThisTurn++;
+                        logger.LogWarning("Autonomous no-action response (repair {Repair}/{Max}): the model produced text but no tool action; injecting the action-required repair instruction.",
+                            noActionRepairsThisTurn, MaxNoActionRepairs);
+                        NoteLesson("no_action_produced", $"Autonomous turn produced no tool action; action-required repair injected (repair {noActionRepairsThisTurn}).");
+
+                        var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response did not perform an action — it only produced text. In autonomous task mode you must EXECUTE, not describe, greet, or ask permission.\nProduce exactly ONE of:\n1. A <tool_call> invoking the next needed tool (or the JSON form {\"action\":\"tool_call\",\"name\":\"TOOL\",\"arguments\":{...}}).\n2. A 'plan' call (action=create) if the plan no longer reflects reality.\n3. A 'task_complete' call if and only if the goal is genuinely finished AND verified.\nDo NOT greet the user. Do NOT ask what to do next. Do NOT describe what you could do — do it.]";
+                        var noActionMsgObj = new ChatMessage(ChatRole.User, noActionMsg);
+                        AddToSessionHistory(activeHistory, noActionMsgObj, generatingSessionId);
+                        // Engine-internal repair notice: in-memory only (see IsEngineInjectedMessage).
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The model replied without performing any action — re-engaging it on the task…");
+                        continue;
+                    }
+
+                    if (noActionRepairsThisTurn >= MaxNoActionRepairs && noActionRepairsThisTurn > 0)
+                    {
+                        // Repair budget exhausted: never present a text-only response as task
+                        // progress. The text was already streamed; surface the diagnostic and
+                        // end the turn with the task still active (resumable).
+                        NoteLesson("no_action_exhausted", "Autonomous no-action repair budget exhausted; turn ended with a diagnostic and the task left active.");
+                        logger.LogWarning("Autonomous no-action repair budget exhausted after {Max} repairs; ending the turn with a diagnostic (task remains active).", MaxNoActionRepairs);
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                            "⚠ The model kept responding without performing any action. The task remains active — try rephrasing, switching the model, or starting a new chat.");
+                    }
                     break;
                 }
             }
@@ -2829,6 +2994,21 @@ public class ChatEngine(
         response = OutputSanitizer.StripThinkingBlocks(response);
         if (string.IsNullOrWhiteSpace(response)) return results;
 
+        // 0a. JSON Action Envelope (model-independent protocol, review §10): a standalone JSON
+        // object with an explicit "action" field —
+        // {"action":"tool_call","name":"...","arguments":{...}},
+        // {"action":"completion_claim","summary":"..."}, {"action":"replan","items":[...]}.
+        // Parsed FIRST because it is the most explicit and validated protocol form; it also
+        // maps completion_claim/replan to their tool equivalents (task_complete / plan), which
+        // the generic JSON heuristics would otherwise misread as tools literally named
+        // "completion_claim" or "replan".
+        var envelopeCall = TryParseJsonActionEnvelope(response);
+        if (envelopeCall != null)
+        {
+            results.Add(envelopeCall);
+            return results;
+        }
+
         // 0. Qwen-native format (qwen35/qwen35moe models): <tool_call><function=NAME><parameter=K>
         // value</parameter>...</function></tool_call>. The embedded qwen template emits this exact
         // structure when tools are provided; it is NOT JSON, so it must be parsed before the
@@ -3130,6 +3310,69 @@ public class ChatEngine(
         // a structured call must be answered, not executed.
 
         return results;
+    }
+
+    /// <summary>
+    /// Parses the model-independent JSON action envelope — a standalone JSON object whose
+    /// first field is "action":
+    ///   {"action":"tool_call","name":"...","arguments":{...}}
+    ///   {"action":"completion_claim","summary":"..."}
+    ///   {"action":"replan","items":["..."]}
+    /// Returns null when the response is not a valid envelope so callers fall through to the
+    /// legacy format parsers. "message" actions are plain text and never become tool calls.
+    /// </summary>
+    private static ToolCallRequest? TryParseJsonActionEnvelope(string response)
+    {
+        var match = Regex.Match(response,
+            @"\{\s*""action""\s*:\s*""(tool_call|completion_claim|replan|message)""[\s\S]*?\}",
+            RegexOptions.IgnoreCase);
+        if (!match.Success) return null;
+
+        string action = match.Groups[1].Value.ToLowerInvariant();
+        if (action == "message") return null; // plain text, not a tool call
+
+        try
+        {
+            string raw = SanitizeJsonControlCharacters(match.Value);
+            using var doc = JsonDocument.Parse(raw, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip
+            });
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+
+            if (action == "tool_call")
+            {
+                // Reuses the shared JSON mapping (name/tool + arguments).
+                return ProcessToolCallJsonElement(doc.RootElement);
+            }
+
+            // completion_claim → task_complete; replan → plan (action=create).
+            string name = action == "completion_claim" ? "task_complete" : "plan";
+            var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (doc.RootElement.TryGetProperty("summary", out var summary) && summary.ValueKind == JsonValueKind.String)
+            {
+                args["summary"] = summary.GetString() ?? string.Empty;
+            }
+            if (action == "replan")
+            {
+                args["action"] = "create";
+                if (doc.RootElement.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+                {
+                    var list = new List<string>();
+                    foreach (var it in items.EnumerateArray())
+                    {
+                        list.Add(it.ToString());
+                    }
+                    if (list.Count > 0) args["items"] = string.Join("\n", list);
+                }
+            }
+            return new ToolCallRequest(name, args);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static ToolCallRequest? ProcessToolCallJsonElement(JsonElement element)

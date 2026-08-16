@@ -39,5 +39,9 @@ public enum ContinuationReason
     CompletionAccepted,
 
     /// <summary>An error ended the turn.</summary>
-    Error
+    Error,
+
+    /// <summary>Autonomous mode produced text but no action — the protocol-repair loop must
+    /// re-engage the model with a compact action-required instruction.</summary>
+    NoActionProduced
 }

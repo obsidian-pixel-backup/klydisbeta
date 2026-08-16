@@ -37,12 +37,17 @@ public class AgentRuntime(
         bool cancelled,
         bool endedOnOwnStop,
         bool promptFilledWindow,
-        bool visibleEmpty)
+        bool visibleEmpty,
+        bool noActionProduced = false)
     {
         if (cancelled) return GenerationOutcome.Cancelled;
         if (promptFilledWindow) return GenerationOutcome.ContextExhausted;
         if (hitMaxTokens) return GenerationOutcome.OutputBudgetExhausted;
         if (cutShortMidStream) return GenerationOutcome.GenerationCutShort;
+        // A text-only autonomous response is a protocol failure, not a completed turn — and
+        // it is more informative than "model ended early", so it takes precedence: the
+        // supervisor must route it to RepairProtocol, never to a silent completion.
+        if (noActionProduced) return GenerationOutcome.NoActionProduced;
         if (endedOnOwnStop) return GenerationOutcome.ModelEndedEarly;
         if (visibleEmpty) return GenerationOutcome.DegenerateLoop;
         return GenerationOutcome.CompletedTurn;
@@ -55,13 +60,34 @@ public class AgentRuntime(
     /// </summary>
     public async Task<TaskRun> EnsureRunAsync(string taskId)
     {
+        // A Run is one CONTINUOUS execution attempt of a task, spanning many user turns and
+        // model generations (Task → Run → Turn). If the task already has an open running
+        // run, reuse it and bump the turn counter instead of creating a per-turn run — the
+        // old behavior opened and immediately cancelled a fresh run around every user turn,
+        // which made telemetry say "Run cancelled" whenever the model simply stopped early.
+        if (_activeRuns.TryGetValue(taskId, out var existing) && existing.Status == RunStatus.Running)
+        {
+            var bumped = existing with { TurnCount = existing.TurnCount + 1 };
+            _activeRuns[taskId] = bumped;
+            try
+            {
+                await _store.SaveRunAsync(bumped);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to persist run continuation for task {TaskId}.", taskId);
+            }
+            _logger?.LogDebug("Run {RunId} continues for task {TaskId} (turn {Turn}).", bumped.RunId, taskId, bumped.TurnCount);
+            return bumped;
+        }
+
         var run = new TaskRun(
             RunId: "R-" + Guid.NewGuid().ToString("N")[..12],
             TaskId: taskId,
             StartedAtUtc: DateTime.UtcNow,
             EndedAtUtc: null,
             Status: RunStatus.Running,
-            TurnCount: 0);
+            TurnCount: 1);
         _activeRuns[taskId] = run;
         try
         {

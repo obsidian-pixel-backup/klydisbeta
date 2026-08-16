@@ -264,7 +264,8 @@ public class SystemPromptManager
         string? customPath = null,
         string? personalityMode = null,
         bool isGoalMode = false,
-        Klydis.Core.Tasks.InteractionMode interactionMode = Klydis.Core.Tasks.InteractionMode.Autonomous)
+        Klydis.Core.Tasks.InteractionMode interactionMode = Klydis.Core.Tasks.InteractionMode.Autonomous,
+        bool useThinkingTags = false)
     {
         string masterPrompt = GetMasterSystemPrompt(customPath);
         string? personalityContent = GetPersonalityPrompt(personalityMode);
@@ -279,9 +280,20 @@ public class SystemPromptManager
 
         if (!string.IsNullOrWhiteSpace(personalityContent))
         {
-            sb.AppendLine("## ACTIVE MODEL PERSONALITY & USER STYLE DIRECTIVES");
-            sb.AppendLine("You MUST strictly adhere to the following personality style for all your responses:");
-            sb.AppendLine(personalityContent.Trim());
+            if (isGoalMode)
+            {
+                // Autonomous mode suppresses the social persona (review §20–§21): the model is
+                // executing work, not bantering. The warm/witty conversational personality is
+                // what the live export showed leaking into task turns as canned greetings.
+                sb.AppendLine("## OPERATING STYLE (AUTONOMOUS TASK MODE)");
+                sb.AppendLine("You are executing a task. Be professional, focused, and brief. Do not engage in conversational filler, greetings, or permission-seeking. Report progress factually and perform the next action.");
+            }
+            else
+            {
+                sb.AppendLine("## ACTIVE MODEL PERSONALITY & USER STYLE DIRECTIVES");
+                sb.AppendLine("You MUST strictly adhere to the following personality style for all your responses:");
+                sb.AppendLine(personalityContent.Trim());
+            }
             sb.AppendLine();
             sb.AppendLine("---");
             sb.AppendLine();
@@ -338,9 +350,20 @@ public class SystemPromptManager
         sb.AppendLine("- PROPER LIST FORMATTING: Always format numbered items and bullet points cleanly with standard Markdown line breaks. Every list item MUST sit on its own separate line.");
         sb.AppendLine("- NEVER compress or squash numbered steps into a single continuous line (e.g. NEVER write '1) Step one 2) Step two 3) Step three' squished on one line).");
         sb.AppendLine();
-        sb.AppendLine("### IMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING");
-        sb.AppendLine("1. If you need to think or plan, use <think>...</think> tags FIRST.");
-        sb.AppendLine("2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag.");
+        // The universal <think> directive is model-specific (review §23): only reasoning
+        // architectures (qwen thinking models) are told to emit think tags. For every other
+        // model the instruction is a neutral reasoning note — mandating custom tags on models
+        // without native thinking support turned an instruction-following test into a refusal
+        // attractor (the export's "I am an internal text-only agent" + canned-greeting loop).
+        sb.AppendLine(useThinkingTags
+            ? "### IMPORTANT INSTRUCTIONS FOR TOOL CALLING AND THINKING"
+            : "### IMPORTANT INSTRUCTIONS FOR TOOL CALLING");
+        sb.AppendLine(useThinkingTags
+            ? "1. If you need to think or plan, use <think>...</think> tags FIRST."
+            : "1. Reason briefly before responding if useful, but never emit visible planning chatter in the reply.");
+        sb.AppendLine(useThinkingTags
+            ? "2. You MUST NOT output <tool_call> inside <think> tags. Tool calls must be placed AFTER the </think> closing tag."
+            : "2. Never place tool calls inside reasoning text or tags — emit each as a standalone <tool_call> block.");
         sb.AppendLine("3. To use a tool, output a JSON block exactly like this: <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>");
         sb.AppendLine("4. CRITICAL: Whenever the user asks you to perform an action, test tools, inspect system/files, execute commands, explore/study a codebase, or manage skills, YOU MUST CALL THE TOOL IMMEDIATELY using the <tool_call> tag. Do NOT ask clarifying questions or elicitation options—take autonomous action and execute the exploration/indexing tools immediately.");
         sb.AppendLine("5. STRICT PROHIBITION AGAINST SIMULATION: NEVER simulate, mock, or fabricate tool execution outputs or results in plain text (e.g. NEVER write text like 'Input: {...}' or 'Output: {...}' pretending a tool ran). You MUST output a real <tool_call> tag and wait for the actual system execution result.");
@@ -553,9 +576,20 @@ public class SystemPromptManager
         if (!string.IsNullOrWhiteSpace(personalityContent))
         {
             sb.AppendLine();
-            sb.AppendLine("## ACTIVE PERSONALITY DIRECTIVES");
-            sb.AppendLine("You MUST strictly adhere to this personality style for all responses:");
-            sb.AppendLine(personalityContent.Trim());
+            if (isGoalMode)
+            {
+                // Autonomous mode suppresses the social persona (review §20–§21): the model is
+                // executing work, not bantering — the warm/witty conversational personality is
+                // what the live export showed leaking into task turns as canned greetings.
+                sb.AppendLine("## OPERATING STYLE (AUTONOMOUS TASK MODE)");
+                sb.AppendLine("You are executing a task. Be professional, focused, and brief. Do not engage in conversational filler, greetings, or permission-seeking. Report progress factually and perform the next action.");
+            }
+            else
+            {
+                sb.AppendLine("## ACTIVE PERSONALITY DIRECTIVES");
+                sb.AppendLine("You MUST strictly adhere to this personality style for all responses:");
+                sb.AppendLine(personalityContent.Trim());
+            }
         }
 
         // Long-horizon memory and context headers MUST reach every model class. The compact

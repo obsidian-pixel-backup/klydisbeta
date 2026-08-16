@@ -29,11 +29,33 @@ public enum TaskStepStatus
 /// </summary>
 public enum RunStatus
 {
+    /// <summary>The run is the task's CURRENT continuous execution attempt; it stays open
+    /// across user turns until the task completes, fails, is suspended, or is interrupted.</summary>
     Running,
+
+    /// <summary>Paused by the harness (awaiting user input / external condition).</summary>
     Paused,
+
+    /// <summary>The task was sealed Completed by the supervisor within this run.</summary>
     Completed,
+
+    /// <summary>The run ended in a task failure.</summary>
     Failed,
-    Cancelled
+
+    /// <summary>Explicitly cancelled (user stop / model switch / teardown).</summary>
+    Cancelled,
+
+    /// <summary>The run was set aside while the task remains resumable — e.g. a NEW task
+    /// replaced this one, or the turn ended without a terminal outcome. NOT cancellation:
+    /// the task is still active and a later turn reopens/continues execution.</summary>
+    Suspended,
+
+    /// <summary>The run was cut short mid-turn (generation cancelled, app stop, stall
+    /// watchdog) but the task itself is still active and resumable.</summary>
+    Interrupted,
+
+    /// <summary>The run is waiting on the user before it can proceed.</summary>
+    AwaitingUser
 }
 
 /// <summary>
@@ -63,6 +85,12 @@ public enum GenerationOutcome
 
     /// <summary>The generation produced a parseable tool call (execution continues with the tool).</summary>
     ToolCallProduced,
+
+    /// <summary>In Autonomous mode the generation produced ONLY natural language — no tool call,
+    /// no completion claim, no replan. This is a protocol failure, NOT a completed turn: the
+    /// model may understand the request but refuse to enter the tool protocol (the observed
+    /// "Good morning! Please tell me what you want next" pattern).</summary>
+    NoActionProduced,
 
     /// <summary>The generation hit the output token cap — the harness ended the stream.</summary>
     OutputBudgetExhausted,
@@ -103,6 +131,10 @@ public enum ExecutionDecision
 
     /// <summary>The plan no longer reflects reality — revise it before continuing.</summary>
     Replan,
+
+    /// <summary>Autonomous mode produced no valid action — inject a COMPACT action-required
+    /// repair instruction and regenerate (bounded by the protocol-repair budget).</summary>
+    RepairProtocol,
 
     /// <summary>Run the verification gates (completion was claimed or steps are done).</summary>
     Verify,
