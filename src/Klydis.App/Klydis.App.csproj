@@ -43,6 +43,10 @@
   <ItemGroup>
     <!-- Dependency injection -->
     <PackageReference Include="MdXaml" Version="1.27.0" />
+    <!-- MdXaml renders fenced code blocks as AvalonEdit TextEditor controls; the app rewrites
+         them into themed FlowDocument code blocks (see MarkdownViewerStyler), so the control
+         type is a direct dependency rather than a transitive one. -->
+    <PackageReference Include="AvalonEdit" Version="6.3.0.90" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />

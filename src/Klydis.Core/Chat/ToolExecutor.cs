@@ -14,6 +14,7 @@ using System.Net.Sockets;
 using HtmlAgilityPack;
 using Microsoft.Extensions.Logging;
 using System.Management;
+using Klydis.Core.Memory;
 using Klydis.Core.Workbench;
 
 namespace Klydis.Core.Chat;
@@ -172,6 +173,12 @@ public class ToolExecutor(
         {
             new("path", "string", "Absolute path to the file", true),
             new("content", "string", "Content to write", true)
+        }, false),
+        new ToolDefinition("edit_file", "Applies a targeted text replacement inside an existing file. Use for incremental edits: provide the exact old_text block to replace and the new_text replacement. The old_text must appear exactly once — if it matches zero or multiple places, the call fails with guidance. The harness captures a real diff and registers the artifact exactly like write_file.", new List<ToolParameter>
+        {
+            new("path", "string", "Absolute path to the file", true),
+            new("old_text", "string", "The exact existing text to replace (must appear exactly once)", true),
+            new("new_text", "string", "The replacement text", true)
         }, false),
         new ToolDefinition("list_directory", "Lists immediate children of a directory with sizes. For very large directories (e.g. system32), consider using search_files instead.", new List<ToolParameter>
         {
@@ -418,7 +425,7 @@ public class ToolExecutor(
         if (CheckIdenticalRetry(sessionId, callKey, out string blockMessage))
         {
             TrackIdenticalCallOutcome(sessionId, callKey, succeeded: false);
-            return FinishToolCall(request, sessionId, argsJson,
+            return await FinishToolCallAsync(request, sessionId, argsJson,
                 new ToolResult(request.Name, false, string.Empty, blockMessage));
         }
 
@@ -499,6 +506,7 @@ public class ToolExecutor(
             {
                 "read_file" => await ReadFileAsync(request, toolCt),
                 "write_file" => await WriteFileAsync(request, sessionId, toolCt),
+                "edit_file" => await EditFileAsync(request, sessionId, toolCt),
                 "list_directory" => await ListDirectoryAsync(request, toolCt),
                 "run_command" => await RunCommandAsync(request, toolCt),
                 "get_system_info" => await GetSystemInfoAsync(toolCt),
@@ -557,18 +565,23 @@ public class ToolExecutor(
             };
         }
 
-        return FinishToolCall(request, sessionId, argsJson, result);
+        return await FinishToolCallAsync(request, sessionId, argsJson, result);
     }
 
-    private ToolResult FinishToolCall(ToolCallRequest request, string sessionId, string argsJson, ToolResult result)
+    private async Task<ToolResult> FinishToolCallAsync(ToolCallRequest request, string sessionId, string argsJson, ToolResult result)
     {
+        // Hydrate first so the in-memory cache is the DB contents before this invocation is
+        // appended — otherwise a tool call that lands before the UI's first read would be
+        // recorded in memory, then re-appended by the lazy hydration, duplicating it.
+        EnsureSessionToolActivityLoaded(sessionId);
+
         // Record the invocation for the right-side panel (session-scoped). Args are serialized
         // so path-bearing tools can be surfaced as "files this chat worked with", and the
         // output preview is sized for the Terminal tab's bracketed command/output transcript
         // (a 220-char stub made run_command results useless to read).
+        string outputPreview = string.Empty;
         try
         {
-            string outputPreview = string.Empty;
             if (!string.IsNullOrEmpty(result.Output))
             {
                 outputPreview = result.Output.Length > 6000 ? result.Output.Substring(0, 6000) : result.Output;
@@ -583,6 +596,36 @@ public class ToolExecutor(
             }
         }
         catch { /* recording must never break tool execution */ }
+
+        // Durable: persist to SQLite so Files/Preview/Terminal survive restarts and model
+        // switches. The in-memory list above is a cache of tool_activity, not the authority.
+        try
+        {
+            await messageStore.AddToolActivityAsync(new ToolActivityRow(
+                ActivityId: Guid.NewGuid().ToString("N"),
+                SessionId: sessionId ?? string.Empty,
+                TaskId: CurrentTaskId,
+                RunId: null,
+                ToolName: request.Name,
+                ArgsJson: argsJson,
+                Success: result.Success,
+                OutputPreview: outputPreview,
+                TimestampUtc: DateTime.UtcNow));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to persist tool activity for {ToolName}.", request.Name);
+        }
+
+        // Durable execution event for the tool lifecycle.
+        try
+        {
+            await EmitExecutionEventAsync(sessionId, result.Success ? "ToolCompleted" : "ToolFailed", CurrentTaskId, request.Name, null);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to emit tool event for {ToolName}.", request.Name);
+        }
 
         result = ProcessToolOutputOffload(result);
         ToolExecuted?.Invoke(this, result);
@@ -932,9 +975,75 @@ public class ToolExecutor(
 
         await File.WriteAllTextAsync(path, content, ct);
 
+        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, content);
+
+        return new ToolResult(request.Name, true, "File written successfully", null);
+    }
+
+    /// <summary>
+    /// Applies a targeted text replacement inside an existing file (the <c>edit_file</c>
+    /// tool). The old_text must appear EXACTLY once — zero or multiple matches fail with
+    /// guidance instead of risking a corrupt or ambiguous edit. Every mutation flows through
+    /// <see cref="CaptureFileMutationAsync"/>, the same pipeline as write_file, so diffs,
+    /// artifacts, and events stay consistent across tools.
+    /// </summary>
+    private async Task<ToolResult> EditFileAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
+    {
+        var path = GetStringArg(request.Arguments, "path");
+        var oldText = GetStringArg(request.Arguments, "old_text");
+        var newText = GetStringArg(request.Arguments, "new_text");
+        if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Path is required");
+        if (oldText == null) return InvalidCall(request.Name, "old_text is required");
+        if (newText == null) return InvalidCall(request.Name, "new_text is required");
+        var commandLike = CommandLikePathResult(request, path);
+        if (commandLike != null) return commandLike;
+        if (!File.Exists(path)) return new ToolResult(request.Name, false, string.Empty, $"File not found: {path}");
+
+        string beforeContent;
         try
         {
-            var diff = DiffService.Diff(beforeContent, content);
+            beforeContent = await File.ReadAllTextAsync(path, ct);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult(request.Name, false, string.Empty, $"Failed to read {path}: {ex.Message}");
+        }
+
+        int idx = beforeContent.IndexOf(oldText, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            return new ToolResult(request.Name, false, string.Empty,
+                $"old_text was not found in {path}. Use read_file to get the exact current content, or write_file to rewrite the whole file.");
+        }
+        if (beforeContent.IndexOf(oldText, idx + oldText.Length, StringComparison.Ordinal) >= 0)
+        {
+            return new ToolResult(request.Name, false, string.Empty,
+                $"old_text appears more than once in {path}. Include more surrounding context so the match is unique, or use write_file to rewrite the whole file.");
+        }
+
+        string afterContent = beforeContent.Substring(0, idx) + newText + beforeContent.Substring(idx + oldText.Length);
+
+        await File.WriteAllTextAsync(path, afterContent, ct);
+
+        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, afterContent);
+
+        return new ToolResult(request.Name, true, "File edited successfully", null);
+    }
+
+    /// <summary>
+    /// The ONE mutation pipeline every file-writing tool goes through (write_file, edit_file):
+    /// real diff → durable FileChange → artifact registration → execution events. Never
+    /// duplicated across tools, so the Changes/Preview/Files panels all derive from the same
+    /// factual state. Each step is best-effort — a failed record must never fail the write.
+    /// </summary>
+    private async Task CaptureFileMutationAsync(ToolCallRequest request, string? sessionId, string path, string? beforeContent, string afterContent)
+    {
+        bool created = beforeContent == null;
+
+        // 1. Real diff + durable FileChange (the Changes tab).
+        try
+        {
+            var diff = DiffService.Diff(beforeContent, afterContent);
             var change = new FileChange(
                 ChangeId: Guid.NewGuid().ToString("N"),
                 SessionId: sessionId ?? string.Empty,
@@ -942,7 +1051,7 @@ public class ToolExecutor(
                 Path: path,
                 Tool: request.Name,
                 BeforeHash: HashText(beforeContent),
-                AfterHash: HashText(content),
+                AfterHash: HashText(afterContent),
                 Diff: diff.Text,
                 AddedLines: diff.AddedLines,
                 DeletedLines: diff.DeletedLines,
@@ -953,12 +1062,28 @@ public class ToolExecutor(
         }
         catch (Exception ex)
         {
-            // Change capture must never fail the write itself — a missing change record is
-            // strictly better than a broken tool call.
             logger.LogWarning(ex, "Failed to capture file change for {Path}.", path);
         }
 
-        return new ToolResult(request.Name, true, "File written successfully", null);
+        // 2. File lifecycle event.
+        try
+        {
+            await EmitExecutionEventAsync(sessionId, created ? "FileCreated" : "FileModified", CurrentTaskId, request.Name, path);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to emit file event for {Path}.", path);
+        }
+
+        // 3. Artifact registration (the Preview tab) — only for recognized previewable types.
+        try
+        {
+            await RegisterArtifactAsync(sessionId, path, afterContent, created);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to register artifact for {Path}.", path);
+        }
     }
 
     private static string HashText(string? text)
@@ -967,6 +1092,74 @@ public class ToolExecutor(
         using var sha = System.Security.Cryptography.SHA256.Create();
         byte[] hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text));
         return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
+    }
+
+    private static readonly HashSet<string> ArtifactExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".html", ".htm", ".md", ".markdown", ".txt", ".json", ".xml", ".log", ".cs", ".ts",
+        ".py", ".js", ".css", ".xaml", ".sql", ".ps1", ".bat", ".yml", ".yaml", ".toml",
+        ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"
+    };
+
+    /// <summary>
+    /// The previewable artifact kind for a path (html/md/text/svg/image), or empty when the
+    /// file is not a candidate artifact. Mirrors the Preview panel's renderer selection.
+    /// </summary>
+    private static string GetArtifactType(string path)
+    {
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        return ext switch
+        {
+            ".html" or ".htm" => "html",
+            ".md" or ".markdown" => "md",
+            ".svg" => "svg",
+            ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" => "image",
+            ".txt" or ".json" or ".xml" or ".log" or ".cs" or ".ts" or ".py" or ".js" or ".css" or ".xaml" or ".sql" or ".ps1" or ".bat" or ".yml" or ".yaml" or ".toml" => "text",
+            _ => string.Empty
+        };
+    }
+
+    /// <summary>
+    /// Registers/updates the durable artifact entry for a written file (is_current revision
+    /// lifecycle), and emits the artifact lifecycle event. Only recognized previewable types
+    /// become artifacts; the FileChange log records every mutation regardless.
+    /// </summary>
+    private async Task RegisterArtifactAsync(string? sessionId, string path, string content, bool created)
+    {
+        if (!ArtifactExtensions.Contains(Path.GetExtension(path))) return;
+
+        await messageStore.MarkArtifactsStaleAsync(sessionId ?? string.Empty, path);
+        await messageStore.AddArtifactAsync(new ArtifactRow(
+            ArtifactId: Guid.NewGuid().ToString("N"),
+            SessionId: sessionId ?? string.Empty,
+            TaskId: CurrentTaskId,
+            Path: path,
+            ArtifactType: GetArtifactType(path),
+            ContentHash: HashText(content),
+            CreatedAtUtc: DateTime.UtcNow,
+            UpdatedAtUtc: DateTime.UtcNow,
+            Previewable: true,
+            IsCurrent: true));
+
+        await EmitExecutionEventAsync(sessionId, created ? "ArtifactCreated" : "ArtifactUpdated", CurrentTaskId, null, path);
+    }
+
+    /// <summary>
+    /// Appends a durable execution event to the stream (the backbone the workbench projects
+    /// from). Best-effort: a failed event record never breaks the operation that produced it.
+    /// </summary>
+    private async Task EmitExecutionEventAsync(string? sessionId, string eventType, string? taskId, string? toolName, string? path, string? payload = null)
+    {
+        await messageStore.AddExecutionEventAsync(new ExecutionEventRow(
+            EventId: Guid.NewGuid().ToString("N"),
+            SessionId: sessionId ?? string.Empty,
+            TaskId: taskId,
+            RunId: null,
+            EventType: eventType,
+            TimestampUtc: DateTime.UtcNow,
+            ToolName: toolName,
+            Path: path,
+            PayloadJson: payload));
     }
 
     private Task<ToolResult> ListDirectoryAsync(ToolCallRequest request, CancellationToken ct)
@@ -2571,6 +2764,7 @@ public class ToolExecutor(
             {
                 await TaskManager.SavePlanAsync(CurrentTaskId, json);
             }
+            await EmitExecutionEventAsync(sessionId, "PlanCreated", CurrentTaskId, null, null);
         }
         catch (Exception ex)
         {
@@ -2664,6 +2858,7 @@ public class ToolExecutor(
     /// </summary>
     public IReadOnlyList<string> GetSessionArtifactPaths(string sessionId)
     {
+        EnsureSessionToolActivityLoaded(sessionId);
         if (string.IsNullOrEmpty(sessionId) || !_sessionToolActivity.TryGetValue(sessionId, out var list) || list.Count == 0)
         {
             return Array.Empty<string>();
@@ -2673,7 +2868,7 @@ public class ToolExecutor(
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in list)
         {
-            if (r.ToolName is not ("write_file" or "str_replace")) continue;
+            if (r.ToolName is not ("write_file" or "str_replace" or "edit_file")) continue;
             string p = ExtractPathArg(r.ArgsJson);
             if (string.IsNullOrEmpty(p) || !seen.Add(p)) continue;
             paths.Add(p);
@@ -2730,14 +2925,50 @@ public class ToolExecutor(
     // ---- Per-session tool activity ----
     // Records every tool invocation (name + serialized args + time) keyed by session, so the
     // UI's right-side panel can show ONLY what this chat actually did — files it read/wrote,
-    // artifacts it produced — instead of workspace-global git state.
+    // artifacts it produced — instead of workspace-global git state. The list is hydrated
+    // from the durable tool_activity table on first access and appended on every call, so it
+    // is a CACHE of SQLite, not the source of truth — activity survives restarts/switches.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ToolActivityRecord>> _sessionToolActivity = new();
+    // Sessions already hydrated from the durable tool_activity table (the getters below are
+    // called by the UI every 2s, so the lazy restore must hit the DB at most once per session).
+    private readonly HashSet<string> _toolActivityLoadAttempted = new();
 
     /// <summary>
-    /// Returns the recorded tool invocations for a session, oldest first.
+    /// Hydrates a session's persisted tool activity (if any) into the in-memory cache. Called
+    /// lazily from the activity getters, so a session opened after an app restart shows the
+    /// tool history the model left behind. Best-effort: a failed load is logged and the
+    /// session simply starts with an empty (live) list.
+    /// </summary>
+    private void EnsureSessionToolActivityLoaded(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return;
+        lock (_toolActivityLoadAttempted)
+        {
+            if (!_toolActivityLoadAttempted.Add(sessionId)) return;
+        }
+        try
+        {
+            var rows = messageStore.GetToolActivityBySessionAsync(sessionId).GetAwaiter().GetResult();
+            if (rows.Count == 0) return;
+            var list = _sessionToolActivity.GetOrAdd(sessionId, _ => new List<ToolActivityRecord>());
+            foreach (var r in rows)
+            {
+                list.Add(new ToolActivityRecord(r.ToolName, r.ArgsJson, r.Success, r.OutputPreview, r.TimestampUtc.ToLocalTime()));
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to load persisted tool activity for session {SessionId}.", sessionId);
+        }
+    }
+
+    /// <summary>
+    /// Returns the recorded tool invocations for a session, oldest first. Durable: hydrated
+    /// from SQLite on first access, so the Files/Preview/Terminal panels survive restarts.
     /// </summary>
     public IReadOnlyList<ToolActivityRecord> GetSessionToolActivity(string sessionId)
     {
+        EnsureSessionToolActivityLoaded(sessionId);
         if (string.IsNullOrEmpty(sessionId) || !_sessionToolActivity.TryGetValue(sessionId, out var list) || list.Count == 0)
         {
             return Array.Empty<ToolActivityRecord>();
@@ -2752,6 +2983,7 @@ public class ToolExecutor(
     {
         if (!string.IsNullOrEmpty(sessionId))
         {
+            EnsureSessionToolActivityLoaded(sessionId);
             _sessionToolActivity.TryRemove(sessionId, out _);
         }
     }
@@ -2890,6 +3122,7 @@ public class ToolExecutor(
             {
                 await TaskManager.SavePlanAsync(CurrentTaskId, json);
             }
+            await EmitExecutionEventAsync(sessionId, "PlanUpdated", CurrentTaskId, null, null);
         }
         catch (Exception ex)
         {

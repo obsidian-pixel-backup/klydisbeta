@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
@@ -77,6 +78,59 @@ public record SessionNoteRecord(
     string Content,
     DateTime CreatedAt,
     DateTime UpdatedAt
+);
+
+/// <summary>
+/// A durable record of one tool invocation. The workbench Files/Preview/Terminal panels read
+/// this from SQLite so activity survives app restarts and model switches; the in-memory
+/// ToolExecutor activity list is only a cache of this table.
+/// </summary>
+public sealed record ToolActivityRow(
+    string ActivityId,
+    string SessionId,
+    string? TaskId,
+    string? RunId,
+    string ToolName,
+    string ArgsJson,
+    bool Success,
+    string OutputPreview,
+    DateTime TimestampUtc
+);
+
+/// <summary>
+/// A durable artifact: a file the agent produced that is useful to the user (previewable
+/// pages, docs, reports). Registered automatically by the harness after a successful file
+/// mutation — never derived from model narration. IsCurrent flags the latest revision of a
+/// path so the Preview tab can show the newest content without scanning the workspace.
+/// </summary>
+public sealed record ArtifactRow(
+    string ArtifactId,
+    string SessionId,
+    string? TaskId,
+    string Path,
+    string ArtifactType,
+    string? ContentHash,
+    DateTime CreatedAtUtc,
+    DateTime UpdatedAtUtc,
+    bool Previewable,
+    bool IsCurrent
+);
+
+/// <summary>
+/// A durable execution event: a factual state change in the agent loop (task/step/tool/file/
+/// artifact lifecycle). The event stream is the backbone the workbench panels project from;
+/// nothing in the UI invents state that is not recorded here.
+/// </summary>
+public sealed record ExecutionEventRow(
+    string EventId,
+    string SessionId,
+    string? TaskId,
+    string? RunId,
+    string EventType,
+    DateTime TimestampUtc,
+    string? ToolName = null,
+    string? Path = null,
+    string? PayloadJson = null
 );
 
 /// <summary>
@@ -262,6 +316,58 @@ public class MessageStore
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_file_changes_session ON file_changes(session_id, created_at);
+
+            -- Durable tool-activity log (workbench): every tool invocation the model makes,
+            -- persisted so Files/Preview/Terminal survive restarts. The in-memory session
+            -- activity list in ToolExecutor is a cache of this table, not the source of truth.
+            CREATE TABLE IF NOT EXISTS tool_activity (
+                activity_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT,
+                run_id TEXT,
+                tool_name TEXT NOT NULL,
+                args_json TEXT,
+                success INTEGER NOT NULL,
+                output_preview TEXT,
+                timestamp_utc TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_activity_session ON tool_activity(session_id, timestamp_utc);
+            CREATE INDEX IF NOT EXISTS idx_tool_activity_task ON tool_activity(task_id, timestamp_utc);
+
+            -- Durable artifact registry (workbench): files the agent produced that are useful
+            -- to the user. Auto-registered by the mutation pipeline after successful writes —
+            -- the Preview tab reads this instead of inferring artifacts from memory.
+            CREATE TABLE IF NOT EXISTS artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT,
+                path TEXT NOT NULL,
+                artifact_type TEXT NOT NULL,
+                content_hash TEXT,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                previewable INTEGER NOT NULL DEFAULT 0,
+                is_current INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, path);
+            CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id, path);
+
+            -- Durable execution-event stream: the factual backbone of the agent loop
+            -- (task/step/tool/file/artifact lifecycle). Workbench panels project from this —
+            -- nothing invents state that is not recorded here.
+            CREATE TABLE IF NOT EXISTS execution_events (
+                event_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT,
+                run_id TEXT,
+                event_type TEXT NOT NULL,
+                timestamp_utc TEXT NOT NULL,
+                tool_name TEXT,
+                path TEXT,
+                payload_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_events_session ON execution_events(session_id, timestamp_utc);
+            CREATE INDEX IF NOT EXISTS idx_execution_events_task ON execution_events(task_id, timestamp_utc);
 
             -- FTS5 Virtual Table for full-text search
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
@@ -1295,4 +1401,279 @@ public class MessageStore
         command.CommandText = $"UPDATE messages SET is_consolidated = 1 WHERE id IN ({string.Join(",", messageIds)})";
         await command.ExecuteNonQueryAsync();
     }
+
+    #region Tool activity, artifacts & execution events (durable execution state)
+
+    /// <summary>
+    /// Persists one tool invocation. Called by ToolExecutor.FinishToolCallAsync; the in-memory
+    /// session activity list is a cache of this table, not the source of truth.
+    /// </summary>
+    public async Task AddToolActivityAsync(ToolActivityRow row)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO tool_activity (activity_id, session_id, task_id, run_id, tool_name, args_json, success, output_preview, timestamp_utc)
+            VALUES (@id, @sessionId, @taskId, @runId, @toolName, @argsJson, @success, @preview, @ts);
+        ";
+        command.Parameters.AddWithValue("@id", row.ActivityId);
+        command.Parameters.AddWithValue("@sessionId", row.SessionId);
+        command.Parameters.AddWithValue("@taskId", (object?)row.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@runId", (object?)row.RunId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@toolName", row.ToolName);
+        command.Parameters.AddWithValue("@argsJson", (object?)row.ArgsJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("@success", row.Success ? 1 : 0);
+        command.Parameters.AddWithValue("@preview", (object?)row.OutputPreview ?? DBNull.Value);
+        command.Parameters.AddWithValue("@ts", row.TimestampUtc.ToString("o"));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Loads the durable tool-activity log for a session, oldest first (bounded).
+    /// </summary>
+    public async Task<List<ToolActivityRow>> GetToolActivityBySessionAsync(string sessionId, int limit = 2000)
+    {
+        var result = new List<ToolActivityRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT activity_id, session_id, task_id, run_id, tool_name, args_json, success, output_preview, timestamp_utc
+            FROM tool_activity WHERE session_id = @sessionId
+            ORDER BY timestamp_utc ASC LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        command.Parameters.AddWithValue("@limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadToolActivity(reader));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Loads the durable tool-activity log for a task, oldest first (bounded). Task-scoped so
+    /// the Files panel never leaks another task's activity into the current one.
+    /// </summary>
+    public async Task<List<ToolActivityRow>> GetToolActivityByTaskAsync(string taskId, int limit = 2000)
+    {
+        var result = new List<ToolActivityRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT activity_id, session_id, task_id, run_id, tool_name, args_json, success, output_preview, timestamp_utc
+            FROM tool_activity WHERE task_id = @taskId
+            ORDER BY timestamp_utc ASC LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        command.Parameters.AddWithValue("@limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadToolActivity(reader));
+        }
+        return result;
+    }
+
+    private static ToolActivityRow ReadToolActivity(Microsoft.Data.Sqlite.SqliteDataReader reader)
+    {
+        int Ord(string name) => reader.GetOrdinal(name);
+        return new ToolActivityRow(
+            reader.GetString(Ord("activity_id")),
+            reader.GetString(Ord("session_id")),
+            reader.IsDBNull(Ord("task_id")) ? null : reader.GetString(Ord("task_id")),
+            reader.IsDBNull(Ord("run_id")) ? null : reader.GetString(Ord("run_id")),
+            reader.GetString(Ord("tool_name")),
+            reader.IsDBNull(Ord("args_json")) ? string.Empty : reader.GetString(Ord("args_json")),
+            reader.GetInt32(Ord("success")) != 0,
+            reader.IsDBNull(Ord("output_preview")) ? string.Empty : reader.GetString(Ord("output_preview")),
+            ParseUtc(reader.GetString(Ord("timestamp_utc"))));
+    }
+
+    /// <summary>
+    /// Persists an artifact revision. The caller marks previous revisions of the same path
+    /// stale first (see <see cref="MarkArtifactsStaleAsync"/>).
+    /// </summary>
+    public async Task AddArtifactAsync(ArtifactRow row)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO artifacts (artifact_id, session_id, task_id, path, artifact_type, content_hash, created_at_utc, updated_at_utc, previewable, is_current)
+            VALUES (@id, @sessionId, @taskId, @path, @type, @hash, @createdAt, @updatedAt, @previewable, @isCurrent);
+        ";
+        command.Parameters.AddWithValue("@id", row.ArtifactId);
+        command.Parameters.AddWithValue("@sessionId", row.SessionId);
+        command.Parameters.AddWithValue("@taskId", (object?)row.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@path", row.Path);
+        command.Parameters.AddWithValue("@type", row.ArtifactType);
+        command.Parameters.AddWithValue("@hash", (object?)row.ContentHash ?? DBNull.Value);
+        command.Parameters.AddWithValue("@createdAt", row.CreatedAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@updatedAt", row.UpdatedAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@previewable", row.Previewable ? 1 : 0);
+        command.Parameters.AddWithValue("@isCurrent", row.IsCurrent ? 1 : 0);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Marks every previous revision of a path in a session as superseded (is_current = 0),
+    /// so the Preview tab always shows the latest content without scanning the workspace.
+    /// </summary>
+    public async Task MarkArtifactsStaleAsync(string sessionId, string path)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            UPDATE artifacts SET is_current = 0
+            WHERE session_id = @sessionId AND path = @path;
+        ";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        command.Parameters.AddWithValue("@path", path);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Loads the durable artifact registry for a session (current revisions only by default).
+    /// </summary>
+    public async Task<List<ArtifactRow>> GetArtifactsBySessionAsync(string sessionId, bool currentOnly = true)
+    {
+        var result = new List<ArtifactRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = currentOnly
+            ? "SELECT artifact_id, session_id, task_id, path, artifact_type, content_hash, created_at_utc, updated_at_utc, previewable, is_current FROM artifacts WHERE session_id = @sessionId AND is_current = 1 ORDER BY updated_at_utc DESC;"
+            : "SELECT artifact_id, session_id, task_id, path, artifact_type, content_hash, created_at_utc, updated_at_utc, previewable, is_current FROM artifacts WHERE session_id = @sessionId ORDER BY updated_at_utc DESC;";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadArtifact(reader));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Loads the durable artifact registry for a task (current revisions only by default).
+    /// </summary>
+    public async Task<List<ArtifactRow>> GetArtifactsByTaskAsync(string taskId, bool currentOnly = true)
+    {
+        var result = new List<ArtifactRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = currentOnly
+            ? "SELECT artifact_id, session_id, task_id, path, artifact_type, content_hash, created_at_utc, updated_at_utc, previewable, is_current FROM artifacts WHERE task_id = @taskId AND is_current = 1 ORDER BY updated_at_utc DESC;"
+            : "SELECT artifact_id, session_id, task_id, path, artifact_type, content_hash, created_at_utc, updated_at_utc, previewable, is_current FROM artifacts WHERE task_id = @taskId ORDER BY updated_at_utc DESC;";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadArtifact(reader));
+        }
+        return result;
+    }
+
+    private static ArtifactRow ReadArtifact(Microsoft.Data.Sqlite.SqliteDataReader reader)
+    {
+        int Ord(string name) => reader.GetOrdinal(name);
+        return new ArtifactRow(
+            reader.GetString(Ord("artifact_id")),
+            reader.GetString(Ord("session_id")),
+            reader.IsDBNull(Ord("task_id")) ? null : reader.GetString(Ord("task_id")),
+            reader.GetString(Ord("path")),
+            reader.GetString(Ord("artifact_type")),
+            reader.IsDBNull(Ord("content_hash")) ? null : reader.GetString(Ord("content_hash")),
+            ParseUtc(reader.GetString(Ord("created_at_utc"))),
+            ParseUtc(reader.GetString(Ord("updated_at_utc"))),
+            reader.GetInt32(Ord("previewable")) != 0,
+            reader.GetInt32(Ord("is_current")) != 0);
+    }
+
+    /// <summary>
+    /// Appends one durable execution event to the stream.
+    /// </summary>
+    public async Task AddExecutionEventAsync(ExecutionEventRow row)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO execution_events (event_id, session_id, task_id, run_id, event_type, timestamp_utc, tool_name, path, payload_json)
+            VALUES (@id, @sessionId, @taskId, @runId, @type, @ts, @toolName, @path, @payload);
+        ";
+        command.Parameters.AddWithValue("@id", row.EventId);
+        command.Parameters.AddWithValue("@sessionId", row.SessionId);
+        command.Parameters.AddWithValue("@taskId", (object?)row.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@runId", (object?)row.RunId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@type", row.EventType);
+        command.Parameters.AddWithValue("@ts", row.TimestampUtc.ToString("o"));
+        command.Parameters.AddWithValue("@toolName", (object?)row.ToolName ?? DBNull.Value);
+        command.Parameters.AddWithValue("@path", (object?)row.Path ?? DBNull.Value);
+        command.Parameters.AddWithValue("@payload", (object?)row.PayloadJson ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Loads the durable event stream for a task, oldest first (bounded).
+    /// </summary>
+    public async Task<List<ExecutionEventRow>> GetExecutionEventsByTaskAsync(string taskId, int limit = 500)
+    {
+        var result = new List<ExecutionEventRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT event_id, session_id, task_id, run_id, event_type, timestamp_utc, tool_name, path, payload_json
+            FROM execution_events WHERE task_id = @taskId
+            ORDER BY timestamp_utc ASC LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        command.Parameters.AddWithValue("@limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadExecutionEvent(reader));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Loads the durable event stream for a session, oldest first (bounded).
+    /// </summary>
+    public async Task<List<ExecutionEventRow>> GetExecutionEventsBySessionAsync(string sessionId, int limit = 500)
+    {
+        var result = new List<ExecutionEventRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT event_id, session_id, task_id, run_id, event_type, timestamp_utc, tool_name, path, payload_json
+            FROM execution_events WHERE session_id = @sessionId
+            ORDER BY timestamp_utc ASC LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        command.Parameters.AddWithValue("@limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadExecutionEvent(reader));
+        }
+        return result;
+    }
+
+    private static ExecutionEventRow ReadExecutionEvent(Microsoft.Data.Sqlite.SqliteDataReader reader)
+    {
+        int Ord(string name) => reader.GetOrdinal(name);
+        return new ExecutionEventRow(
+            reader.GetString(Ord("event_id")),
+            reader.GetString(Ord("session_id")),
+            reader.IsDBNull(Ord("task_id")) ? null : reader.GetString(Ord("task_id")),
+            reader.IsDBNull(Ord("run_id")) ? null : reader.GetString(Ord("run_id")),
+            reader.GetString(Ord("event_type")),
+            ParseUtc(reader.GetString(Ord("timestamp_utc"))),
+            reader.IsDBNull(Ord("tool_name")) ? null : reader.GetString(Ord("tool_name")),
+            reader.IsDBNull(Ord("path")) ? null : reader.GetString(Ord("path")),
+            reader.IsDBNull(Ord("payload_json")) ? null : reader.GetString(Ord("payload_json")));
+    }
+
+    private static DateTime ParseUtc(string s)
+        => DateTime.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+
+    #endregion
 }

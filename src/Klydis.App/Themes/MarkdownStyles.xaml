@@ -1,0 +1,125 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Markdown element theming for every MdXaml MarkdownScrollViewer in the app (chat
+         messages, thinking bubble, artifact preview). MdXaml's built-in renderer hardcodes
+         its own colors — light table zebra-striping, an off-theme heading tint, light
+         inline-code chips — regardless of app theme, which reads as invisible text in dark
+         mode. These styles are wired into the Markdown engine by MarkdownViewerStyler
+         (Engine.TableStyle/HeadingStyle/CodeStyle/...), which the library applies
+         unconditionally when non-null, so every element matches whichever mode + accent is
+         active. No striping — a single flat surface with grid lines, consistent with the
+         rest of the app's flat style. -->
+
+    <Style x:Key="MdTableStyle" TargetType="{x:Type Table}">
+        <Setter Property="CellSpacing" Value="0"/>
+        <Setter Property="Margin" Value="0,6"/>
+    </Style>
+    <Style x:Key="MdTableHeaderStyle" TargetType="{x:Type TableRowGroup}">
+        <Style.Resources>
+            <Style TargetType="{x:Type TableCell}">
+                <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="Padding" Value="10,7"/>
+                <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+                <Setter Property="BorderThickness" Value="0,0,1,1"/>
+            </Style>
+        </Style.Resources>
+    </Style>
+    <Style x:Key="MdTableBodyStyle" TargetType="{x:Type TableRowGroup}">
+        <Style.Resources>
+            <Style TargetType="{x:Type TableCell}">
+                <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}"/>
+                <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+                <Setter Property="Padding" Value="10,7"/>
+                <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+                <Setter Property="BorderThickness" Value="0,0,1,1"/>
+            </Style>
+        </Style.Resources>
+    </Style>
+
+    <!-- Headings and other markdown elements: same problem as tables - MdXaml's defaults
+         hardcode their own colors (e.g. a rust/orange heading tint) regardless of app theme.
+         Same fix pattern: these bind to our theme so every heading/code/quote/link matches
+         whichever mode+accent is active. -->
+    <Style x:Key="MdHeading1Style" TargetType="{x:Type Paragraph}">
+        <Setter Property="FontSize" Value="22"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        <Setter Property="Margin" Value="0,14,0,6"/>
+    </Style>
+    <Style x:Key="MdHeading2Style" TargetType="{x:Type Paragraph}">
+        <Setter Property="FontSize" Value="19"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        <Setter Property="Margin" Value="0,12,0,5"/>
+    </Style>
+    <Style x:Key="MdHeading3Style" TargetType="{x:Type Paragraph}">
+        <Setter Property="FontSize" Value="16.5"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        <Setter Property="Margin" Value="0,10,0,4"/>
+    </Style>
+    <Style x:Key="MdHeadingMinorStyle" TargetType="{x:Type Paragraph}">
+        <Setter Property="FontSize" Value="15"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+        <Setter Property="Margin" Value="0,8,0,3"/>
+    </Style>
+    <Style x:Key="MdParagraphStyle" TargetType="{x:Type Paragraph}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        <Setter Property="Margin" Value="0,0,0,8"/>
+    </Style>
+    <Style x:Key="MdInlineCodeStyle" TargetType="{x:Type Run}">
+        <Setter Property="FontFamily" Value="Consolas"/>
+        <Setter Property="Background" Value="{DynamicResource SurfaceElevatedBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AccentPrimaryBrush}"/>
+    </Style>
+
+    <!-- Fenced/indented code blocks. MdXaml renders these as AvalonEdit TextEditor controls
+         whose background/foreground are hardcoded to a light theme, so the style below alone
+         cannot reach the code text; MarkdownViewerStyler rewrites those blocks into styled
+         Paragraphs after every parse, at which point everything here applies. -->
+    <Style x:Key="MdCodeBlockStyle" TargetType="{x:Type Block}">
+        <Setter Property="FontFamily" Value="Consolas"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Background" Value="{DynamicResource SurfaceElevatedBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        <Setter Property="Padding" Value="12,10"/>
+        <Setter Property="Margin" Value="0,8"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+    </Style>
+    <Style x:Key="MdBlockquoteStyle" TargetType="{x:Type Section}">
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+        <Setter Property="Background" Value="{DynamicResource SurfaceBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+        <Setter Property="BorderThickness" Value="3,0,0,0"/>
+        <Setter Property="Padding" Value="12,8"/>
+        <Setter Property="Margin" Value="0,6"/>
+    </Style>
+    <Style x:Key="MdLinkStyle" TargetType="{x:Type Hyperlink}">
+        <Setter Property="Foreground" Value="{DynamicResource AccentPrimaryBrush}"/>
+    </Style>
+
+    <!-- Horizontal rules (three or more dashes/asterisks). MdXaml wraps a WPF Separator in
+         a BlockUIContainer; the themed style keeps the line visible on dark surfaces. -->
+    <Style x:Key="MdSeparatorStyle" TargetType="{x:Type Separator}">
+        <Setter Property="Background" Value="{DynamicResource BorderMidBrush}"/>
+        <Setter Property="Height" Value="1"/>
+        <Setter Property="Margin" Value="0,8"/>
+    </Style>
+
+    <!-- MdXaml "&lt; Note" callout blocks: accent-tinted left rule, like blockquotes but
+         with a stronger accent so they read as emphasis. -->
+    <Style x:Key="MdNoteStyle" TargetType="{x:Type Paragraph}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        <Setter Property="Background" Value="{DynamicResource SurfaceBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+        <Setter Property="BorderThickness" Value="3,0,0,0"/>
+        <Setter Property="Padding" Value="12,8"/>
+        <Setter Property="Margin" Value="0,6"/>
+    </Style>
+
+</ResourceDictionary>

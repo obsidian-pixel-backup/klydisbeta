@@ -382,6 +382,7 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
     private static string PathToolStatus(string toolName) => toolName switch
     {
         "write_file" => "Written",
+        "edit_file" => "Edited",
         "str_replace" => "Edited",
         "read_file" => "Read",
         "list_directory" => "Listed",
@@ -598,17 +599,63 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
     #region Preview
 
     /// <summary>
-    /// Renderable artifacts produced by THIS chat only — files the model wrote (write_file /
-    /// str_replace) that still exist on disk. No workspace-wide directory scans.
+    /// Renderable artifacts produced by THIS chat only — read from the DURABLE artifact
+    /// registry (auto-registered by the mutation pipeline after every successful write), so
+    /// the panel survives restarts and model switches and always shows the current revision.
+    /// Falls back to deriving from recorded tool activity for legacy sessions created before
+    /// the registry existed. No workspace-wide directory scans.
     /// </summary>
-    private Task RefreshSessionArtifactsAsync()
+    private async Task RefreshSessionArtifactsAsync()
     {
         PreviewArtifacts.Clear();
 
         string sessionId = _currentSessionId ?? string.Empty;
+        string? activeTaskId = _owner.CurrentTaskId;
+
+        List<ArtifactRow> artifacts = new();
+        try
+        {
+            artifacts = activeTaskId != null
+                ? await _messageStore.GetArtifactsByTaskAsync(activeTaskId)
+                : await _messageStore.GetArtifactsBySessionAsync(sessionId);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SidePanel] Failed to load artifacts: {ex.Message}");
+        }
+
+        if (artifacts.Count > 0)
+        {
+            foreach (var a in artifacts)
+            {
+                string kind = a.ArtifactType switch
+                {
+                    "html" => "html",
+                    "md" => "md",
+                    _ => "text"
+                };
+                try
+                {
+                    if (!File.Exists(a.Path)) continue;
+                    var fi = new FileInfo(a.Path);
+                    if (fi.Length > 3 * 1024 * 1024) continue;
+                    PreviewArtifacts.Add(new PreviewArtifact
+                    {
+                        Name = ToRelative(a.Path),
+                        FullPath = a.Path,
+                        Kind = kind
+                    });
+                }
+                catch { /* locked / missing */ }
+            }
+            return;
+        }
+
+        // Legacy fallback: sessions recorded before the artifact registry existed derive
+        // previewable files from this session's tool activity (write_file/edit_file).
         var records = _toolExecutor.GetSessionToolActivity(sessionId);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in records.Where(r => r.ToolName is "write_file" or "str_replace"))
+        foreach (var r in records.Where(r => r.ToolName is "write_file" or "str_replace" or "edit_file"))
         {
             string path = PathArg(r.ArgsJson);
             if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
@@ -635,7 +682,6 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
             }
             catch { /* locked / missing */ }
         }
-        return Task.CompletedTask;
     }
 
     partial void OnSelectedArtifactChanged(PreviewArtifact? value)

@@ -394,10 +394,8 @@ public partial class ChatView : UserControl
     /// <summary>
     /// Finds the INNERMOST nested ScrollViewer (other than the main message list) under the
     /// pointer that can actually scroll in the wheel's direction. Walks the entire ancestor
-    /// chain rather than stopping at the first ScrollViewer: MdXaml's MarkdownScrollViewer
-    /// wraps its document in an inner FlowDocumentScrollViewer whose own extent is 0, so the
-    /// scrollable one may be further up. Returns null when no nested viewer can scroll (the
-    /// wheel then falls through to the main list).
+    /// chain rather than stopping at the first ScrollViewer. Returns null when no nested
+    /// viewer can scroll (the wheel then falls through to the main list).
     /// </summary>
     private ScrollViewer? FindInnermostScrollableNestedViewer(DependencyObject? element, int delta)
     {
@@ -413,6 +411,21 @@ public partial class ChatView : UserControl
                     return sv;
                 }
             }
+
+            // Markdown text scrolls in the ScrollViewer that HOSTS the FlowDocument, which is
+            // a template child of the MarkdownScrollViewer and therefore NOT on the ancestor
+            // chain: the walk jumps FlowDocument -> FlowDocumentScrollViewer and would miss it,
+            // leaving the think bubble / tool markdown unscrollable (the "scrolling deadzone").
+            // Descend into the viewer's template to find that host.
+            if (element is FlowDocumentScrollViewer documentViewer)
+            {
+                var host = Helpers.MarkdownViewerStyler.FindScrollableScrollViewerInTree(documentViewer, delta, mainSv);
+                if (host != null)
+                {
+                    return host;
+                }
+            }
+
             element = element is Visual || element is System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(element)
                 : LogicalTreeHelper.GetParent(element);
@@ -428,16 +441,13 @@ public partial class ChatView : UserControl
             return;
         }
 
-        // Wheel over a nested scrollable area (thinking panel, tool output, code block):
-        // scroll it DIRECTLY here, in the preview phase, and mark the event handled. The
-        // original code only checked the FIRST ScrollViewer on the ancestor chain, which for
-        // MdXaml's MarkdownScrollViewer is its inner FlowDocumentScrollViewer — a viewer whose
-        // own scroll extent is 0 (the OUTER MarkdownScrollViewer does the scrolling). That
-        // check failed and every wheel event over a think block fell through to the outer
-        // list's smooth-scroll animation, so the thinking panel could never be scrolled (the
-        // "scrolling deadzone"). Walking the whole chain and scrolling the innermost viewer
-        // with extent also sidesteps routed-wheel quirks where an inner viewer marks the
-        // event handled without scrolling.
+        // Wheel over a nested scrollable area (thinking panel, tool output): scroll it
+        // DIRECTLY here, in the preview phase, and mark the event handled. Without this,
+        // markdown content is unscrollable: its scroll host is a template child of the
+        // MarkdownScrollViewer and never receives the wheel event (the "scrolling deadzone");
+        // FindInnermostScrollableNestedViewer descends into that template to find the host.
+        // The viewer's own preview handler (MarkdownViewerStyler) covers standalone viewers
+        // such as the artifact preview, which have no parent interceptor.
         var nestedTarget = FindInnermostScrollableNestedViewer(e.OriginalSource as DependencyObject, e.Delta);
         if (nestedTarget != null)
         {
@@ -525,68 +535,12 @@ public partial class ChatView : UserControl
 
     private void MarkdownViewer_Loaded(object sender, RoutedEventArgs e)
     {
-        // MdXaml's built-in renderer hardcodes its own colors (light table
-        // striping, off-theme heading tint) unless these Engine properties are
-        // set; MdXaml.Markdown applies them unconditionally when non-null
-        // (see MdXaml.Markdown.TableEvalutor and the heading/paragraph builders).
-        if (sender is not MarkdownScrollViewer viewer)
+        // All markdown theming is centralized in MarkdownViewerStyler (engine styles,
+        // re-parse for content bound before Loaded, AvalonEdit code-block rewrite, and the
+        // streamed-content watch); the shared Md* styles live in Themes/MarkdownStyles.xaml.
+        if (sender is MarkdownScrollViewer viewer)
         {
-            return;
-        }
-
-        Style Res(string key) => (Style)viewer.FindResource(key);
-
-        // Respect an explicitly-set foreground (e.g. the muted secondary brush used by the
-        // thinking bubble) and fall back to the primary brush otherwise.
-        var foreground = TextElement.GetForeground(viewer);
-        if (foreground == null && viewer.FindResource("TextPrimaryBrush") is Brush textBrush)
-        {
-            foreground = textBrush;
-        }
-        if (foreground != null)
-        {
-            TextElement.SetForeground(viewer, foreground);
-            if (viewer.Document != null)
-            {
-                viewer.Document.Foreground = foreground;
-            }
-        }
-
-        var engine = viewer.Engine;
-        engine.TableStyle = Res("MdTableStyle");
-        engine.TableHeaderStyle = Res("MdTableHeaderStyle");
-        engine.TableBodyStyle = Res("MdTableBodyStyle");
-        engine.Heading1Style = Res("MdHeading1Style");
-        engine.Heading2Style = Res("MdHeading2Style");
-        engine.Heading3Style = Res("MdHeading3Style");
-        engine.Heading4Style = Res("MdHeadingMinorStyle");
-        engine.Heading5Style = Res("MdHeadingMinorStyle");
-        engine.Heading6Style = Res("MdHeadingMinorStyle");
-        engine.NormalParagraphStyle = Res("MdParagraphStyle");
-        engine.CodeStyle = Res("MdInlineCodeStyle");
-        engine.CodeBlockStyle = Res("MdCodeBlockStyle");
-        engine.BlockquoteStyle = Res("MdBlockquoteStyle");
-        engine.LinkStyle = Res("MdLinkStyle");
-
-        // MdXaml parses Markdown -> FlowDocument once, at the moment the Markdown
-        // property is first set, baking these styles in as local values at that
-        // instant. For content bound in one shot (returning to an already-loaded
-        // session, e.g. after navigating to Settings and back) that first parse
-        // races Loaded and usually wins, so it runs with the Engine styles still
-        // null - reverting to MdXaml's own illegible-on-dark defaults. Streamed
-        // messages don't hit this, since Loaded fires while content is still
-        // empty. Forcing one re-parse here, now that the styles are guaranteed
-        // set, makes the result deterministic either way.
-        var content = viewer.Markdown;
-        if (!string.IsNullOrEmpty(content))
-        {
-            viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, string.Empty);
-            viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, content);
-        }
-
-        if (viewer.Document != null && TextElement.GetForeground(viewer) is Brush finalBrush)
-        {
-            viewer.Document.Foreground = finalBrush;
+            Helpers.MarkdownViewerStyler.Apply(viewer);
         }
     }
 

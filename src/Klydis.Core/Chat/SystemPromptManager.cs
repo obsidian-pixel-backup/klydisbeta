@@ -428,6 +428,11 @@ public class SystemPromptManager
             sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary.");
             sb.AppendLine("- Progress is tracked automatically by the harness from your plan checklist; you never need to call 'task_progress' to report it.");
             sb.AppendLine("- If an approach fails, try an alternative tool or parameter strategy. Never stop until the goal is completed or unresolvable.");
+            sb.AppendLine();
+            sb.AppendLine("### FACT GROUNDING (KNOWN vs ASSUMED vs PROPOSED)");
+            sb.AppendLine("- Put everything you produce into one of three buckets: KNOWN (stated by the user or verified through tools), ASSUMED (working assumptions), PROPOSED (creative suggestions / optional directions).");
+            sb.AppendLine("- NEVER present an assumption or proposal as a user-provided fact. Do not invent company facts, product lines, customer segments, capabilities, existing assets, brand claims, or existing technology.");
+            sb.AppendLine("- When the user gave only a brief description (e.g. \"a landing page for my laser engraving company\"), treat company name, target audience, products, services, brand identity, location, and assets as UNKNOWN. Name what is unknown instead of inventing it, or verify it with a tool.");
         }
 
         if (!string.IsNullOrWhiteSpace(worldStateHeader))
@@ -561,6 +566,11 @@ public class SystemPromptManager
             sb.AppendLine("- You are operating in goal mode: break the user's objective into steps, use tools to gather what you need, and drive the task to completion. Keep the user informed of progress.");
             sb.AppendLine("- Maintain your todo list with the 'plan' tool and keep checking off completed items.");
             sb.AppendLine("- Verify the deliverable exists and works before calling 'task_complete'.");
+            sb.AppendLine();
+            sb.AppendLine("### FACT GROUNDING (KNOWN vs ASSUMED vs PROPOSED)");
+            sb.AppendLine("- KNOWN = stated by the user or verified by a tool. ASSUMED = working assumptions. PROPOSED = creative suggestions / optional directions.");
+            sb.AppendLine("- Never present assumptions or proposals as user-provided facts. Do not invent company facts, product lines, customer segments, capabilities, existing assets, or brand claims.");
+            sb.AppendLine("- If the user gave only a brief description, treat company name, audience, products, brand identity, and assets as UNKNOWN — say what is unknown instead of inventing it, or verify it with a tool.");
         }
 
         sb.AppendLine();

@@ -244,57 +244,12 @@ public partial class ChatSidePanelView : UserControl
 
     private void MarkdownViewer_Loaded(object sender, RoutedEventArgs e)
     {
-        // Same dark-theme styling pass as ChatView.MarkdownViewer_Loaded: MdXaml's built-in
-        // renderer hardcodes light table striping and off-theme tints unless the Engine styles
-        // are assigned, so apply the app's markdown styles once, then force a re-parse so the
-        // styles are baked in even when the content was already set before Loaded.
-        if (sender is not MarkdownScrollViewer viewer)
+        // Same styling pass as ChatView (shared helper + Themes/MarkdownStyles.xaml):
+        // MdXaml's defaults are light-theme hardcoded and its code blocks are AvalonEdit
+        // controls, so apply the app's markdown styles, re-parse, and rewrite code blocks.
+        if (sender is MarkdownScrollViewer viewer)
         {
-            return;
-        }
-
-        Style Res(string key) => (Style)viewer.FindResource(key);
-
-        var foreground = TextElement.GetForeground(viewer);
-        if (foreground == null && viewer.FindResource("TextPrimaryBrush") is Brush textBrush)
-        {
-            foreground = textBrush;
-        }
-        if (foreground != null)
-        {
-            TextElement.SetForeground(viewer, foreground);
-            if (viewer.Document != null)
-            {
-                viewer.Document.Foreground = foreground;
-            }
-        }
-
-        var engine = viewer.Engine;
-        engine.TableStyle = Res("MdTableStyle");
-        engine.TableHeaderStyle = Res("MdTableHeaderStyle");
-        engine.TableBodyStyle = Res("MdTableBodyStyle");
-        engine.Heading1Style = Res("MdHeading1Style");
-        engine.Heading2Style = Res("MdHeading2Style");
-        engine.Heading3Style = Res("MdHeading3Style");
-        engine.Heading4Style = Res("MdHeadingMinorStyle");
-        engine.Heading5Style = Res("MdHeadingMinorStyle");
-        engine.Heading6Style = Res("MdHeadingMinorStyle");
-        engine.NormalParagraphStyle = Res("MdParagraphStyle");
-        engine.CodeStyle = Res("MdInlineCodeStyle");
-        engine.CodeBlockStyle = Res("MdCodeBlockStyle");
-        engine.BlockquoteStyle = Res("MdBlockquoteStyle");
-        engine.LinkStyle = Res("MdLinkStyle");
-
-        var content = viewer.Markdown;
-        if (!string.IsNullOrEmpty(content))
-        {
-            viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, string.Empty);
-            viewer.SetCurrentValue(MarkdownScrollViewer.MarkdownProperty, content);
-        }
-
-        if (viewer.Document != null && TextElement.GetForeground(viewer) is Brush finalBrush)
-        {
-            viewer.Document.Foreground = finalBrush;
+            Helpers.MarkdownViewerStyler.Apply(viewer);
         }
     }
 }

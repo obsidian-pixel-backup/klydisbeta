@@ -1527,6 +1527,8 @@ public class ChatEngine(
                 "CURRENT STEP: " + nextStepText + "\n" +
                 "REQUIRED OUTPUT THIS TURN: perform a tool action now — inspect, modify, or verify. Text alone is NOT accepted as task progress.\n" +
                 "DO NOT: greet the user, ask permission, ask what to do next, or describe what you would do. Execute the next action.\n" +
+                "DELIVERABLES: code, pages, reports, and designs belong in FILES — write them with 'write_file' and let the user view them in the PREVIEW tab. Do NOT dump large code blocks or markup into the chat reply.\n" +
+                "FACTS: only what the user stated or a tool verified is KNOWN. Never present assumptions or creative suggestions as user-provided facts — company name, products, audience, and existing assets are UNKNOWN until stated or verified.\n" +
                 "If the goal is finished and verified, call 'task_complete'. If the plan is wrong, revise it with 'plan' (action=create).";
         }
 
@@ -2379,11 +2381,18 @@ public class ChatEngine(
                         : ContinuationReason.StepIncomplete;
 
                 // NO-ACTION detection (shared by the supervisor outcome and the repair guard
-                // below): a text-only response in Autonomous mode is a protocol failure ONLY
-                // when it is a refusal/filler (greetings, permission seeking, "I am a text-only
-                // agent" — the live export's failure pattern) or a short commitment that
-                // advances nothing while plan steps remain open. A long structured text
-                // response (a report, a doc) is a legitimate deliverable and never repaired.
+                // below): in Autonomous mode, progress is measured by DURABLE STATE CHANGE —
+                // a tool executed, a file changed, the plan mutated — never by how
+                // substantive the text looks. A text-only response is a protocol failure when
+                // it is a refusal/filler (greetings, permission seeking, "I am a text-only
+                // agent" — the live export's pattern) OR when plan steps remain open,
+                // REGARDLESS of length, markdown structure, or code fences. Length, headers,
+                // bullets, and fences are not evidence of progress: that heuristic let the
+                // observed failure through, where the model answered a build request with a
+                // long wireframe/design essay (headings, bullets, code blocks, hundreds of
+                // characters) while changing zero task state. Only the completion gate and
+                // the plan state decide what counts — a text-only response with open steps is
+                // repaired so the model must execute instead of narrate.
                 bool refusalLike = ToolActionParser.IsActionRefusal(visibleResponse);
                 bool openStepsRemain;
                 try
@@ -2394,19 +2403,8 @@ public class ChatEngine(
                 {
                     openStepsRemain = false;
                 }
-                // A text-only response is only repaired when it LACKS deliverable structure:
-                // markdown headers/bullets/numbering, code fences, or real length are signs of
-                // substantive output (a report, a doc) that must be delivered as-is — never
-                // re-engaged as "no action".
-                bool hasDeliverableStructure =
-                    visibleResponse.Length >= 400 ||
-                    visibleResponse.Contains("```", StringComparison.Ordinal) ||
-                    Regex.IsMatch(visibleResponse, @"(?m)^#{1,6}\s") ||
-                    Regex.IsMatch(visibleResponse, @"(?m)^\s*[-*+]\s") ||
-                    Regex.IsMatch(visibleResponse, @"(?m)^\s*\d{1,3}[.)]\s");
-                bool shortCommitmentNoAction = !hasDeliverableStructure && openStepsRemain;
                 bool noActionProducedThisTurn = isGoalMode && !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
-                    (refusalLike || shortCommitmentNoAction);
+                    (refusalLike || openStepsRemain);
 
                 // Supervisor: classify the generation outcome and record the runtime's decision
                 // against the durable task state. The branch mechanics below implement the
@@ -2591,7 +2589,24 @@ public class ChatEngine(
                             noActionRepairsThisTurn, MaxNoActionRepairs);
                         NoteLesson("no_action_produced", $"Autonomous turn produced no tool action; action-required repair injected (repair {noActionRepairsThisTurn}).");
 
-                        var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response did not perform an action — it only produced text. In autonomous task mode you must EXECUTE, not describe, greet, or ask permission.\nProduce exactly ONE of:\n1. A <tool_call> invoking the next needed tool (or the JSON form {\"action\":\"tool_call\",\"name\":\"TOOL\",\"arguments\":{...}}).\n2. A 'plan' call (action=create) if the plan no longer reflects reality.\n3. A 'task_complete' call if and only if the goal is genuinely finished AND verified.\nDo NOT greet the user. Do NOT ask what to do next. Do NOT describe what you could do — do it.]";
+                        string repairStepText;
+                        try
+                        {
+                            repairStepText = toolExecutor.GetSessionPlanEntries(generatingSessionId).FirstOrDefault(e => !e.Done)?.Text
+                                ?? "finish and verify the remaining work";
+                        }
+                        catch (Exception)
+                        {
+                            repairStepText = "finish and verify the remaining work";
+                        }
+                        var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response produced only text — no tool action, no file change, no state change. In autonomous task mode, text is not progress; only executed actions and changed task state count.\n" +
+                            "CURRENT STEP: " + repairStepText + "\n" +
+                            "Produce exactly ONE of:\n" +
+                            "1. A <tool_call> invoking the next needed tool (or the JSON form {\"action\":\"tool_call\",\"name\":\"TOOL\",\"arguments\":{...}}).\n" +
+                            "2. A 'plan' call (action=create) if the plan no longer reflects reality.\n" +
+                            "3. A 'task_complete' call if and only if the goal is genuinely finished AND verified.\n" +
+                            "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — do it.\n" +
+                            "Do NOT paste code, markup, or design content into chat: write files with 'write_file' and summarize them — the user views the files in the PREVIEW tab.]";
                         var noActionMsgObj = new ChatMessage(ChatRole.User, noActionMsg);
                         AddToSessionHistory(activeHistory, noActionMsgObj, generatingSessionId);
                         // Engine-internal repair notice: in-memory only (see IsEngineInjectedMessage).
