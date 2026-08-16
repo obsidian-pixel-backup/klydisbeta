@@ -36,12 +36,24 @@ public class TaskManager(
     // Words that mark an explicit relationship to the current task ("also add X",
     // "use Y instead", "change Z", "continue"). Detected first: a steer marker makes the
     // message part of the current task even when it also contains task verbs.
+    // NOTE: generic conversational words ("can you", "please", "but", "still") were
+    // removed — they misclassified ordinary messages ("Can you explain how this works?")
+    // as steers of the current task. The interaction-mode boundary already keeps those
+    // messages out of the task layer entirely; the remaining markers are task-relational
+    // language only.
     private static readonly string[] SteerMarkers =
     {
-        "also", "instead", "actually", "but", "additionally", "however", "and now",
-        "now make", "can you", "please", "continue", "keep going", "keep working",
-        "still", "don't", "stop", "wait", "change", "update", "adjust", "replace",
-        "switch", "remember", "as well", "on top of", "furthermore", "moreover"
+        "also", "instead", "actually", "additionally", "however", "and now",
+        "now make", "continue", "keep going", "keep working", "don't", "stop",
+        "wait", "change", "update", "adjust", "replace", "switch", "remember",
+        "as well", "on top of", "furthermore", "moreover",
+        // Explicit "do the work now" continuations. Safe to treat as steers because the
+        // interaction-mode boundary keeps conversational messages out of this resolver
+        // entirely — the resolver only ever sees Task/Autonomous messages, where "begin"/
+        // "start"/"proceed" mean "continue the current task's work" (the observed case:
+        // "i want you to begin building the project" must keep the SAME task and plan, not
+        // spawn a new one via the build-verb + length rule).
+        "begin", "start", "proceed", "go ahead", "get started"
     };
 
     // Verbs that imply a fresh multi-step piece of work. Gated by length and by NOT echoing

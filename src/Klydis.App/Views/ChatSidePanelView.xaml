@@ -68,6 +68,29 @@
             <Setter Property="FontWeight" Value="Bold"/>
             <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
         </Style>
+        <Style x:Key="SidePanelListBoxItem" TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="4,2"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource InputBackgroundBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <!-- Per-tab visibility: only the grid whose SelectedTab matches shows. Each style is
              declared independently (no BasedOn) because WPF merges triggers across BasedOn
@@ -565,24 +588,50 @@
 
                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="12,0,12,8">
                     <StackPanel>
-                        <TextBlock Text="CHANGED FILES" Style="{StaticResource SidePanelSectionHeader}"/>
-                        <ItemsControl ItemsSource="{Binding SidePanel.ChangeItems}">
-                            <ItemsControl.ItemTemplate>
+                        <TextBlock Text="CHANGED FILES (real diffs)" Style="{StaticResource SidePanelSectionHeader}"/>
+                        <ListBox ItemsSource="{Binding SidePanel.ChangeItems}"
+                                 SelectedItem="{Binding SidePanel.SelectedChangeItem}"
+                                 Background="Transparent" BorderThickness="0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ItemContainerStyle="{StaticResource SidePanelListBoxItem}" MaxHeight="180">
+                            <ListBox.ItemTemplate>
                                 <DataTemplate>
                                     <Grid Margin="0,1.5">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto"/>
                                             <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
                                         <Border Style="{StaticResource SidePanelBadge}" Margin="0,0,6,0">
                                             <TextBlock Text="{Binding Status}" Style="{StaticResource SidePanelBadgeText}"/>
                                         </Border>
                                         <TextBlock Grid.Column="1" Text="{Binding RelativePath}" FontSize="11.5" Foreground="{DynamicResource TextPrimaryBrush}"
                                                    TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTip="{Binding RelativePath}"/>
+                                        <TextBlock Grid.Column="2" Text="{Binding ChangeStats}" FontSize="10.5" FontFamily="Consolas"
+                                                   Foreground="{DynamicResource TextMutedBrush}" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     </Grid>
                                 </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <TextBlock Text="DIFF" Style="{StaticResource SidePanelSectionHeader}"/>
+                        <Border Background="{DynamicResource InputBackgroundBrush}" CornerRadius="6" Padding="8,6">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="220">
+                                <TextBlock Text="{Binding SidePanel.SelectedChangeDiff}" FontFamily="Consolas" FontSize="10.5"
+                                           Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="NoWrap">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Text" Value="{Binding SidePanel.SelectedChangeDiff}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding SidePanel.SelectedChangeDiff}" Value="">
+                                                    <Setter Property="Text" Value="Select a changed file to see its real diff."/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </ScrollViewer>
+                        </Border>
 
                         <TextBlock Text="SESSION ACTIVITY" Style="{StaticResource SidePanelSectionHeader}"/>
                         <Border Background="{DynamicResource InputBackgroundBrush}" CornerRadius="6" Padding="8,6">

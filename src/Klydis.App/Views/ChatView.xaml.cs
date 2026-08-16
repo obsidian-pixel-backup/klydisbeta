@@ -391,14 +391,27 @@ public partial class ChatView : UserControl
         return null;
     }
 
-    private ScrollViewer? FindNestedScrollViewer(DependencyObject? element)
+    /// <summary>
+    /// Finds the INNERMOST nested ScrollViewer (other than the main message list) under the
+    /// pointer that can actually scroll in the wheel's direction. Walks the entire ancestor
+    /// chain rather than stopping at the first ScrollViewer: MdXaml's MarkdownScrollViewer
+    /// wraps its document in an inner FlowDocumentScrollViewer whose own extent is 0, so the
+    /// scrollable one may be further up. Returns null when no nested viewer can scroll (the
+    /// wheel then falls through to the main list).
+    /// </summary>
+    private ScrollViewer? FindInnermostScrollableNestedViewer(DependencyObject? element, int delta)
     {
         var mainSv = GetMainScrollViewer();
         while (element != null && element != MessagesList)
         {
-            if (element is ScrollViewer sv && sv != mainSv)
+            if (element is ScrollViewer sv && sv != mainSv && sv.ScrollableHeight > 0)
             {
-                return sv;
+                bool canScrollUp = delta > 0 && sv.VerticalOffset > 0;
+                bool canScrollDown = delta < 0 && sv.VerticalOffset < sv.ScrollableHeight;
+                if (canScrollUp || canScrollDown)
+                {
+                    return sv;
+                }
             }
             element = element is Visual || element is System.Windows.Media.Media3D.Visual3D
                 ? VisualTreeHelper.GetParent(element)
@@ -415,16 +428,30 @@ public partial class ChatView : UserControl
             return;
         }
 
-        var innerViewer = FindNestedScrollViewer(e.OriginalSource as DependencyObject);
-        if (innerViewer != null && innerViewer.ScrollableHeight > 0)
+        // Wheel over a nested scrollable area (thinking panel, tool output, code block):
+        // scroll it DIRECTLY here, in the preview phase, and mark the event handled. The
+        // original code only checked the FIRST ScrollViewer on the ancestor chain, which for
+        // MdXaml's MarkdownScrollViewer is its inner FlowDocumentScrollViewer — a viewer whose
+        // own scroll extent is 0 (the OUTER MarkdownScrollViewer does the scrolling). That
+        // check failed and every wheel event over a think block fell through to the outer
+        // list's smooth-scroll animation, so the thinking panel could never be scrolled (the
+        // "scrolling deadzone"). Walking the whole chain and scrolling the innermost viewer
+        // with extent also sidesteps routed-wheel quirks where an inner viewer marks the
+        // event handled without scrolling.
+        var nestedTarget = FindInnermostScrollableNestedViewer(e.OriginalSource as DependencyObject, e.Delta);
+        if (nestedTarget != null)
         {
-            bool canScrollUp = e.Delta > 0 && innerViewer.VerticalOffset > 0;
-            bool canScrollDown = e.Delta < 0 && innerViewer.VerticalOffset < innerViewer.ScrollableHeight;
-            if (canScrollUp || canScrollDown)
+            double line = Math.Max(48.0, nestedTarget.ViewportHeight * 0.8);
+            if (e.Delta > 0)
             {
-                // Allow inner ScrollViewer (tool output, code block, thinking panel) to handle scrolling
-                return;
+                nestedTarget.ScrollToVerticalOffset(Math.Max(0, nestedTarget.VerticalOffset - line));
             }
+            else
+            {
+                nestedTarget.ScrollToVerticalOffset(Math.Min(nestedTarget.ScrollableHeight, nestedTarget.VerticalOffset + line));
+            }
+            e.Handled = true;
+            return;
         }
 
         if (e.Delta > 0)

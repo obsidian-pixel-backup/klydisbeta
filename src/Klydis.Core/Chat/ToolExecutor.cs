@@ -14,6 +14,7 @@ using System.Net.Sockets;
 using HtmlAgilityPack;
 using Microsoft.Extensions.Logging;
 using System.Management;
+using Klydis.Core.Workbench;
 
 namespace Klydis.Core.Chat;
 
@@ -497,7 +498,7 @@ public class ToolExecutor(
             result = request.Name switch
             {
                 "read_file" => await ReadFileAsync(request, toolCt),
-                "write_file" => await WriteFileAsync(request, toolCt),
+                "write_file" => await WriteFileAsync(request, sessionId, toolCt),
                 "list_directory" => await ListDirectoryAsync(request, toolCt),
                 "run_command" => await RunCommandAsync(request, toolCt),
                 "get_system_info" => await GetSystemInfoAsync(toolCt),
@@ -904,7 +905,7 @@ public class ToolExecutor(
         return new ToolResult(request.Name, true, content, null);
     }
 
-    private async Task<ToolResult> WriteFileAsync(ToolCallRequest request, CancellationToken ct)
+    private async Task<ToolResult> WriteFileAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
         var path = GetStringArg(request.Arguments, "path");
         var content = GetStringArg(request.Arguments, "content");
@@ -915,9 +916,57 @@ public class ToolExecutor(
 
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        
+
+        // Factual change capture (workbench §7–§8): snapshot the file BEFORE the write, then
+        // after, compute a REAL diff and persist it — the Changes tab shows evidence from the
+        // filesystem, never model-generated narration. Task-scoped via CurrentTaskId.
+        string? beforeContent = null;
+        try
+        {
+            if (File.Exists(path))
+            {
+                beforeContent = await File.ReadAllTextAsync(path, ct);
+            }
+        }
+        catch { /* unreadable — record as a fresh file */ }
+
         await File.WriteAllTextAsync(path, content, ct);
+
+        try
+        {
+            var diff = DiffService.Diff(beforeContent, content);
+            var change = new FileChange(
+                ChangeId: Guid.NewGuid().ToString("N"),
+                SessionId: sessionId ?? string.Empty,
+                TaskId: CurrentTaskId,
+                Path: path,
+                Tool: request.Name,
+                BeforeHash: HashText(beforeContent),
+                AfterHash: HashText(content),
+                Diff: diff.Text,
+                AddedLines: diff.AddedLines,
+                DeletedLines: diff.DeletedLines,
+                TimestampUtc: DateTime.UtcNow);
+            await messageStore.AddFileChangeAsync(change);
+            logger.LogDebug("Captured file change for {Path} (+{Added}/-{Deleted} lines) in session {SessionId}.",
+                path, diff.AddedLines, diff.DeletedLines, sessionId);
+        }
+        catch (Exception ex)
+        {
+            // Change capture must never fail the write itself — a missing change record is
+            // strictly better than a broken tool call.
+            logger.LogWarning(ex, "Failed to capture file change for {Path}.", path);
+        }
+
         return new ToolResult(request.Name, true, "File written successfully", null);
+    }
+
+    private static string HashText(string? text)
+    {
+        if (text == null) return "(new)";
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        byte[] hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text));
+        return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
     }
 
     private Task<ToolResult> ListDirectoryAsync(ToolCallRequest request, CancellationToken ct)

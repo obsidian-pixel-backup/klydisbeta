@@ -58,8 +58,11 @@
        CWD under `dotnet run` (otherwise an installed build silently falls back to the generic
        assistant persona). -->
   <ItemGroup>
-    <Content Include="..\..\klydis master system prompt.md"
-             Link="klydis master system prompt.md"
+    <!-- The LOCAL runtime profile (see SystemPromptManager.MasterPromptFileName). The old
+         "klydis master system prompt.md" cloud-product persona is deliberately NOT shipped or
+         loaded — it made the local model behave like a cloud assistant. -->
+    <Content Include="..\..\klydis local system prompt.md"
+             Link="klydis local system prompt.md"
              CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\UserStyle_Modes.md"
              Link="UserStyle_Modes.md"

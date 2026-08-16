@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Klydis.Core.Inference;
 using Klydis.Core.Inference.Telemetry;
+using Klydis.Core.Tasks;
 
 namespace Klydis.Core.Chat;
 
@@ -203,6 +204,23 @@ public interface IInferenceEngine
     /// very cancellation that produced the empty stream.
     /// </summary>
     bool LastGenerationWasCancelled { get; }
+
+    /// <summary>
+    /// How the most recent generation treated the KV cache relative to the previous generation's
+    /// prompt: ExactReuse (new prompt is a strict prefix-extension of the evaluated prompt),
+    /// PartialReuse (rewound to the common prefix), Reset* (no usable prefix — context rebuilt),
+    /// IsolatedReset. Read after the token stream ends; lets the orchestration layer log the
+    /// turn-boundary decision so a "new turn running on stale KV" failure is visible per
+    /// generation.
+    /// </summary>
+    string LastGenerationContextDecision { get; }
+
+    /// <summary>
+    /// Char length of the prompt prefix reused by the most recent generation (0 when the
+    /// context was reset).
+    /// </summary>
+    int LastGenerationPrefixLength { get; }
+
     int GetTokenCount(string text);
     Task CancelActiveGenerationAsync();
     Task UnloadModelAsync(CancellationToken ct = default);
@@ -371,14 +389,8 @@ public class ChatEngine(
     // ---- Harness-owned initial planner (report §5 / §51-P0) ----
     // The runtime establishes a baseline plan for actionable requests; the model refines or
     // replaces it. This removes the "the model must remember to call plan" dependency while
-    // keeping the checklist fully model-editable via the 'plan' tool.
-    private static readonly string[] StarterPlanItems =
-    {
-        "Understand the request and inspect the relevant files and state",
-        "Design the approach and define what 'done' looks like",
-        "Implement the solution",
-        "Verify the result (build, tests, evidence)"
-    };
+    // keeping the checklist fully model-editable via the 'plan' tool. The baseline steps come
+    // from InitialPlanGenerator (domain-aware), not a generic scaffold.
 
     // Verbs that imply a multi-step task worth a plan. Short messages and pure questions
     // ("what is 2+2") are deliberately excluded by the length gate in IsActionableTaskRequest.
@@ -418,9 +430,12 @@ public class ChatEngine(
             if (!IsActionableTaskRequest(userMessage)) return;
 
             var existing = toolExecutor.GetSessionPlanEntries(sessionId);
+            // Domain-aware initial plan (workbench spec §2): a landing-page request gets real
+            // section-by-section steps, not the old generic four-item scaffold.
+            var steps = InitialPlanGenerator.Generate(userMessage);
             if (existing.Count == 0)
             {
-                await toolExecutor.SeedSessionPlanAsync(sessionId, StarterPlanItems);
+                await toolExecutor.SeedSessionPlanAsync(sessionId, steps);
                 return;
             }
 
@@ -429,7 +444,7 @@ public class ChatEngine(
             {
                 logger.LogInformation(
                     "Replacing obsolete plan from a previous task with a fresh harness-seeded plan for the current message.");
-                await toolExecutor.SeedSessionPlanAsync(sessionId, StarterPlanItems);
+                await toolExecutor.SeedSessionPlanAsync(sessionId, steps);
             }
         }
         catch (Exception ex)
@@ -539,6 +554,19 @@ public class ChatEngine(
                content.StartsWith("[System ERROR:", StringComparison.Ordinal) ||
                content.StartsWith("[SYSTEM OVERRIDE:", StringComparison.Ordinal) ||
                content.StartsWith("[System: Tool calling", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Short stable fingerprint of a prompt (first 6 hex chars of SHA-256) for the TurnInfo
+    /// instrumentation line — enough to spot "same prompt, different turn" and "prompt changed
+    /// but KV was reused" at a glance.
+    /// </summary>
+    private static string ComputePromptHash(string prompt)
+    {
+        if (string.IsNullOrEmpty(prompt)) return "—";
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        byte[] hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(prompt));
+        return Convert.ToHexString(hash, 0, 6).ToLowerInvariant();
     }
 
     /// <summary>
@@ -693,7 +721,26 @@ public class ChatEngine(
     {
         IsGenerating = true;
         _recentTools.Clear();
-        bool activeGoalMode = isGoalMode ?? IsGoalMode;
+
+        // ===== INTERACTION-MODE BOUNDARY =====
+        // Decide BEFORE task resolution whether this message is ordinary conversation or
+        // executable work. Conversation turns (greetings, small talk, explanations) must
+        // NEVER create a task, a run, a plan, or a task contract — the observed failure: a
+        // greeting became AgentTask T-... (status Running, objective "good evening") and the
+        // runtime told the model it had a task plus 20+ tools, so it answered a greeting with
+        // run_command suggestions. Conversation mode strips tools, queue, skills, RAG, plan
+        // and the task contract from the prompt entirely (see StreamResponseInternalAsync).
+        InteractionMode mode = InteractionClassifier.Classify(userMessage);
+        bool isConversationTurn = mode == InteractionMode.Conversation;
+
+        // Goal-mode directives are driven by the INTERACTION MODE, not the app-level default.
+        // Previously IsGoalMode defaulted to TRUE and nothing ever drove it, so every message
+        // (including a greeting) got the AUTONOMOUS GOAL EXECUTION MODE section while the task
+        // layer simultaneously said "no task" / "new task" — the contradictory signals that
+        // left the model stuck between "chat" and "agent" behavior. Now: Autonomous → goal
+        // mode; Task/Conversation → not. An explicit isGoalMode parameter (the goal-mode
+        // toggle) still wins when provided.
+        bool activeGoalMode = isGoalMode ?? mode == InteractionMode.Autonomous;
 
         // Set by the supervisor when a task_complete claim passes the deterministic gate;
         // ends the turn (and the run) with a completion event.
@@ -711,9 +758,17 @@ public class ChatEngine(
         // the same chat never inherits the old task's checklist, because plan/queue isolation
         // is enforced at the storage layer, not by prompting. On a task switch the previous
         // task's plan is already mirrored in its record; sessions.plan_json is swapped to the
-        // new task's plan and the live checklist re-armed.
+        // new task's plan and the live checklist re-armed. Conversation turns bypass task
+        // resolution entirely (no task is created for "good evening") and clear any stale
+        // task context so the harness never exposes a task contract for a greeting.
         string? previousTaskId = null;
-        if (_taskManager != null)
+        if (isConversationTurn)
+        {
+            CurrentTaskId = null;
+            CurrentTaskObjective = null;
+            toolExecutor.CurrentTaskId = null;
+        }
+        else if (_taskManager != null)
         {
             try
             {
@@ -753,8 +808,12 @@ public class ChatEngine(
         // establishes a baseline plan BEFORE the model's first turn, so the task has a durable
         // backbone (PLAN tab, completion gate, stagnation tracker) without depending on the
         // model remembering to call the 'plan' tool. Runs once per user message — see
-        // SeedInitialPlanIfNeededAsync for the new-task-vs-steer boundary.
-        await SeedInitialPlanIfNeededAsync(generatingSessionId, userMessage);
+        // SeedInitialPlanIfNeededAsync for the new-task-vs-steer boundary. Never for
+        // conversation turns: a greeting must not acquire a plan.
+        if (!isConversationTurn)
+        {
+            await SeedInitialPlanIfNeededAsync(generatingSessionId, userMessage);
+        }
 
         // C6: Complete any deferred WorldState consolidation from a previous turn BEFORE this
         // turn reads WorldState, so prompt builds never race with consolidation writes.
@@ -793,7 +852,7 @@ public class ChatEngine(
 
         await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
         
-        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, userMessage, ct, skillContext, activeGoalMode).GetAsyncEnumerator(ct);
+        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, userMessage, ct, skillContext, activeGoalMode, mode).GetAsyncEnumerator(ct);
         try
         {
             while (true)
@@ -852,8 +911,17 @@ public class ChatEngine(
         string currentUserMessage,
         [EnumeratorCancellation] CancellationToken ct,
         string? skillContext = null,
-        bool isGoalMode = false)
+        bool isGoalMode = false,
+        InteractionMode mode = InteractionMode.Autonomous)
     {
+        // Conversation mode: the model is having a chat, not executing work. No tool schema
+        // is exposed (so no tool format instructions, no qwen tools prelude, no grammar
+        // constraints, and stray tool tags are never executed), and the agentic headers
+        // (queue / RAG / skills / lessons / plan / task contract / artifacts) are dropped.
+        // The prompt becomes BuildConversationalSystemPrompt — persona + conversation rules
+        // + World State + user notes only.
+        bool isConversation = mode == InteractionMode.Conversation;
+
         var templateType = promptEngine.DetectTemplate(
             inferenceEngine.Architecture, 
             inferenceEngine.CurrentModelPath, 
@@ -862,8 +930,8 @@ public class ChatEngine(
         var nativeStopTokens = promptEngine.GetStopTokens(templateType);
         var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
-        var tools = await toolExecutor.GetToolDefinitionsAsync();
-        var toolsSchema = toolExecutor.FormatToolsForPrompt(tools);
+        var tools = isConversation ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
+        var toolsSchema = isConversation ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
 
         // Qwen3.5/Qwen3.6 thinking models (qwen35 / qwen35moe architectures): their embedded chat
         // template expects (a) tools presented as an OpenAI-style JSON schema inside a <tools>
@@ -882,8 +950,10 @@ public class ChatEngine(
         // the native format repeatedly (recorded automatically by the parse-failure escalation)
         // is switched to JSON automatically on the NEXT session — the system evolves per model.
         string modelName = Klydis.Core.Learning.AdaptiveLearningService.DeriveModelName(inferenceEngine.CurrentModelPath);
-        string lessonsSection = await (_adaptiveLearning?.BuildLessonsSectionAsync(modelName, ct: ct) ?? Task.FromResult(string.Empty));
-        bool useQwenNativePrelude = isQwenThinkingModel && !string.IsNullOrWhiteSpace(toolsSchema);
+        string lessonsSection = isConversation
+            ? string.Empty
+            : await (_adaptiveLearning?.BuildLessonsSectionAsync(modelName, ct: ct) ?? Task.FromResult(string.Empty));
+        bool useQwenNativePrelude = !isConversation && isQwenThinkingModel && !string.IsNullOrWhiteSpace(toolsSchema);
         if (_adaptiveLearning != null && useQwenNativePrelude)
         {
             useQwenNativePrelude = !await _adaptiveLearning.HasNativeToolFormatIssuesAsync(modelName, ct);
@@ -1122,7 +1192,9 @@ public class ChatEngine(
             logger.LogDebug(ex, "Failed to read plan owner for queue boundary notice.");
         }
 
-        var pendingQueue = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId);
+        // Conversation turns never see the queue — queued messages are execution-state, not
+        // conversation context.
+        var pendingQueue = isConversation ? null : MessageQueue?.GetPending(generatingSessionId, CurrentTaskId);
         var queueNotice = (pendingQueue != null && pendingQueue.Count > 0)
             ? "\n\n[PENDING QUEUED USER MESSAGES AVAILABLE]\n" +
               "You have pending queued message(s) from the user waiting in the queue:\n" +
@@ -1133,8 +1205,11 @@ public class ChatEngine(
                   : string.Empty)
             : "";
 
+        // Conversation turns get no RAG workspace metadata and no skill brain — both are
+        // task/agent context, and injecting them is exactly what made the model treat a
+        // greeting as an agent turn.
         string ragNotice = "";
-        if (VectorStore != null)
+        if (!isConversation && VectorStore != null)
         {
             try
             {
@@ -1150,7 +1225,7 @@ public class ChatEngine(
             catch { }
         }
 
-        var skillHeader = !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
+        var skillHeader = !isConversation && !string.IsNullOrWhiteSpace(skillContext) ? $"\n\n{skillContext}" : "";
 
         var sysPromptManager = new SystemPromptManager();
 
@@ -1185,7 +1260,14 @@ public class ChatEngine(
         // window (see the budget check below), in which case they also fall back to the compact
         // prompt so session history is never starved out of the context window.
         string sysPrompt;
-        if (useQwenNativePrelude)
+        if (isConversation)
+        {
+            // Conversation mode: minimal prompt — persona, personality, World State (background
+            // history), plus user notes appended below. No tools, no task contract, no plan, no
+            // queue, no RAG, no skill brain, no goal workflow.
+            sysPrompt = sysPromptManager.BuildConversationalSystemPrompt(worldStateHeader, SelectedPersonality);
+        }
+        else if (useQwenNativePrelude)
         {
             // Qwen thinking models get their native tools prelude PREPENDED. The prelude embeds
             // the full ~17KB tools schema and teaches the model's native
@@ -1197,7 +1279,7 @@ public class ChatEngine(
             // calling styles and destabilize. The compact base is lean and conflict-free, so it
             // is used for BOTH dense and MoE qwen thinking models. A model with recorded native-
             // format failures skips the prelude and gets the JSON format instead (adaptive).
-            var compactBase = sysPromptManager.BuildCompactSystemPrompt("", worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+            var compactBase = sysPromptManager.BuildCompactSystemPrompt("", worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode);
             sysPrompt = promptEngine.BuildQwenToolsPrelude(toolsSchema) + "\n\n" + compactBase;
 
             // The native tools prelude embeds the full ~17KB tool schema. On small context
@@ -1214,19 +1296,19 @@ public class ChatEngine(
                 logger.LogWarning("Qwen tools prelude ({PreludeTokens} tokens) exceeds the prompt budget ({Budget}); falling back to the compact prompt (JSON tool format) to keep the context window usable.",
                     preludeTokens, maxTotalPromptTokens - minUserBudget);
                 NoteLesson("prelude_too_large", $"Qwen tools prelude ({preludeTokens} tokens) exceeded the prompt budget ({maxTotalPromptTokens - minUserBudget}); fell back to the compact prompt (JSON tool format).");
-                sysPrompt = sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+                sysPrompt = sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode);
             }
         }
         else if (inferenceEngine.IsMixtureOfExperts)
         {
-            sysPrompt = sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+            sysPrompt = sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode);
         }
         else
         {
-            var fullPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode);
+            var fullPrompt = sysPromptManager.BuildCombinedPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode);
             int fullPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(fullPrompt) : contextOrchestrator.EstimateTokens(fullPrompt);
             sysPrompt = fullPromptTokens > maxTotalPromptTokens - minUserBudget
-                ? sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode)
+                ? sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode)
                 : fullPrompt;
         }
 
@@ -1255,7 +1337,8 @@ public class ChatEngine(
         try
         {
             var artifacts = toolExecutor.GetSessionArtifactPaths(generatingSessionId);
-            if (artifacts.Count > 0)
+            // Artifact/workbench context is task context — not injected for conversation turns.
+            if (!isConversation && artifacts.Count > 0)
             {
                 var artifactHeader = "\n\nARTIFACTS PRODUCED IN THIS CHAT (files you wrote — shown in the PREVIEW tab; HTML, Markdown and JSON render live for the user):\n" +
                     string.Join("\n", artifacts.Take(15).Select(p => $"  - {p}"));
@@ -1290,7 +1373,9 @@ public class ChatEngine(
         try
         {
             var currentPlan = toolExecutor.GetSessionPlan(generatingSessionId);
-            if (currentPlan.Count > 0)
+            // Conversation turns have no plan: even a previous task's checklist must not leak
+            // into a greeting's prompt (it would re-raise the old task as work).
+            if (!isConversation && currentPlan.Count > 0)
             {
                 int planProgress = toolExecutor.GetSessionPlanProgress(generatingSessionId);
                 // Task boundary: a plan is CURRENT when it belongs to the task this turn is
@@ -1369,9 +1454,26 @@ public class ChatEngine(
 
         ChatMessage? initialUserMsg = activeHistory.Count > 0 ? activeHistory[0] : null;
         int initialUserTokens = initialUserMsg != null ? ((inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(initialUserMsg.Content) : contextOrchestrator.EstimateTokens(initialUserMsg.Content)) + 25) : 0;
-        
-        // Reserve budget up front for the user's initial prompt goal (activeHistory[0])
-        currentTokens += initialUserTokens;
+
+        // The session's FIRST message is force-pinned (budget-reserved + never evicted) ONLY
+        // when it belongs to the CURRENT turn: either it IS the current user message (a fresh
+        // goal) or this is a legacy non-task goal session (no task layer to carry the
+        // objective). Previously activeHistory[0] was pinned unconditionally, so a session
+        // that opened with "good evening" re-inserted that greeting at the top of EVERY
+        // future prompt — including "build a landing page" turns — permanently re-priming
+        // the model with the old conversational context. That is the repeated-response
+        // mechanism behind the observed "the model keeps answering like it's still greeting".
+        // Unpinned, the first message participates in normal history retention instead, and
+        // the task contract (objective) carries the real goal.
+        bool pinInitialGoal = initialUserMsg != null &&
+            (initialUserMsg.Content == currentUserMessage ||
+             (_taskManager == null && isGoalMode));
+
+        // Reserve budget up front for the user's initial prompt goal when it is pinned.
+        if (pinInitialGoal)
+        {
+            currentTokens += initialUserTokens;
+        }
 
         // Also reserve the CURRENT user message up front — the message this turn must answer,
         // identified by its exact text (it is added to the history by StreamResponseAsync, so the
@@ -1393,12 +1495,14 @@ public class ChatEngine(
         int currentUserTokens = currentUserMsg != null ? TokensOf(currentUserMsg) : 0;
         currentTokens += currentUserTokens;
 
-        // Iterate backwards from the most recent history message down to index 1, skipping the
-        // initial goal (index 0) and the already-reserved current user message. Older messages
-        // are dropped first when the budget runs out, so the tail (tool continuations after the
-        // user's message) and the current message itself always survive.
+        // Iterate backwards from the most recent history message, skipping the already-reserved
+        // current user message. When the initial goal is pinned, index 0 is also skipped (it is
+        // re-inserted below); otherwise index 0 participates in normal retention so a stale
+        // first message can age out under budget pressure like any other message. Older
+        // messages are dropped first when the budget runs out, so the tail (tool continuations
+        // after the user's message) and the current message itself always survive.
         int messagesBeforeCurrent = 0;
-        for (int i = activeHistory.Count - 1; i >= 1; i--)
+        for (int i = activeHistory.Count - 1; i >= (pinInitialGoal ? 1 : 0); i--)
         {
             if (i == currentUserIndex) continue;
             var msg = activeHistory[i];
@@ -1432,16 +1536,20 @@ public class ChatEngine(
             }
         }
 
-        // Always preserve the user's initial prompt goal (activeHistory[0]) at index 0 of active
-        // messages, and the current user message at its chronological position (right before any
-        // retained tool-continuation messages that followed it).
-        if (initialUserMsg != null)
+        // Preserve the user's initial prompt goal at index 0 ONLY when pinned (see above);
+        // otherwise the first message stays wherever the backward pass retained it, and can
+        // age out like any other history. The current user message is always placed at its
+        // chronological position (right before any retained tool-continuation messages).
+        if (pinInitialGoal && initialUserMsg != null)
         {
             activeMessages.Insert(0, initialUserMsg);
         }
+        // The current message sits right after the retained messages that preceded it. When
+        // the initial goal is pinned it occupies slot 0, so the position is 1 + count of
+        // retained messages before the current one; otherwise it is just that count.
         if (currentUserMsg != null)
         {
-            activeMessages.Insert(1 + messagesBeforeCurrent, currentUserMsg);
+            activeMessages.Insert((pinInitialGoal ? 1 : 0) + messagesBeforeCurrent, currentUserMsg);
         }
 
         if (hasDroppedMessages)
@@ -1477,7 +1585,7 @@ public class ChatEngine(
         // the loop to guarantee the strict fit.
         //
         // Messages are removed oldest-first (index 1 upward), but the loop must stop with at
-        // least the initial goal message (index 0) AND the current user message intact. The old
+        // least the current user message intact (index 0 is never removed). The old
         // guard (Count > 1) stripped everything down to the initial message, silently dropping
         // the message the user just sent once the system prompt overflowed the budget — the
         // model then answered the session's first message on every turn.
@@ -1487,7 +1595,7 @@ public class ChatEngine(
         // loop must never evict it: once the oldest remaining message would be the current user
         // message, fall back to dropping the OLDEST tool continuation instead (keeping the
         // newest tool result, which the model needs for its next step).
-        int currentUserPos = currentUserMsg != null ? 1 + messagesBeforeCurrent : -1;
+        int currentUserPos = currentUserMsg != null ? (pinInitialGoal ? 1 : 0) + messagesBeforeCurrent : -1;
         bool truncationTrimmed = false;
         while (finalPromptTokens > maxTotalPromptTokens && activeMessages.Count > 2)
         {
@@ -1518,9 +1626,9 @@ public class ChatEngine(
             // Rare fallback: if the subtract-based estimate still leaves the prompt over budget
             // (separator tokens heavier than the +25 allowance), keep trimming with exact
             // re-tokenization so the strict fit contract is never violated. Same invariant as the
-            // main loop: never evict the initial goal or the current user message (see the
-            // currentUserPos logic above — located by identity here, since value equality would
-            // match an earlier identical message when the user repeats themselves).
+            // main loop: never evict the current user message (see the currentUserPos logic
+            // above — located by identity here, since value equality would match an earlier
+            // identical message when the user repeats themselves).
             currentUserPos = -1;
             if (currentUserMsg != null)
             {
@@ -1671,6 +1779,21 @@ public class ChatEngine(
             producedVisibleOutput = true;
         }
 
+        // Per-generation inference-boundary instrumentation (reviewer request): one line per
+        // generation tying the session/task/mode/user to the KV reuse decision (from the
+        // engine's GenerationContext line) so a "new user turn running on the previous turn's
+        // context" failure is visible at a glance instead of hiding in debug logs.
+        logger.LogInformation(
+            "TurnInfo: session={SessionId} task={TaskId} mode={Mode} user=\"{User}\" promptTokens={PromptTokens} promptHash={PromptHash} kv={KvDecision} prefixChars={Prefix}",
+            generatingSessionId,
+            CurrentTaskId ?? "—",
+            mode,
+            currentUserMessage.Length > 80 ? currentUserMessage.Substring(0, 80) + "…" : currentUserMessage,
+            finalPromptTokens,
+            ComputePromptHash(prompt),
+            inferenceEngine.LastGenerationContextDecision,
+            inferenceEngine.LastGenerationPrefixLength);
+
             // ── Self-correction: degenerate-loop recovery (esp. MoE / thinking models) ──
             // MoE models (qwen3.6-14B-A3B / qwen35moe, mixtral, deepseek-v2/v3, ...) can fall
             // into repetition attractors: think-tag spam, token stutter, or n-gram loops.
@@ -1806,7 +1929,9 @@ public class ChatEngine(
                 !fullResponse.Contains("</think>", StringComparison.OrdinalIgnoreCase) &&
                 !fullResponse.Contains("<|/think|>", StringComparison.OrdinalIgnoreCase) &&
                 !fullResponse.Contains("</thought>", StringComparison.OrdinalIgnoreCase);
-            var toolCallRequests = ParseToolCalls(visibleResponse);
+            // Conversation mode: no tools exist, so tool tags (if the model emits any) are
+            // never parsed or executed — the whole output is delivered as the reply.
+            var toolCallRequests = isConversation ? new List<ToolCallRequest>() : ParseToolCalls(visibleResponse);
 
             // After repeated malformed tool calls, block execution entirely and force a direct
             // answer. The notice is injected once; subsequent iterations with tool tags just
@@ -1955,7 +2080,10 @@ public class ChatEngine(
                     _consecutiveBlockedToolCalls = 0;
                     consecutiveToolParseFailures = 0;
 
-                    yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
+                    // req.Arguments is a non-nullable IDictionary by declaration; the null-
+                    // forgiving operator silences the analyzer's over-flag of the interface-
+                    // typed value being boxed into the object slot (CS8601).
+                    yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments! });
 
                     // Tool-call boundaries reset the stall clock, and the watchdog is paused
                     // for the duration: a long tool run is legitimate work bounded by the
@@ -1996,9 +2124,12 @@ public class ChatEngine(
                         {
                             _goalCompletedThisTurn = true;
                             logger.LogInformation("Supervisor accepted task_complete for task {TaskId}; task sealed Completed.", CurrentTaskId);
+                            // CurrentTaskId is non-null here (guarded by the enclosing
+                            // condition), but the compiler cannot narrow a field, so suppress
+                            // the nullable-into-object assignment warning explicitly.
                             yield return new ChatStreamEvent(ChatStreamEventType.GoalComplete,
                                 claimSummary ?? "Task completed.",
-                                new Dictionary<string, object> { ["TaskId"] = CurrentTaskId });
+                                new Dictionary<string, object> { ["TaskId"] = CurrentTaskId! });
                             break; // exit the tool loop; the goalCompletedThisTurn check below ends the turn
                         }
 

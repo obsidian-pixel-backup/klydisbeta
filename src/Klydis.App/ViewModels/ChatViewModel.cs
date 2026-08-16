@@ -10,6 +10,7 @@ using CommunityToolkit.Mvvm.Input;
 using Klydis.App.Services;
 using Klydis.Core.Chat;
 using Klydis.Core.Diagnostics;
+using Klydis.Core.Tasks;
 
 namespace Klydis.App.ViewModels;
 
@@ -1175,7 +1176,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                         Role = "thought",
                         Content = string.Empty,
                         IsStreaming = true,
-                        IsThinkingExpanded = true,
+                        // Reasoning stays behind the collapsed toggle: the transcript reads as
+                        // the assistant's reply, and internal deliberation is one click away.
+                        IsThinkingExpanded = false,
                         Timestamp = DateTime.Now
                     };
                     AppendMessage(thoughtMessage);
@@ -1197,7 +1200,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             if (_chatEngine != null)
             {
                 string? skillContext = null;
-                if (_skillSelector != null)
+                // Interaction-mode gate: conversation turns (greetings, small talk, explanations)
+                // get NO skill brain index and NO skill activation. Injecting the skill index on
+                // every send over-conditioned the model — it started treating a greeting as an
+                // agent turn (see InteractionClassifier). Task/Autonomous turns keep the full
+                // brain + relevance-scored skill injection.
+                if (_skillSelector != null && InteractionClassifier.Classify(promptMessagePayload) != InteractionMode.Conversation)
                 {
                     var brainIndex = _skillSelector.GenerateBrainIndex();
                     var skillReasoning = _skillSelector.ReasonAndSelectSkills(promptMessagePayload);
@@ -1260,7 +1268,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                                     Role = "thought",
                                     Content = string.Empty,
                                     IsStreaming = true,
-                                    IsThinkingExpanded = true,
+                                    // Collapsed by default — see FlushThoughtText.
+                                    IsThinkingExpanded = false,
                                     Timestamp = DateTime.Now
                                 };
                                 AppendMessage(thoughtMessage);

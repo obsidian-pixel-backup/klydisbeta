@@ -13,6 +13,7 @@ using CommunityToolkit.Mvvm.Input;
 using Klydis.Core.Chat;
 using Klydis.Core.Diagnostics;
 using Klydis.Core.Memory;
+using Klydis.Core.Workbench;
 
 namespace Klydis.App.ViewModels;
 
@@ -43,6 +44,14 @@ public partial class WorkspaceFileItem : ObservableObject
     public string Status { get; init; } = string.Empty;
     public DateTime LastModified { get; init; }
     public string ModifiedText => LastModified == default ? string.Empty : LastModified.ToString("HH:mm:ss");
+
+    // Factual diff stats + diff text (workbench §7–§8): populated from the persisted
+    // file-change log captured around file-mutating tools — real filesystem evidence, never
+    // model-generated narration.
+    public int Additions { get; init; }
+    public int Deletions { get; init; }
+    public string DiffText { get; init; } = string.Empty;
+    public string ChangeStats => Additions == 0 && Deletions == 0 ? string.Empty : $"+{Additions} −{Deletions}";
 }
 
 /// <summary>
@@ -138,6 +147,12 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private string _changesSummary = string.Empty;
+
+    [ObservableProperty]
+    private WorkspaceFileItem? _selectedChangeItem;
+
+    [ObservableProperty]
+    private string _selectedChangeDiff = string.Empty;
 
     [ObservableProperty]
     private string _recentCommitsText = string.Empty;
@@ -494,55 +509,67 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Change log for this chat: files written/edited (with status badges), a summary of the
-    /// tool activity, and a chronological timeline of the latest actions.
+    /// Change log for this chat: files the agent actually modified, with REAL diff stats and
+    /// diffs from the durable file_changes log (captured around write_file — evidence, not
+    /// narration), plus a chronological timeline of the latest tool actions.
     /// </summary>
-    private Task RefreshChangesAsync()
+    private async Task RefreshChangesAsync()
     {
         ChangeItems.Clear();
         ChangesSummary = string.Empty;
         RecentCommitsText = string.Empty;
+        SelectedChangeItem = null;
+        SelectedChangeDiff = string.Empty;
 
         string sessionId = _currentSessionId ?? string.Empty;
-        var records = _toolExecutor.GetSessionToolActivity(sessionId);
-        if (records.Count == 0)
+
+        // Factual change log — durable, task-scoped, rebuilt after restarts.
+        List<FileChange> changes = new();
+        try
         {
-            ChangesSummary = "No tool activity in this chat yet — actions will appear here as the model works.";
-            ChangesBadge = 0;
-            return Task.CompletedTask;
+            changes = await _messageStore.GetFileChangesAsync(sessionId);
+        }
+        catch (Exception ex)
+        {
+            ChangesSummary = "Change log unavailable.";
+            System.Diagnostics.Debug.WriteLine($"[SidePanel] Failed to load file changes for {sessionId}: {ex.Message}");
         }
 
-        var changed = new Dictionary<string, WorkspaceFileItem>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in records.Where(r => r.ToolName is "write_file" or "str_replace"))
+        foreach (var c in changes)
         {
-            string path = PathArg(r.ArgsJson);
-            if (string.IsNullOrEmpty(path)) continue;
-            changed[path] = new WorkspaceFileItem
+            ChangeItems.Add(new WorkspaceFileItem
             {
-                FullPath = path,
-                Name = Path.GetFileName(path),
-                RelativePath = ToRelative(path),
-                Status = PathToolStatus(r.ToolName),
-                LastModified = r.Timestamp
-            };
-        }
-        foreach (var item in changed.Values.OrderByDescending(i => i.LastModified))
-        {
-            ChangeItems.Add(item);
+                FullPath = c.Path,
+                Name = Path.GetFileName(c.Path),
+                RelativePath = ToRelative(c.Path),
+                Status = c.Tool == "write_file" ? "Written" : "Edited",
+                LastModified = c.TimestampUtc.ToLocalTime(),
+                Additions = c.AddedLines,
+                Deletions = c.DeletedLines,
+                DiffText = c.Diff
+            });
         }
 
+        ChangesBadge = changes.Count;
+        ChangesSummary = changes.Count == 0
+            ? "No file changes recorded yet — files the agent writes (write_file) appear here with real diffs."
+            : $"{changes.Count} file change(s) this chat";
+
+        // Chronological timeline of tool actions (kept from the activity feed).
+        var records = _toolExecutor.GetSessionToolActivity(sessionId);
         int ok = records.Count(r => r.Success);
         int failed = records.Count - ok;
-        ChangesBadge = records.Count;
-        ChangesSummary = $"{records.Count} tool call(s) this chat · {ok} ok{(failed > 0 ? $", {failed} failed" : string.Empty)}";
-
         var lines = new List<string>();
         foreach (var r in records.TakeLast(14))
         {
             lines.Add($"{r.Timestamp:HH:mm:ss}  [{(r.Success ? "ok" : "ERR")}]  {r.ToolName}  {SummarizeArgs(r)}");
         }
         RecentCommitsText = string.Join("\n", lines);
-        return Task.CompletedTask;
+    }
+
+    partial void OnSelectedChangeItemChanged(WorkspaceFileItem? value)
+    {
+        SelectedChangeDiff = value?.DiffText ?? string.Empty;
     }
 
     #endregion

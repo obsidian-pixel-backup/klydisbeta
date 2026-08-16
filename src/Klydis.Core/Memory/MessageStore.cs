@@ -6,6 +6,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Klydis.Core.Chat;
 using Klydis.Core.Tasks;
+using Klydis.Core.Workbench;
 using TaskStatus = Klydis.Core.Chat.TaskStatus;
 
 namespace Klydis.Core.Memory;
@@ -243,6 +244,24 @@ public class MessageStore
                 turn_count INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id, started_at);
+
+            -- Factual file-change log (workbench): captured around file-mutating tools so the
+            -- Changes tab shows REAL filesystem diffs (before/after hashes + unified diff),
+            -- never model-generated narration. Task-scoped via task_id.
+            CREATE TABLE IF NOT EXISTS file_changes (
+                change_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT,
+                path TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                before_hash TEXT,
+                after_hash TEXT,
+                diff TEXT,
+                added_lines INTEGER NOT NULL DEFAULT 0,
+                deleted_lines INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_file_changes_session ON file_changes(session_id, created_at);
 
             -- FTS5 Virtual Table for full-text search
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
@@ -758,6 +777,76 @@ public class MessageStore
 
         await command.ExecuteNonQueryAsync();
     }
+
+    #region File changes (workbench)
+
+    /// <summary>
+    /// Persists a factual file change (before/after hashes + real diff) captured around a
+    /// file-mutating tool call. The Changes tab reads this; it is evidence, not narration.
+    /// </summary>
+    public async Task AddFileChangeAsync(FileChange change)
+    {
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO file_changes (change_id, session_id, task_id, path, tool, before_hash, after_hash, diff, added_lines, deleted_lines, created_at)
+            VALUES (@id, @sessionId, @taskId, @path, @tool, @beforeHash, @afterHash, @diff, @added, @deleted, @createdAt);
+        ";
+        command.Parameters.AddWithValue("@id", change.ChangeId);
+        command.Parameters.AddWithValue("@sessionId", change.SessionId);
+        command.Parameters.AddWithValue("@taskId", (object?)change.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@path", change.Path);
+        command.Parameters.AddWithValue("@tool", change.Tool);
+        command.Parameters.AddWithValue("@beforeHash", (object?)change.BeforeHash ?? DBNull.Value);
+        command.Parameters.AddWithValue("@afterHash", (object?)change.AfterHash ?? DBNull.Value);
+        command.Parameters.AddWithValue("@diff", (object?)change.Diff ?? DBNull.Value);
+        command.Parameters.AddWithValue("@added", change.AddedLines);
+        command.Parameters.AddWithValue("@deleted", change.DeletedLines);
+        command.Parameters.AddWithValue("@createdAt", change.TimestampUtc.ToString("o"));
+
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Loads the factual change log for a session, newest first (bounded for UI display).
+    /// </summary>
+    public async Task<List<FileChange>> GetFileChangesAsync(string sessionId, int limit = 100)
+    {
+        var result = new List<FileChange>();
+
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT change_id, session_id, task_id, path, tool, before_hash, after_hash, diff, added_lines, deleted_lines, created_at
+            FROM file_changes WHERE session_id = @sessionId
+            ORDER BY created_at DESC LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        command.Parameters.AddWithValue("@limit", limit);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new FileChange(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                reader.GetInt32(8),
+                reader.GetInt32(9),
+                DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+        }
+
+        return result;
+    }
+
+    #endregion
 
     /// <summary>
     /// Retrieves the total message count for a session.

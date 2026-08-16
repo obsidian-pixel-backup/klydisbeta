@@ -16,7 +16,14 @@ public class SystemPromptManager
     /// <summary>
     /// Master System Prompt file name.
     /// </summary>
-    public const string MasterPromptFileName = "klydis master system prompt.md";
+    // The LOCAL runtime profile, not the cloud-product master prompt. The old
+    // "klydis master system prompt.md" is a cloud-assistant persona (Klydis API / Platform /
+    // Chrome / advertising policy…) — injecting it into the LOCAL inference engine made the
+    // model behave like a cloud product spec instead of a desktop agent (observed: a greeting
+    // answered with a product pitch). Users can still customize via a file with this name in
+    // the working dir / app dir / ~/.klydis; when absent, GetDefaultFallbackMasterPrompt (a
+    // concise local persona) is used.
+    public const string MasterPromptFileName = "klydis local system prompt.md";
 
     private readonly ILogger<SystemPromptManager>? _logger;
 
@@ -256,7 +263,8 @@ public class SystemPromptManager
         string lessonsHeader = "",
         string? customPath = null,
         string? personalityMode = null,
-        bool isGoalMode = false)
+        bool isGoalMode = false,
+        Klydis.Core.Tasks.InteractionMode interactionMode = Klydis.Core.Tasks.InteractionMode.Autonomous)
     {
         string masterPrompt = GetMasterSystemPrompt(customPath);
         string? personalityContent = GetPersonalityPrompt(personalityMode);
@@ -279,7 +287,13 @@ public class SystemPromptManager
             sb.AppendLine();
         }
 
-        // Section 2: Active Runtime Engine & Tool Execution Directives
+        // Section 2: Active Runtime Engine & Tool Execution Directives — only when tools are
+        // actually exposed (Task/Autonomous). Conversation turns never reach this builder
+        // (they use BuildConversationalSystemPrompt), but the guard keeps the contract honest
+        // for any caller.
+        bool hasAgentTooling = interactionMode != Klydis.Core.Tasks.InteractionMode.Conversation && !string.IsNullOrWhiteSpace(toolsSchema);
+        if (hasAgentTooling)
+        {
         sb.AppendLine("## RUNTIME EXECUTION DIRECTIVES & TOOL INTEGRATION");
         sb.AppendLine("You are operating as Klydis in the local agentic desktop environment. You have access to the following local tools:");
         sb.AppendLine(toolsSchema);
@@ -341,6 +355,7 @@ public class SystemPromptManager
         sb.AppendLine("10. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.");
         sb.AppendLine("11. DO NOT repeat the exact same tool call if it just failed or returned an error.");
         sb.AppendLine("12. GOAL COMPLETION & PROGRESS SIGNALING: You are equipped with 'task_complete' and 'task_progress'. Your progress percentage is tracked automatically by the harness from your plan checklist — you do NOT need to report it. You MAY optionally call 'task_progress' with {\"percent\": N, \"status\": \"...\"} at milestones, but it is never required. When your requested goal is 100% finished and verified, you MUST call 'task_complete' with {\"summary\": \"...\"} to signal task completion.");
+        } // end hasAgentTooling
 
         sb.AppendLine();
         sb.AppendLine("### TASK BOUNDARY (CRITICAL — READ EVERY TURN)");
@@ -350,6 +365,12 @@ public class SystemPromptManager
         sb.AppendLine("- If an old task's todo list or plan is still visible in the PLAN tab, it belongs to an earlier task: never execute its items. Replace it with a fresh 'plan' (action=create) if the current task needs one.");
         sb.AppendLine("- Historical context (World State, older messages, old tool results) is background information for the CURRENT task — not a list of pending obligations.");
 
+        // The full goal-execution workflow is AUTONOMOUS-mode-only. Bounded Task work gets
+        // tools + the task boundary, but not the "establish a todo list and execute
+        // step-by-step until task_complete" ceremony — that framing is what turned a casual
+        // turn into an agent turn when it was unconditional.
+        if (interactionMode == Klydis.Core.Tasks.InteractionMode.Autonomous)
+        {
         sb.AppendLine();
         sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
         sb.AppendLine("- For substantive, multi-step, or task-oriented requests, operate as a goal-driven agent:");
@@ -363,6 +384,7 @@ public class SystemPromptManager
         sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");
         sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
         sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
+        } // end GOAL-ORIENTED WORKFLOW (Autonomous only)
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
@@ -425,7 +447,8 @@ public class SystemPromptManager
         string skillHeader = "",
         string lessonsHeader = "",
         string? personalityMode = null,
-        bool isGoalMode = false)
+        bool isGoalMode = false,
+        Klydis.Core.Tasks.InteractionMode interactionMode = Klydis.Core.Tasks.InteractionMode.Autonomous)
     {
         var sb = new StringBuilder();
 
@@ -483,6 +506,9 @@ public class SystemPromptManager
         sb.AppendLine("- If an old task's todo list or plan is still visible in the PLAN tab, it belongs to an earlier task: never execute its items. Replace it with a fresh 'plan' (action=create) if the current task needs one.");
         sb.AppendLine("- Historical context (World State, older messages, old tool results) is background information for the CURRENT task — not a list of pending obligations.");
 
+        // The full goal-execution workflow is AUTONOMOUS-mode-only (see BuildCombinedPrompt).
+        if (interactionMode == Klydis.Core.Tasks.InteractionMode.Autonomous)
+        {
         sb.AppendLine();
         sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
         sb.AppendLine("- For substantive, multi-step, or task-oriented requests, operate as a goal-driven agent:");
@@ -496,6 +522,7 @@ public class SystemPromptManager
         sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");
         sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
         sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
+        } // end GOAL-ORIENTED WORKFLOW (Autonomous only)
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
@@ -544,6 +571,48 @@ public class SystemPromptManager
         if (!string.IsNullOrWhiteSpace(ragNotice)) sb.Append(ragNotice);
         if (!string.IsNullOrWhiteSpace(skillHeader)) sb.Append(skillHeader);
         if (!string.IsNullOrWhiteSpace(lessonsHeader)) sb.Append(lessonsHeader);
+
+        return sb.ToString().Trim();
+    }
+
+    /// <summary>
+    /// Minimal system prompt for CONVERSATION mode (greetings, small talk, explanations).
+    /// The interaction classifier decides this mode BEFORE task resolution; a conversation
+    /// turn has no task, no tools, no plan, no queue, no skill brain, no RAG workspace, and
+    /// no agentic workflow — so the model answers as a human would instead of treating the
+    /// turn as an agent execution (the observed "good evening" failure: the runtime told the
+    /// model it had a task named "good evening" plus 20+ tools, and it responded with
+    /// run_command suggestions). Only persona, personality, conversation rules, World State
+    /// (framed as background history) and user notes are present.
+    /// </summary>
+    public string BuildConversationalSystemPrompt(
+        string worldStateHeader = "",
+        string? personalityMode = null)
+    {
+        var sb = new StringBuilder();
+
+        sb.AppendLine("You are Klydis, a local desktop AI assistant. Warm, direct, witty, concise.");
+        sb.AppendLine("- This is an ordinary conversation, NOT an agent task. There is no task checklist, no plan, and no tool execution happening right now.");
+        sb.AppendLine("- Greetings get greetings back — short and warm. Never open with a capabilities list, a knowledge-cutoff disclaimer, or assistant boilerplate.");
+        sb.AppendLine("- Answer questions directly and clearly, mirroring the user's energy and register.");
+        sb.AppendLine("- If the user asks for real work (building, fixing, researching, analyzing files or code), answer conversationally or outline what you would do — the runtime automatically switches into task mode when it detects that kind of request.");
+
+        string? personalityContent = GetPersonalityPrompt(personalityMode);
+        if (!string.IsNullOrWhiteSpace(personalityContent))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## ACTIVE PERSONALITY DIRECTIVES");
+            sb.AppendLine("You MUST strictly adhere to this personality style for all responses:");
+            sb.AppendLine(personalityContent.Trim());
+        }
+
+        // World State is long-term memory (user preferences, earlier session facts), framed
+        // as background history — never as an obligation list.
+        if (!string.IsNullOrWhiteSpace(worldStateHeader))
+        {
+            sb.AppendLine();
+            sb.Append(worldStateHeader);
+        }
 
         return sb.ToString().Trim();
     }

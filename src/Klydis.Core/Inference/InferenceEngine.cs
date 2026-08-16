@@ -224,6 +224,22 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public bool LastGenerationWasCancelled { get; private set; }
 
     /// <summary>
+    /// How the last generation treated the KV cache relative to the previous generation's
+    /// prompt: ExactReuse (new prompt is a strict prefix-extension of the evaluated prompt),
+    /// PartialReuse (diverged — sequence rewound to the common prefix), or Reset* (no usable
+    /// prefix — context rebuilt from scratch). Exposed so the orchestration layer can log the
+    /// turn-boundary decision: a "new user turn accidentally running on the previous turn's KV"
+    /// failure is visible per generation instead of hiding in debug logs.
+    /// </summary>
+    public string LastGenerationContextDecision { get; private set; } = "None";
+
+    /// <summary>
+    /// Char length of the prompt prefix reused by the last generation (0 when the context was
+    /// reset).
+    /// </summary>
+    public int LastGenerationPrefixLength { get; private set; }
+
+    /// <summary>
     /// Raw GGUF chat template string if present.
     /// </summary>
     public string? RawChatTemplate { get; private set; }
@@ -979,6 +995,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             LastGenerationPromptFilledWindow = false;
             LastGenerationWasCancelled = false;
             LastGenerationWasCutShort = false;
+            LastGenerationContextDecision = "Pending";
+            LastGenerationPrefixLength = 0;
 
             Channel<Action>? eventChannel = null;
             Task? eventDispatcherTask = null;
@@ -1048,6 +1066,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     if (isIsolated)
                     {
                         _logger.LogDebug("Executing isolated inference task. Context tracking will reset cleanly after execution.");
+                        LastGenerationContextDecision = "IsolatedReset";
                         ResetContextInternal();
                         textToEvaluate = prompt;
                     }
@@ -1060,6 +1079,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                             if (commonPrefixLength == _lastEvaluatedPrompt.Length)
                             {
                                 textToEvaluate = prompt.Substring(_lastEvaluatedPrompt.Length);
+                                LastGenerationContextDecision = "ExactReuse";
+                                LastGenerationPrefixLength = commonPrefixLength;
                                 _logger.LogDebug("KV Cache Prefix hit (Exact). Reusing full evaluated KV context ({PrefixLength} chars).", commonPrefixLength);
                                 textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
                             }
@@ -1074,6 +1095,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                 if (IsRecurrentArchitecture)
                                 {
                                     _logger.LogDebug("Skipping partial KV prefix reuse for recurrent architecture '{Arch}'. Resetting context cleanly.", Architecture);
+                                    LastGenerationContextDecision = "ResetRecurrentPartial";
                                     ResetContextInternal();
                                     textToEvaluate = prompt;
                                 }
@@ -1091,11 +1113,14 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                             _lastEvaluatedPrompt = commonPrefix;
                                             textToEvaluate = prompt.Substring(commonPrefixLength);
                                             textToEvaluate = StripLeadingStopTokens(textToEvaluate, inferenceParams.AntiPrompts);
+                                            LastGenerationContextDecision = "PartialReuse";
+                                            LastGenerationPrefixLength = commonPrefixLength;
                                             _logger.LogDebug("KV Cache Prefix hit (Partial). Rewound sequence to {Tokens} tokens via MemorySequenceRemove. Evaluating delta ({DeltaLength} chars).", prefixTokenCount, textToEvaluate.Length);
                                         }
                                         catch (Exception ex)
                                         {
                                             _logger.LogWarning(ex, "Failed partial KV sequence removal; resetting context cleanly.");
+                                            LastGenerationContextDecision = "ResetPartialFailed";
                                             ResetContextInternal();
                                             textToEvaluate = prompt;
                                         }
@@ -1111,10 +1136,25 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         else
                         {
                             _logger.LogDebug("No common KV prefix found. Resetting context.");
+                            LastGenerationContextDecision = "ResetNoPrefix";
                             ResetContextInternal();
                             textToEvaluate = prompt;
                         }
                     }
+
+                    // Turn-boundary instrumentation (reviewer request): one line per generation
+                    // with the KV reuse decision and prompt fingerprints, so a stale-context
+                    // failure ("new user turn running on the previous turn's KV") is visible in
+                    // the logs without digging through debug lines.
+                    int prevPromptTokens = 0;
+                    if (!string.IsNullOrEmpty(savedLastEvaluatedPrompt))
+                    {
+                        try { prevPromptTokens = GetTokenCount(savedLastEvaluatedPrompt); } catch { }
+                    }
+                    _logger.LogInformation(
+                        "GenerationContext: decision={Decision} prefixChars={Prefix} prevPromptTokens={PrevTokens} newPromptTokens={NewTokens} prevHash={PrevHash} newHash={NewHash}",
+                        LastGenerationContextDecision, LastGenerationPrefixLength, prevPromptTokens, promptTokenCount,
+                        HashPrompt(savedLastEvaluatedPrompt), HashPrompt(prompt));
 
                     var generatedContent = new System.Text.StringBuilder();
 
@@ -1854,6 +1894,19 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             safeBoundary--;
         }
         return safeBoundary > 0 ? safeBoundary : matchLen;
+    }
+
+    /// <summary>
+    /// Short stable fingerprint of a prompt (first 6 hex chars of SHA-256) for the
+    /// GenerationContext instrumentation line — enough to spot "same prompt, different turn"
+    /// and "prompt changed but KV was reused" at a glance without logging full prompts.
+    /// </summary>
+    private static string HashPrompt(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "—";
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        byte[] hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text));
+        return Convert.ToHexString(hash, 0, 6).ToLowerInvariant();
     }
 
     private static readonly string[] TurnEndingStopTokens = new[]

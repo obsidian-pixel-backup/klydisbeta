@@ -1,0 +1,188 @@
+using System;
+using System.Linq;
+
+namespace Klydis.Core.Tasks;
+
+/// <summary>
+/// The operating mode for a user message — decided BEFORE task resolution and prompt
+/// construction. This is the boundary the harness was missing: without it, a greeting like
+/// "good evening" became an AgentTask with a task contract, the full tool schema, and the
+/// agentic workflow — so the model treated a conversational turn as an agent turn (observed:
+/// the model reasoned about read_file/run_command in response to a greeting). The mode
+/// controls what the runtime exposes:
+///   Conversation → no task, no tools, no plan, no skills, no workbench — a minimal prompt.
+///   Task         → tools + task contract for inspection/analysis/research work.
+///   Autonomous   → the full runtime: plan, skills, artifacts, verification, continuation.
+/// The classifier is intentionally deterministic (heuristic) for now; the review allows a
+/// small classifier model to evolve it later.
+/// </summary>
+public enum InteractionMode
+{
+    /// <summary>Casual chat, greetings, explanations. No execution state, no tools.</summary>
+    Conversation,
+
+    /// <summary>Inspection / analysis / research that needs tools but is bounded work.</summary>
+    Task,
+
+    /// <summary>Build / implement / fix: full agentic runtime with plan and verification.</summary>
+    Autonomous
+}
+
+/// <summary>
+/// Deterministic interaction classifier. Priority order: explicit conversational intent
+/// (greetings, gratitude, explanation requests) wins; then strong build/fix verbs
+/// (Autonomous); then analysis/research verbs (Task); short messages fall back to
+/// Conversation. Deliberately heuristic — the review's examples are the contract:
+/// "good evening"/"hello"/"explain X" → Conversation, "analyze this repository" → Task,
+/// "build X"/"fix this project" → Autonomous.
+/// </summary>
+public static class InteractionClassifier
+{
+    private static readonly string[] GreetingMarkers =
+    {
+        "hello", "hi", "hey", "yo", "greetings", "good morning", "good afternoon",
+        "good evening", "good night", "how are you", "hows it going", "how is it going",
+        "how are things", "whats up", "whats going on", "hi there", "hello there",
+        "thanks", "thank you", "thankyou", "thx", "appreciate", "bye", "goodbye",
+        "see you", "have a good", "welcome", "nice to meet", "long time"
+    };
+
+    // Live-data requests: weather/news/prices read like plain questions but REQUIRE the
+    // web tools ("weather please" is a search_web job, not a chat reply). The reviewer's
+    // own rule — "requires external action? yes → Task" — applies here. Checked before the
+    // explanation tier so "what's the weather" gets tools instead of being treated as a
+    // knowledge question; pure explanations that merely mention a data word ("explain how
+    // forecasting works") may land in Task too, where tools are available but optional.
+    private static readonly string[] LiveDataMarkers =
+    {
+        "weather", "forecast", "temperature", "news", "headlines", "stock price",
+        "stock market", "exchange rate", "price of", "bitcoin", "crypto", "score",
+        "who won", "what time", "is it raining", "traffic", "flight", "delays"
+    };
+
+    // Informational / explanation requests. These are CONVERSATION even when they mention
+    // verbs ("explain how to build an autonomous agent" is a question, not a build task).
+    private static readonly string[] ExplanationMarkers =
+    {
+        "explain", "what is", "what are", "whats", "what does", "how do", "how does",
+        "how can", "how to", "why", "tell me about", "tell me", "describe", "define",
+        "meaning of", "difference between", "whats the difference", "how would",
+        "can you explain", "can you tell", "elaborate", "clarify", "more about",
+        "in detail", "walk me through", "overview of", "introduction to"
+    };
+
+    // Imperative / continuation commands: explicit "do the work" instructions. These must
+    // get tools even when no strong verb is present — "i want you to begin building the
+    // project" previously fell through every verb list and hit the short-message fallback,
+    // degrading to Conversation (no tools, no task contract), and the model just chatted
+    // instead of working. Checked before the verb lists so "begin", "start", "continue"
+    // always route to tool-using Task mode; the task resolver then continues the same task.
+    private static readonly string[] CommandMarkers =
+    {
+        "begin", "start", "proceed", "continue", "go ahead", "get started",
+        "lets start", "lets begin", "start working", "start building",
+        "begin building", "begin work", "get to work", "do it", "do it now",
+        "keep going", "keep working", "carry on", "start now", "right away",
+        "immediately"
+    };
+
+    // Strong build/fix verbs: unambiguous executable work, regardless of message length.
+    private static readonly string[] AutonomousVerbs =
+    {
+        "build", "implement", "develop", "fix", "refactor", "migrate", "port",
+        "debug", "optimize", "deploy", "configure", "integrate", "install",
+        "automate", "scaffold"
+    };
+
+    // Weaker creation verbs: Autonomous only for substantial requests (a long prompt implies
+    // real deliverable work; "make a joke" should never spin up the full runtime).
+    private static readonly string[] WeakAutonomousVerbs =
+    {
+        "create", "make", "write", "produce", "design", "set up"
+    };
+
+    // Analysis / research verbs: bounded tool-using work → Task mode.
+    private static readonly string[] TaskVerbs =
+    {
+        "analyze", "inspect", "review", "compare", "research", "investigate",
+        "summarize", "evaluate", "test", "examine", "explore", "diagnose",
+        "trace", "monitor", "benchmark", "profile", "identify", "find",
+        "read", "search for", "go through", "look at"
+    };
+
+    /// <summary>
+    /// Classifies a user message into an interaction mode.
+    /// </summary>
+    public static InteractionMode Classify(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return InteractionMode.Conversation;
+
+        string normalized = Normalize(message);
+        string[] tokens = Tokenize(normalized);
+
+        // 1. Explicit conversational intent wins over everything.
+        if (ContainsAny(tokens, GreetingMarkers)) return InteractionMode.Conversation;
+
+        // 1b. Live-data requests need the web/search tools — Task mode, never Conversation.
+        if (ContainsAny(tokens, LiveDataMarkers)) return InteractionMode.Task;
+
+        // 2. Explanation / informational questions are conversation — even with verbs inside
+        //    ("explain how to build X" asks for an explanation, it does not build X).
+        if (ContainsAny(tokens, ExplanationMarkers)) return InteractionMode.Conversation;
+
+        // 2b. Imperative / continuation commands → Task (tools available). Checked before the
+        //     verb lists so "begin building the project" never degrades to a chat reply.
+        if (ContainsAny(tokens, CommandMarkers)) return InteractionMode.Task;
+
+        // 3. Strong build/fix verbs → Autonomous.
+        if (ContainsAny(tokens, AutonomousVerbs)) return InteractionMode.Autonomous;
+
+        // 4. Weak creation verbs → Autonomous only when the request is substantial.
+        if (normalized.Length >= 40 && ContainsAny(tokens, WeakAutonomousVerbs))
+        {
+            return InteractionMode.Autonomous;
+        }
+
+        // 5. Analysis / research verbs → Task.
+        if (ContainsAny(tokens, TaskVerbs)) return InteractionMode.Task;
+
+        // 6. Fallback: short messages are conversation; anything substantial defaults to Task.
+        return normalized.Length < 40 ? InteractionMode.Conversation : InteractionMode.Task;
+    }
+
+    private static string Normalize(string message)
+    {
+        // Lowercase, strip apostrophes ("what's" → "whats") so markers match, collapse runs of
+        // whitespace.
+        string s = message.ToLowerInvariant().Replace("'", string.Empty, StringComparison.Ordinal);
+        var parts = s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        return string.Join(' ', parts);
+    }
+
+    private static string[] Tokenize(string normalized)
+        => normalized.Split(new[] { ' ', '\t', '\n', '\r', ',', '.', ';', ':', '!', '?', '(', ')', '"', '-', '_', '/', '\\', '&', '|', '+', '=', '#', '@', '$', '%', '^', '*', '~', '`', '<', '>', '[', ']', '{', '}' },
+            StringSplitOptions.RemoveEmptyEntries);
+
+    private static bool ContainsAny(string[] tokens, string[] markers)
+        => markers.Any(m => m.Contains(' ') ? HasPhrase(tokens, m) : tokens.Contains(m));
+
+    private static bool HasPhrase(string[] tokens, string phrase)
+    {
+        var words = phrase.Split(' ');
+        if (words.Length == 1) return tokens.Contains(words[0]);
+        for (int i = 0; i + words.Length <= tokens.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < words.Length; j++)
+            {
+                if (!string.Equals(tokens[i + j], words[j], StringComparison.Ordinal))
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+}
