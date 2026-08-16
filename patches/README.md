@@ -44,11 +44,3 @@ engine independently. The managed ABI must match the native `llama.dll` that
 `NativeEngineManager` deploys; struct-layout drift fails with
 "Unsupported ctx type" at runtime.
 
-## Klydis.McpServer (stub)
-
-`Klydis.McpServer/` contains a project file (`Klydis.McpServer.csproj`) and an
-empty `Tools/` directory but **no source files and is not part of
-`KlydisBeta.sln`**. It is an abandoned/planned MCP-server scaffold. If it stays
-unused, delete the directory; if it is resurrected, add it to the solution and
-wire it through the same `ModelContextProtocol` package `src/scratch.cs` was
-probing for (that scratch file has been removed).

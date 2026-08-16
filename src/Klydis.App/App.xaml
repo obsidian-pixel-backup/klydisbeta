@@ -14,11 +14,14 @@
                 <ResourceDictionary Source="Themes/Backgrounds/OceanDark.xaml" />
                 <ResourceDictionary Source="Themes/Accents/FluorescentDark.xaml" />
                 <ResourceDictionary Source="Themes/ThemeStyles.xaml" />
-                <!-- Markdown element styles (tables, code blocks, headings, quotes) shared by
-                     every MdXaml viewer; wired into the engine by MarkdownViewerStyler. -->
-                <ResourceDictionary Source="Themes/MarkdownStyles.xaml" />
-                <!-- Index 4: typography (font family/weight/style), hot-swapped by ThemeService. -->
+                <!-- Index 3: typography (font family/weight/style), hot-swapped by ThemeService.
+                     ThemeService replaces merged dictionaries BY INDEX (see ThemeService.cs), so
+                     this position must stay Typography — do not insert dictionaries before it. -->
                 <ResourceDictionary Source="Themes/Typography.xaml" />
+                <!-- Markdown element styles (tables, code blocks, headings, quotes) shared by
+                     every MdXaml viewer; wired into the engine by MarkdownViewerStyler. Kept
+                     after the fixed-index dictionaries for the same reason. -->
+                <ResourceDictionary Source="Themes/MarkdownStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <converters:EnumToBooleanConverter x:Key="EnumToBooleanConverter" />

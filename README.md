@@ -1,7 +1,3 @@
-<div align="center">
-
-<img src="assets/hero_banner.png" alt="Klydis Hero Banner" width="100%">
-
 # KlydisBeta
 
 **A high-performance, self-contained LLM inference engine & chat platform for Windows.**
@@ -11,8 +7,6 @@
 [![Framework](https://img.shields.io/badge/.NET-10.0-7015E6?style=for-the-badge&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Platform](https://img.shields.io/badge/Platform-Windows_x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://microsoft.com/windows)
 [![CUDA](https://img.shields.io/badge/GPU_Acceleration-CUDA_12-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://nvidia.com)
-
-</div>
 
 ---
 
@@ -34,12 +28,6 @@ Klydis is part of the [klydis.co](https://klydis.co) ecosystem, combining deep h
 - 🛠️ **Agentic Skill Orchestration**: Create, manage, and execute custom prompt skills, system personas, and automated workflow routines.
 - 🎨 **Mint & Dark Modern UI**: Built with custom XAML design system featuring Obsidian, Midnight, and Ocean backgrounds paired with Forest Mint, Fluorescent Cyan, and Amber accent themes.
 - 💾 **Prefix-Cached Multi-Turn Chat**: Uses `InteractiveExecutor` with native KV-cache prefix reuse (exact + partial), fast in-place context resets (`llama_kv_cache_seq_rm`), and SQLite persistence to keep multi-turn conversations fast without cache corruption.
-
-<div align="center">
-  <img src="assets/ui_mockup.png" alt="Klydis UI Mockup" width="85%">
-  <br>
-  <em>Modern, dark-themed developer workspace with real-time telemetry.</em>
-</div>
 
 ---
 
@@ -132,7 +120,7 @@ KlydisBeta/
 │       └── Helpers/             # Converters & UI thread dispatchers
 │
 └── tests/
-    └── Klydis.Core.Tests/       # 83+ unit & empirical stress tests
+    └── Klydis.Core.Tests/       # 440+ unit & empirical stress tests
 ```
 
 ---
