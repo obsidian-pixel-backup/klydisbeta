@@ -1391,11 +1391,13 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     }
                     else
                     {
-                        _logger.LogError(ex, "Error in background generation");
+                        _logger.LogError(ex, "Error in background generation (model={ModelPath}, architecture={Architecture}, promptChars={PromptChars}, tokensEmitted={TokenCount}).", CurrentModelPath, Architecture, prompt?.Length ?? 0, tokenCount);
                         generationException = ex;
                     }
-                    // Rotating log in %LOCALAPPDATA%\Klydis\logs (see KlydisLog).
-                    Klydis.Core.Diagnostics.KlydisLog.AppendChatDebug($"[{DateTime.Now:HH:mm:ss.fff}] INFERENCE EXCEPTION: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}{Environment.NewLine}");
+                    // Rotating log in %LOCALAPPDATA%\Klydis\logs (see KlydisLog). Full ex.ToString()
+                    // so inner exceptions (AggregateException from native interop, etc.) and all
+                    // stack frames survive in the durable chat_debug.log.
+                    Klydis.Core.Diagnostics.KlydisLog.AppendChatDebug($"[{DateTime.Now:HH:mm:ss.fff}] INFERENCE EXCEPTION (model={CurrentModelPath}, arch={Architecture}, promptChars={prompt?.Length ?? 0}, tokensEmitted={tokenCount}): {ex}{Environment.NewLine}");
                 }
                 finally
                 {

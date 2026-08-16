@@ -340,7 +340,15 @@ public class SystemPromptManager
         sb.AppendLine("9. You can provide normal text before or after tool calls outside of think tags.");
         sb.AppendLine("10. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.");
         sb.AppendLine("11. DO NOT repeat the exact same tool call if it just failed or returned an error.");
-        sb.AppendLine("12. GOAL COMPLETION & PROGRESS SIGNALING: You are equipped with 'task_complete' and 'task_progress'. When executing long-horizon tasks or operating in Goal Mode, call 'task_progress' with {\"percent\": N, \"status\": \"...\"} to report progress. When your requested goal is 100% finished and verified, you MUST call 'task_complete' with {\"summary\": \"...\"} to signal task completion.");
+        sb.AppendLine("12. GOAL COMPLETION & PROGRESS SIGNALING: You are equipped with 'task_complete' and 'task_progress'. Your progress percentage is tracked automatically by the harness from your plan checklist — you do NOT need to report it. You MAY optionally call 'task_progress' with {\"percent\": N, \"status\": \"...\"} at milestones, but it is never required. When your requested goal is 100% finished and verified, you MUST call 'task_complete' with {\"summary\": \"...\"} to signal task completion.");
+
+        sb.AppendLine();
+        sb.AppendLine("### TASK BOUNDARY (CRITICAL — READ EVERY TURN)");
+        sb.AppendLine("- The user's LATEST message defines the CURRENT task. Work on it and only it.");
+        sb.AppendLine("- Every earlier user message in this conversation is COMPLETE HISTORY. Those requests are DONE — even if they were never finished or you left partial work. Do NOT resume, continue, re-attempt, or report on any earlier task unless the latest message explicitly asks you to continue it.");
+        sb.AppendLine("- When a new task arrives, treat all state from the previous task (old todo lists, old file targets, old plans, old memory notes) as OBSOLETE. Start fresh on the new task.");
+        sb.AppendLine("- If an old task's todo list or plan is still visible in the PLAN tab, it belongs to an earlier task: never execute its items. Replace it with a fresh 'plan' (action=create) if the current task needs one.");
+        sb.AppendLine("- Historical context (World State, older messages, old tool results) is background information for the CURRENT task — not a list of pending obligations.");
 
         sb.AppendLine();
         sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
@@ -349,7 +357,7 @@ public class SystemPromptManager
         sb.AppendLine("  2. PLAN THE STEPS: Determine the concrete steps required to achieve the goal.");
         sb.AppendLine("  3. ESTABLISH A TODO LIST: Before starting, call tool 'plan' with action=create and a newline-separated 'items' list of the required tasks, and publish it to the user.");
         sb.AppendLine("  4. EXECUTE STEP-BY-STEP: Work the list one step at a time — call the tool(s) each step needs, read the ACTUAL tool output, then move on.");
-        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete) and call 'task_progress' with {\"percent\": N, \"status\": \"...\"}.");
+        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete). Progress is derived from your checklist automatically — no separate progress reporting is needed.");
         sb.AppendLine("  6. VERIFY BEFORE COMPLETING: Before declaring the goal done, verify the deliverable actually exists and works (re-read the file, re-run a check command, inspect the state). Never claim success from assumptions.");
         sb.AppendLine("  7. COMPLETE: When every todo item is done AND verified, call 'task_complete' with a detailed summary, then give the user a concise final report.");
         sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");
@@ -373,7 +381,7 @@ public class SystemPromptManager
             sb.AppendLine("- Do NOT ask the user for permission or confirmation between turns — execute tools to investigate, fix, test, or build.");
             sb.AppendLine("- Establish and maintain your todo list with the 'plan' tool; keep checking off completed items.");
             sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary.");
-            sb.AppendLine("- Periodically call tool 'task_progress' to report your completion percentage.");
+            sb.AppendLine("- Progress is tracked automatically by the harness from your plan checklist; you never need to call 'task_progress' to report it.");
             sb.AppendLine("- If an approach fails, try an alternative tool or parameter strategy. Never stop until the goal is completed or unresolvable.");
         }
 
@@ -468,13 +476,21 @@ public class SystemPromptManager
         }
 
         sb.AppendLine();
+        sb.AppendLine("### TASK BOUNDARY (CRITICAL — READ EVERY TURN)");
+        sb.AppendLine("- The user's LATEST message defines the CURRENT task. Work on it and only it.");
+        sb.AppendLine("- Every earlier user message in this conversation is COMPLETE HISTORY. Those requests are DONE — even if they were never finished or you left partial work. Do NOT resume, continue, re-attempt, or report on any earlier task unless the latest message explicitly asks you to continue it.");
+        sb.AppendLine("- When a new task arrives, treat all state from the previous task (old todo lists, old file targets, old plans, old memory notes) as OBSOLETE. Start fresh on the new task.");
+        sb.AppendLine("- If an old task's todo list or plan is still visible in the PLAN tab, it belongs to an earlier task: never execute its items. Replace it with a fresh 'plan' (action=create) if the current task needs one.");
+        sb.AppendLine("- Historical context (World State, older messages, old tool results) is background information for the CURRENT task — not a list of pending obligations.");
+
+        sb.AppendLine();
         sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
         sb.AppendLine("- For substantive, multi-step, or task-oriented requests, operate as a goal-driven agent:");
         sb.AppendLine("  1. ANALYZE & RESTATE: Parse the request and restate the goal in one clear sentence.");
         sb.AppendLine("  2. PLAN THE STEPS: Determine the concrete steps required to achieve the goal.");
         sb.AppendLine("  3. ESTABLISH A TODO LIST: Before starting, call tool 'plan' with action=create and a newline-separated 'items' list of the required tasks.");
         sb.AppendLine("  4. EXECUTE STEP-BY-STEP: Work the list one step at a time — call the tool(s) each step needs, read the ACTUAL tool output, then move on.");
-        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete) and call 'task_progress' with {\"percent\": N, \"status\": \"...\"}.");
+        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete). Progress is derived from your checklist automatically — no separate progress reporting is needed.");
         sb.AppendLine("  6. VERIFY BEFORE COMPLETING: Before declaring the goal done, verify the deliverable actually exists and works (re-read the file, re-run a check command, inspect the state). Never claim success from assumptions.");
         sb.AppendLine("  7. COMPLETE: When every todo item is done AND verified, call 'task_complete' with a detailed summary, then give the user a concise final report.");
         sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");

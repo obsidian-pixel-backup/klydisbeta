@@ -11,6 +11,18 @@
     <RootNamespace>Klydis.App</RootNamespace>
     <AssemblyName>Klydis</AssemblyName>
     <Description>Klydis - Self-contained local LLM orchestrator with premium UI</Description>
+
+    <!-- Product identity: surfaces in Klydis.exe properties, Add/Remove Programs, and is
+         what a code-signing certificate subject is matched against. -->
+    <Version>0.5.0</Version>
+    <AssemblyVersion>0.5.0.0</AssemblyVersion>
+    <FileVersion>0.5.0.0</FileVersion>
+    <InformationalVersion>0.5.0-beta</InformationalVersion>
+    <Product>Klydis</Product>
+    <Company>Klydis</Company>
+    <Authors>Klydis</Authors>
+    <Copyright>Copyright © Klydis 2026</Copyright>
+
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <!-- Manifest supplies DPI awareness + Windows compatibility. Runs asInvoker
          (no UAC prompt) so dotnet run / Start-Klydis.bat work from a normal
@@ -39,6 +51,29 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     
     <!-- Markdown rendering -->
+  </ItemGroup>
+
+  <!-- Runtime data files: SystemPromptManager probes AppDomain.CurrentDomain.BaseDirectory
+       for these, so they must sit next to Klydis.exe in every build — not just at the repo
+       CWD under `dotnet run` (otherwise an installed build silently falls back to the generic
+       assistant persona). -->
+  <ItemGroup>
+    <Content Include="..\..\klydis master system prompt.md"
+             Link="klydis master system prompt.md"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\UserStyle_Modes.md"
+             Link="UserStyle_Modes.md"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Bundled skills: only assets/skills/custom ships (the awesome-llm-skills and
+       nvidia-skills submodules are uninitialised and would otherwise produce empty globs).
+       SkillLibraryManager treats BaseDirectory\assets\skills as read-only bundled content and
+       seeds the user-writable copy (%USERPROFILE%\.klydis\skills) from it on first run. -->
+  <ItemGroup>
+    <Content Include="..\..\assets\skills\custom\**\*"
+             Link="assets\skills\custom\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

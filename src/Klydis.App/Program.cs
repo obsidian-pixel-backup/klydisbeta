@@ -10,6 +10,10 @@ public class Program
     [STAThread]
     public static void Main()
     {
+        // Session banner (PID, versions, timestamp) so multi-session logs are separable and
+        // a crash is distinguishable from a clean shutdown.
+        Klydis.Core.Diagnostics.CrashLog.WriteSessionBanner();
+
         // NOTE: The legacy GGML_CUDA_FORCE_CUBLAS / GGML_CUDA_DMMV_F16 env vars were removed:
         // on modern llama.cpp builds they force the cuBLAS / f16 DMMV kernels, which are
         // measurably slower than the default native CUDA kernels on most models. Leave the
@@ -102,7 +106,7 @@ public class Program
         catch (Exception ex)
         {
             Console.WriteLine("FATAL ERROR: " + ex.ToString());
-            Klydis.Core.Diagnostics.KlydisLog.AppendNativeLog($"FATAL ERROR: {ex}{Environment.NewLine}");
+            Klydis.Core.Diagnostics.CrashLog.WriteFatal(ex, "Program.Main");
         }
     }
 }

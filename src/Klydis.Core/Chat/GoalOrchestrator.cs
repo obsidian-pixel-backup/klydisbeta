@@ -95,19 +95,11 @@ public class GoalOrchestrator(
     /// task_complete claim is accepted only when every gating check passes — here, the
     /// session's plan has no open items. The model's opinion that it is done is not
     /// sufficient; real "done" requires the harness to confirm the checklist is empty.
+    /// Owned by <see cref="Klydis.Core.Tasks.AgentSupervisor"/>; this delegates so the
+    /// legacy orchestrator and the live loop always agree on the verdict.
     /// </summary>
     public static GoalCompletionVerdict EvaluateCompletion(IReadOnlyList<string> openPlanItems)
-    {
-        if (openPlanItems.Count == 0)
-            return new GoalCompletionVerdict(true, null);
-
-        var listed = openPlanItems.Count <= 3
-            ? string.Join("; ", openPlanItems)
-            : string.Join("; ", openPlanItems.Take(3)) + $"; (+{openPlanItems.Count - 3} more)";
-
-        return new GoalCompletionVerdict(false,
-            $"{openPlanItems.Count} plan item(s) still open: {listed}");
-    }
+        => Klydis.Core.Tasks.AgentSupervisor.EvaluateCompletion(openPlanItems);
 
     /// <summary>
     /// Executes an autonomous long-horizon goal loop.
@@ -392,7 +384,7 @@ public class GoalOrchestrator(
                $"1. Review the execution state above — it is authoritative. Do not redo completed items.\n" +
                $"2. If your requested goal is 100% complete AND every completion criterion is checked off, call tool 'task_complete' with argument {{\"summary\": \"<summary>\"}}.\n" +
                $"3. If further work or tool calls are required, proceed immediately with the next step using <tool_call>.\n" +
-               $"4. Periodically call tool 'task_progress' to report your completion percentage.\n" +
+               $"4. Progress is tracked automatically by the harness from your plan checklist; do not report it yourself.\n" +
                $"5. Do NOT give up or ask the user for confirmation — work autonomously until the goal is fully accomplished.";
     }
 }

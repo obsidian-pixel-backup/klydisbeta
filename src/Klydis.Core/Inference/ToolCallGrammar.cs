@@ -64,15 +64,21 @@ public static class ToolCallGrammar
     /// NOTE: GBNF matches byte-wise against the tokenizer's pieces; this grammar is applied
     /// from the moment the opener is seen. Validate against a real qwen model before
     /// enabling <see cref="InferenceEngine.EnableToolGrammarConstrainedDecoding"/>.
+    ///
+    /// CRITICAL: rule names must avoid '_'. The deployed native engine (llama.cpp b10333+)
+    /// only accepts [a-zA-Z0-9-] in rule names — an underscore makes the parser reject the
+    /// whole grammar ("failed to parse grammar"), llama_sampler_init_grammar returns NULL,
+    /// and the app access-violates on the next sample (Klydis crash 2026-08-16). Hyphenated
+    /// rule names (tool-calls / tool-call) parse identically.
     /// </summary>
     public static string BuildQwenNativeGbnf() =>
-        "root       ::= tool_calls rest\n" +
-        "tool_calls ::= tool_call*\n" +
-        "tool_call  ::= \"<tool_call>\" ws function ws ( \"</tool_call>\" ws )?\n" +
-        "function   ::= \"<function=\" name \">\" parameter* \"</function>\"\n" +
-        "parameter  ::= \"<parameter=\" name \">\" value* \"</parameter>\"\n" +
-        "name       ::= [a-zA-Z0-9_.-]+\n" +
-        "value      ::= [^\\x00]\n" +
-        "ws         ::= [ \\t\\n]*\n" +
-        "rest       ::= [^\\x00]*";
+        "root        ::= tool-calls rest\n" +
+        "tool-calls  ::= tool-call*\n" +
+        "tool-call   ::= \"<tool_call>\" ws function ws ( \"</tool_call>\" ws )?\n" +
+        "function    ::= \"<function=\" name \">\" parameter* \"</function>\"\n" +
+        "parameter   ::= \"<parameter=\" name \">\" value* \"</parameter>\"\n" +
+        "name        ::= [a-zA-Z0-9_.-]+\n" +
+        "value       ::= [^\\x00]\n" +
+        "ws          ::= [ \\t\\n]*\n" +
+        "rest        ::= [^\\x00]*";
 }

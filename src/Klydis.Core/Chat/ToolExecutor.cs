@@ -81,10 +81,22 @@ public class ToolExecutor(
     Klydis.Core.RAG.VectorStore? vectorStore = null,
     Klydis.Core.RAG.HybridRetriever? hybridRetriever = null,
     Klydis.Core.RAG.DocumentIngestionEngine? ingestionEngine = null,
-    Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null)
+    Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null,
+    Klydis.Core.Tasks.TaskManager? taskManager = null)
 {
     private static readonly HttpClient _httpClient = new HttpClient();
     private readonly StealthBrowserService? _stealthBrowserService = stealthBrowserService;
+
+    /// <summary>
+    /// The task currently executing, when the turn resolved one. Set by ChatEngine after
+    /// task resolution and cleared when the turn ends. Drives (a) plan persistence, which
+    /// mirrors to the task record so the checklist follows the task, and (b) queue reads,
+    /// which are scoped to this task so the model never sees another task's queued items.
+    /// Null outside a turn (direct invocations, tests) → legacy session-scoped behavior.
+    /// </summary>
+    public string? CurrentTaskId { get; set; }
+
+    public Klydis.Core.Tasks.TaskManager? TaskManager { get; set; } = taskManager;
     
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public Klydis.Core.Skills.SkillLibraryManager? SkillLibraryManager { get; set; } = skillLibraryManager;
@@ -1830,8 +1842,11 @@ public class ToolExecutor(
 
         if (msg == null)
         {
-            var pendingSteer = MessageQueue.GetPendingSteer(sessionId);
-            msg = pendingSteer.FirstOrDefault() ?? MessageQueue.GetPending(sessionId).FirstOrDefault();
+            // Task-scoped reads: the model may only incorporate queued messages that belong
+            // to the CURRENT task. Old-task or untagged legacy items are invisible to it —
+            // isolation is enforced by the runtime, not by prompting.
+            var pendingSteer = MessageQueue.GetPendingSteer(sessionId, CurrentTaskId);
+            msg = pendingSteer.FirstOrDefault() ?? MessageQueue.GetPending(sessionId, CurrentTaskId).FirstOrDefault();
         }
 
         if (msg == null)
@@ -2432,13 +2447,88 @@ public class ToolExecutor(
     // lazily restored on first access after a restart, so a long-horizon task's todo list
     // survives app restarts and model switches instead of starting from zero.
     private sealed record PlanTask(string Text, bool Done);
-    private sealed record PlanSnapshot(List<PlanTask>? Items, int Progress);
+    private sealed record PlanSnapshot(List<PlanTask>? Items, int Progress, string? OwnerUserMessage = null);
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<PlanTask>> _sessionPlans = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _sessionPlanProgress = new();
+    // Which user message the plan belongs to (its text, matching ChatEngine's convention for
+    // identifying the current user message). The plan is scoped to the TASK in that message:
+    // when a LATER user message starts a new task in the same chat, the harness must stop
+    // presenting the old checklist as active work (the observed contamination: the model kept
+    // executing the previous task's plan items after the user moved on). An unset owner (null)
+    // means "no task boundary recorded" and is treated as current-task state, so legacy plans
+    // behave exactly as before.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _sessionPlanOwner = new();
     // Sessions already hydrated from the store, so the lazy restore hits the DB at most once
     // per session per process (the getters below are called on the UI thread every 2s).
     private readonly HashSet<string> _planLoadAttempted = new();
+
+    /// <summary>
+    /// The user message whose turn is currently executing. Set by ChatEngine at the start of
+    /// each StreamResponseAsync call and cleared when the turn ends. When the model mutates
+    /// the session plan mid-turn, this text is stamped as the plan's owner — the durable
+    /// task boundary that lets the harness distinguish a live checklist from an obsolete one
+    /// left over from an earlier task in the same chat. Null outside a turn (direct tool
+    /// invocations, tests), in which case no owner is recorded.
+    /// </summary>
+    public string? CurrentTaskUserMessage { get; set; }
+
+    /// <summary>
+    /// The text of the user message the session's plan belongs to, or null when the plan has
+    /// no recorded owner (legacy plans, or plans never mutated inside a turn). Used by
+    /// ChatEngine to decide whether the checklist is the CURRENT task's plan or a previous
+    /// task's — a plan whose owner is not the current user message must not be injected as
+    /// active work with a continuation contract.
+    /// </summary>
+    public string? GetSessionPlanOwner(string sessionId)
+    {
+        EnsureSessionPlanLoaded(sessionId);
+        return string.IsNullOrEmpty(sessionId) || !_sessionPlanOwner.TryGetValue(sessionId, out var owner)
+            ? null
+            : owner;
+    }
+
+    /// <summary>
+    /// The harness-owned initial planner: establishes a baseline scaffold plan for a session
+    /// WITHOUT a tool call. The runtime creates the plan; the model refines or replaces it.
+    /// Identical in effect to the 'plan' tool's create path — same storage, same owner
+    /// stamping, same persistence — so every downstream consumer (prompt injection, PLAN tab,
+    /// completion gate, stagnation tracker) sees one plan format. The scaffold is deliberately
+    /// generic: it gives the task a durable backbone from the first turn; the model is told
+    /// to replace it with a task-specific checklist via 'plan' (action=create) when it has
+    /// one.
+    /// </summary>
+    public async Task SeedSessionPlanAsync(string sessionId, IReadOnlyList<string> items)
+    {
+        string key = sessionId ?? string.Empty;
+        EnsureSessionPlanLoaded(key);
+        var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
+        plan.Clear();
+        foreach (var item in items)
+        {
+            if (!string.IsNullOrWhiteSpace(item))
+            {
+                plan.Add(new PlanTask(item.Trim(), false));
+            }
+        }
+        _sessionPlanOwner[key] = CurrentTaskUserMessage ?? string.Empty;
+        _sessionPlanProgress.TryRemove(key, out _);
+        try
+        {
+            var snapshot = new PlanSnapshot(plan.ToList(), -1, GetSessionPlanOwner(key));
+            string json = System.Text.Json.JsonSerializer.Serialize(snapshot);
+            await messageStore.SaveSessionPlanAsync(key, json);
+            if (TaskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
+            {
+                await TaskManager.SavePlanAsync(CurrentTaskId, json);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to persist harness-seeded plan for {SessionId}.", sessionId);
+        }
+        logger.LogInformation("Harness seeded initial plan ({Count} items) for session {SessionId}.", plan.Count, sessionId);
+    }
 
     /// <summary>
     /// Hydrates a session's persisted plan (if any) into the in-memory dictionaries. Called
@@ -2466,6 +2556,10 @@ public class ToolExecutor(
                     {
                         _sessionPlanProgress[sessionId] = Math.Clamp(snapshot.Progress, 0, 100);
                     }
+                    if (!string.IsNullOrEmpty(snapshot.OwnerUserMessage))
+                    {
+                        _sessionPlanOwner[sessionId] = snapshot.OwnerUserMessage;
+                    }
                 }
             }
         }
@@ -2473,6 +2567,26 @@ public class ToolExecutor(
         {
             logger.LogWarning(ex, "Failed to load persisted plan for session {SessionId}.", sessionId);
         }
+    }
+
+    /// <summary>
+    /// Resets the session's in-memory plan state and re-hydrates from the persisted
+    /// <c>sessions.plan_json</c>. Called by ChatEngine after a task switch: the old task's
+    /// plan is already mirrored to its record, <c>sessions.plan_json</c> is set to the new
+    /// task's plan (or cleared), and this re-arms the live checklist so the model never sees
+    /// the previous task's items.
+    /// </summary>
+    public void ResetSessionPlanState(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return;
+        lock (_planLoadAttempted)
+        {
+            _planLoadAttempted.Remove(sessionId);
+        }
+        _sessionPlans.TryRemove(sessionId, out _);
+        _sessionPlanProgress.TryRemove(sessionId, out _);
+        _sessionPlanOwner.TryRemove(sessionId, out _);
+        EnsureSessionPlanLoaded(sessionId);
     }
 
     /// <summary>
@@ -2664,6 +2778,7 @@ public class ToolExecutor(
         string action = (GetStringArg(request.Arguments, "action") ?? "show").Trim().ToLowerInvariant();
         var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
 
+        bool planMutated = false;
         switch (action)
         {
             case "create":
@@ -2674,20 +2789,33 @@ public class ToolExecutor(
                 {
                     plan.Add(new PlanTask(line, false));
                 }
+                planMutated = true;
                 break;
             case "complete":
                 MarkPlanItems(request, plan, done: true);
+                planMutated = true;
                 break;
             case "remove":
                 MarkPlanItems(request, plan, done: false, remove: true);
+                planMutated = true;
                 break;
             case "clear":
                 plan.Clear();
                 _sessionPlanProgress.TryRemove(sessionId ?? string.Empty, out _);
+                planMutated = true;
                 break;
             case "show":
             default:
                 break;
+        }
+
+        // The plan now belongs to the task in the user message currently executing. Stamped on
+        // every mutation (including checking off an item), so a plan the model re-engages on a
+        // later message is adopted as that message's task plan — and one it never touches again
+        // stays bound to the message that created it.
+        if (planMutated)
+        {
+            _sessionPlanOwner[key] = CurrentTaskUserMessage ?? string.Empty;
         }
 
         if (request.Arguments != null && request.Arguments.TryGetValue("progress", out var progObj))
@@ -2699,13 +2827,20 @@ public class ToolExecutor(
             }
         }
 
-        // Checkpoint: persist the plan + progress so the todo list survives restarts and
-        // model switches (long-horizon tasks keep their step-level plan across sessions).
+        // Checkpoint: persist the plan + progress + owner so the todo list (and its task
+        // boundary) survives restarts and model switches (long-horizon tasks keep their
+        // step-level plan across sessions). Mirrored to the current task's record so the
+        // checklist follows the TASK — switching to a new task never inherits it, and
+        // reopening a task restores its plan.
         try
         {
-            var snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key));
+            var snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key), GetSessionPlanOwner(key));
             string json = System.Text.Json.JsonSerializer.Serialize(snapshot);
             await messageStore.SaveSessionPlanAsync(key, json);
+            if (TaskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
+            {
+                await TaskManager.SavePlanAsync(CurrentTaskId, json);
+            }
         }
         catch (Exception ex)
         {

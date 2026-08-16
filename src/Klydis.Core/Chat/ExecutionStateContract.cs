@@ -11,13 +11,30 @@ namespace Klydis.Core.Chat;
 /// </summary>
 public enum TaskStatus
 {
+    /// <summary>Task created but not yet planned (legacy alias for Created).</summary>
     Pending,
+    /// <summary>Task is actively executing.</summary>
     Running,
+    /// <summary>Execution is paused waiting on an external dependency (legacy name kept for compatibility).</summary>
     Waiting,
+    /// <summary>Execution cannot proceed without intervention.</summary>
     Blocked,
+    /// <summary>Harness-verified completion.</summary>
     Completed,
+    /// <summary>Execution failed and was halted.</summary>
     Failed,
-    Cancelled
+    /// <summary>Execution was cancelled (user or budget).</summary>
+    Cancelled,
+    /// <summary>Plan generation phase (harness-owned).</summary>
+    Planning,
+    /// <summary>Plan established; ready for execution to begin.</summary>
+    Ready,
+    /// <summary>Running the verification gates before completion.</summary>
+    Verifying,
+    /// <summary>Waiting on the user for input (queued steer, clarification).</summary>
+    AwaitingUser,
+    /// <summary>Paused mid-execution, resumable.</summary>
+    Paused
 }
 
 /// <summary>

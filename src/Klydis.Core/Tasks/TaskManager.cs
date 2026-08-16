@@ -1,0 +1,313 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Klydis.Core.Chat;
+using Klydis.Core.Memory;
+using Microsoft.Extensions.Logging;
+using TaskStatus = Klydis.Core.Chat.TaskStatus;
+
+namespace Klydis.Core.Tasks;
+
+/// <summary>
+/// Owns task identity and lifecycle. This is the harness's answer to the architectural
+/// finding that plan/queue/artifacts were session-scoped: the session remains a
+/// conversation, but execution state now attaches to a durable <see cref="AgentTask"/>.
+/// Every user message is classified (new / continue / steer / reopen) BEFORE the model
+/// runs, the decision is persisted, and the plan follows the task — so a new task in the
+/// same chat can never inherit an old task's checklist, and a steer never loses the
+/// current one. The classifier is intentionally deterministic (heuristic) for now; the
+/// review allows model-assisted classification to evolve it later. Failures degrade to
+/// legacy session-scoped behavior (no task), never to a broken turn.
+/// </summary>
+public class TaskManager(
+    MessageStore store,
+    ILogger<TaskManager>? logger = null)
+{
+    private readonly MessageStore _store = store ?? throw new ArgumentNullException(nameof(store));
+    private readonly ILogger<TaskManager>? _logger = logger;
+
+    // Current task per session, plus the hydration guard so the DB is hit at most once per
+    // session per process (the getters can be called on the UI thread on a timer).
+    private readonly ConcurrentDictionary<string, AgentTask> _currentBySession = new();
+    private readonly HashSet<string> _hydrated = new();
+
+    // Words that mark an explicit relationship to the current task ("also add X",
+    // "use Y instead", "change Z", "continue"). Detected first: a steer marker makes the
+    // message part of the current task even when it also contains task verbs.
+    private static readonly string[] SteerMarkers =
+    {
+        "also", "instead", "actually", "but", "additionally", "however", "and now",
+        "now make", "can you", "please", "continue", "keep going", "keep working",
+        "still", "don't", "stop", "wait", "change", "update", "adjust", "replace",
+        "switch", "remember", "as well", "on top of", "furthermore", "moreover"
+    };
+
+    // Verbs that imply a fresh multi-step piece of work. Gated by length and by NOT echoing
+    // the current objective, so short steers and plain follow-ups never misfire.
+    private static readonly string[] TaskActionVerbs =
+    {
+        "build", "create", "implement", "develop", "refactor", "migrate", "port",
+        "optimize", "analyze", "investigate", "research", "debug", "fix", "test",
+        "design", "configure", "integrate", "set up", "make", "write", "document",
+        "compare", "evaluate", "review", "add", "install", "deploy", "summarize", "produce"
+    };
+
+    private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "and", "for", "with", "from", "this", "that", "your", "you", "are", "was",
+        "were", "have", "has", "had", "will", "would", "should", "could", "can", "into",
+        "about", "over", "under", "than", "then", "them", "they", "what", "when", "where",
+        "which", "while", "there", "here", "each", "also", "just", "very", "not", "but",
+        "all", "any", "some", "more", "most", "other", "such", "only", "own", "same"
+    };
+
+    /// <summary>
+    /// Loads a task by id directly from the store (bypasses the current-task cache; used to
+    /// read a superseded or terminal task, e.g. for the completion gate or a reopen).
+    /// </summary>
+    public async Task<AgentTask?> GetTaskAsync(string taskId)
+    {
+        if (string.IsNullOrEmpty(taskId)) return null;
+        try
+        {
+            return await _store.GetTaskAsync(taskId);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to load task {TaskId}.", taskId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The session's current task, or null when none exists yet (legacy session with no
+    /// task rows and no plan). Hydrates lazily from the store; a legacy session whose
+    /// <c>sessions.plan_json</c> predates tasks gets a task created to carry that plan, so
+    /// existing chats keep their checklists without any migration step on the user's side.
+    /// </summary>
+    public async Task<AgentTask?> GetCurrentTaskAsync(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return null;
+        await EnsureHydratedAsync(sessionId);
+        return _currentBySession.TryGetValue(sessionId, out var task) ? task : null;
+    }
+
+    /// <summary>
+    /// Classifies the user message against the session's current task and returns the task
+    /// the message belongs to — creating, reopening, or reusing it and persisting the
+    /// decision. The result is the authoritative task context for the turn: the plan shown,
+    /// the queue offered, and the completion gate all follow it.
+    /// </summary>
+    public async Task<AgentTask> ResolveOrCreateCurrentTaskAsync(string sessionId, string userMessage)
+    {
+        var current = await GetCurrentTaskAsync(sessionId);
+        var kind = Resolve(userMessage, current);
+
+        AgentTask result;
+        switch (kind)
+        {
+            case TaskResolutionKind.NewTask:
+                result = AgentTask.Create(sessionId, userMessage.Trim());
+                await SaveTaskAsync(result);
+                _currentBySession[sessionId] = result;
+                _logger?.LogInformation(
+                    "Task resolution: NEW TASK {TaskId} for session {SessionId} (previous task: {Previous}). Objective: {Objective}",
+                    result.TaskId, sessionId, current?.TaskId ?? "(none)", Truncate(result.Objective));
+                break;
+
+            case TaskResolutionKind.ReopenTask when current != null:
+                // Completed task being resumed: back to Running through the guarded state
+                // machine, plan restored by the caller (the plan follows the task record, so
+                // switching back re-arms its checklist).
+                result = TaskStateMachine.TryTransition(current, TaskStatus.Running)
+                         ?? current with { UpdatedAtUtc = DateTime.UtcNow };
+                await SaveTaskAsync(result);
+                _currentBySession[sessionId] = result;
+                _logger?.LogInformation("Task resolution: REOPEN TASK {TaskId} for session {SessionId}.", result.TaskId, sessionId);
+                break;
+
+            case TaskResolutionKind.SteerTask when current != null:
+                // Same task, modified in place. The objective stays the anchor; the model
+                // refines the plan via the plan tool as before.
+                result = current with { UpdatedAtUtc = DateTime.UtcNow };
+                await SaveTaskAsync(result);
+                _currentBySession[sessionId] = result;
+                _logger?.LogInformation("Task resolution: STEER TASK {TaskId} for session {SessionId}.", result.TaskId, sessionId);
+                break;
+
+            default:
+                result = current ?? AgentTask.Create(sessionId, userMessage.Trim());
+                if (current == null)
+                {
+                    await SaveTaskAsync(result);
+                }
+                else
+                {
+                    result = result with { UpdatedAtUtc = DateTime.UtcNow };
+                    await SaveTaskAsync(result);
+                }
+                _currentBySession[sessionId] = result;
+                _logger?.LogInformation("Task resolution: CONTINUE TASK {TaskId} for session {SessionId}.", result.TaskId, sessionId);
+                break;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Deterministic classification. Order matters: explicit relationship language wins
+    /// (steer), then a substantial fresh-task phrasing that doesn't echo the objective
+    /// (new), otherwise the message continues the current task.
+    /// </summary>
+    public TaskResolutionKind Resolve(string userMessage, AgentTask? current)
+    {
+        if (current == null) return TaskResolutionKind.NewTask;
+        if (string.IsNullOrWhiteSpace(userMessage)) return TaskResolutionKind.ContinueTask;
+
+        string lower = userMessage.Trim().ToLowerInvariant();
+
+        if (current.Status == TaskStatus.Completed)
+        {
+            // The last task is sealed. A message that clearly returns to it reopens it;
+            // anything else starts fresh.
+            return Overlaps(userMessage, current.Objective)
+                ? TaskResolutionKind.ReopenTask
+                : TaskResolutionKind.NewTask;
+        }
+
+        if (SteerMarkers.Any(m => lower.Contains(m, StringComparison.OrdinalIgnoreCase)))
+        {
+            return TaskResolutionKind.SteerTask;
+        }
+
+        bool substantial = lower.Length >= 40
+            && TaskActionVerbs.Any(v => lower.Contains(v, StringComparison.OrdinalIgnoreCase));
+        bool echoesObjective = Overlaps(userMessage, current.Objective);
+
+        if (substantial && !echoesObjective)
+        {
+            return TaskResolutionKind.NewTask;
+        }
+
+        return TaskResolutionKind.ContinueTask;
+    }
+
+    /// <summary>
+    /// Persists the task's plan JSON to its record (used by the plan tool's mutation path so
+    /// the checklist always follows the task). Null clears it.
+    /// </summary>
+    public async Task SavePlanAsync(string taskId, string? planJson)
+    {
+        if (string.IsNullOrEmpty(taskId)) return;
+        try
+        {
+            await _store.SaveTaskPlanAsync(taskId, planJson);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to persist plan for task {TaskId}.", taskId);
+        }
+    }
+
+    /// <summary>
+    /// The task's persisted plan JSON, or null. Used when switching back to a task whose
+    /// plan must be restored into the session's active plan slot.
+    /// </summary>
+    public async Task<string?> GetPlanAsync(string taskId)
+    {
+        if (string.IsNullOrEmpty(taskId)) return null;
+        try
+        {
+            var task = await _store.GetTaskAsync(taskId);
+            return task?.PlanJson;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to read plan for task {TaskId}.", taskId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Persists a task (upsert). Public so the runtime (e.g. the completion gate sealing a
+    /// task) can persist supervised state transitions through the same guarded path.
+    /// </summary>
+    public async Task SaveTaskAsync(AgentTask task)
+    {
+        try
+        {
+            await _store.SaveTaskAsync(task);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to persist task {TaskId}.", task.TaskId);
+        }
+    }
+
+    private async Task EnsureHydratedAsync(string sessionId)
+    {
+        lock (_hydrated)
+        {
+            if (_hydrated.Contains(sessionId)) return;
+            _hydrated.Add(sessionId);
+        }
+
+        try
+        {
+            var latest = await _store.GetLatestTaskAsync(sessionId);
+            if (latest != null)
+            {
+                _currentBySession[sessionId] = latest;
+                return;
+            }
+
+            // Legacy migration: a session with a plan but no task yet. Carry the plan into a
+            // freshly created task so existing chats keep their checklists under the new
+            // task-scoped model without any user-visible migration.
+            var session = await _store.GetSessionAsync(sessionId);
+            if (session?.PlanJson != null)
+            {
+                var legacy = AgentTask.Create(sessionId, session.Title ?? "Conversation task");
+                legacy = legacy with { PlanJson = session.PlanJson };
+                await SaveTaskAsync(legacy);
+                _currentBySession[sessionId] = legacy;
+                _logger?.LogInformation(
+                    "Migrated legacy session {SessionId} to task {TaskId} carrying its existing plan.",
+                    sessionId, legacy.TaskId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to hydrate task state for session {SessionId}; continuing without task scoping.", sessionId);
+        }
+    }
+
+    private static bool Overlaps(string a, string b)
+    {
+        var wa = MeaningfulWords(a);
+        var wb = MeaningfulWords(b);
+        if (wa.Count == 0 || wb.Count == 0) return false;
+        int shared = wa.Count(w => wb.Contains(w));
+        return (double)shared / Math.Min(wa.Count, wb.Count) >= 0.35;
+    }
+
+    private static List<string> MeaningfulWords(string text)
+    {
+        var words = text.Split(new[] { ' ', '\t', '\n', '\r', ',', '.', ';', ':', '(', ')', '"', '\'', '?', '!', '-', '_', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        var result = new List<string>();
+        foreach (var raw in words)
+        {
+            string word = raw.Trim().TrimEnd('.', ',', '!', '?').ToLowerInvariant();
+            if (word.Length >= 4 && !StopWords.Contains(word) && word.All(char.IsLetterOrDigit))
+            {
+                result.Add(word);
+            }
+        }
+        return result;
+    }
+
+    private static string Truncate(string text, int max = 120)
+        => text.Length <= max ? text : text[..max] + "…";
+}

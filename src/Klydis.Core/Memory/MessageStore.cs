@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Klydis.Core.Chat;
+using Klydis.Core.Tasks;
+using TaskStatus = Klydis.Core.Chat.TaskStatus;
 
 namespace Klydis.Core.Memory;
 
@@ -207,8 +209,40 @@ public class MessageStore
                 status INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
-                position INTEGER NOT NULL DEFAULT 0
+                position INTEGER NOT NULL DEFAULT 0,
+                task_id TEXT
             );
+
+            -- Durable tasks: the unit of agentic work inside a session. A conversation
+            -- contains many tasks; execution state (plan, queue, artifacts, completion)
+            -- attaches to the task, so a new task in the same chat never inherits an old
+            -- task's checklist, and a superseded task remains resumable. task_id is the
+            -- stable identity every plan/queue read keys off.
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                plan_json TEXT,
+                summary TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id, created_at);
+
+            -- Execution runs: one continuous attempt at a task. The durable anchor of the
+            -- Task → Run → Step → Turn → Generation hierarchy, so a restart can reconstruct
+            -- which run was executing and how far it got (the checkpoint/recovery phase reads
+            -- this before considering event sourcing).
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                turn_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id, started_at);
 
             -- FTS5 Virtual Table for full-text search
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
@@ -268,6 +302,20 @@ public class MessageStore
         {
             await using var alterCmd = connection.CreateCommand();
             alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN position INTEGER NOT NULL DEFAULT 0;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
+
+        // Task identity on queued messages: items are stamped with the task they belong to so
+        // the model only ever sees the CURRENT task's queue. Legacy rows stay NULL and fall
+        // back to session-scoped behavior.
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN task_id TEXT;";
             await alterCmd.ExecuteNonQueryAsync();
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
@@ -412,6 +460,147 @@ public class MessageStore
     }
 
     /// <summary>
+    /// The most recent task for a session (the current task), or null when the session has
+    /// no tasks yet. "Most recent" by creation time; superseded tasks remain queryable via
+    /// <see cref="GetTaskAsync"/> so a task can be reopened later.
+    /// </summary>
+    public async Task<AgentTask?> GetLatestTaskAsync(string sessionId)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT task_id, session_id, objective, status, created_at, updated_at, plan_json, summary
+            FROM tasks
+            WHERE session_id = @sessionId
+            ORDER BY created_at DESC, task_id DESC
+            LIMIT 1;";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            return ReadTask(reader);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Loads a task by id (used to restore a superseded task's plan when it is reopened).
+    /// </summary>
+    public async Task<AgentTask?> GetTaskAsync(string taskId)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT task_id, session_id, objective, status, created_at, updated_at, plan_json, summary
+            FROM tasks
+            WHERE task_id = @taskId;";
+        command.Parameters.AddWithValue("@taskId", taskId);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            return ReadTask(reader);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Upserts a task row. The task record is the durable home of the objective, status, and
+    /// plan for one unit of agentic work inside a session.
+    /// </summary>
+    public async Task SaveTaskAsync(AgentTask task)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO tasks (task_id, session_id, objective, status, created_at, updated_at, plan_json, summary)
+            VALUES (@taskId, @sessionId, @objective, @status, @createdAt, @updatedAt, @planJson, @summary);
+        ";
+        command.Parameters.AddWithValue("@taskId", task.TaskId);
+        command.Parameters.AddWithValue("@sessionId", task.SessionId);
+        command.Parameters.AddWithValue("@objective", task.Objective);
+        command.Parameters.AddWithValue("@status", task.Status.ToString());
+        command.Parameters.AddWithValue("@createdAt", task.CreatedAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@updatedAt", task.UpdatedAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@planJson", (object?)task.PlanJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("@summary", (object?)task.Summary ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Updates a task's plan JSON in place (the plan follows the task). Null clears it.
+    /// </summary>
+    public async Task SaveTaskPlanAsync(string taskId, string? planJson)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE tasks SET plan_json = @plan, updated_at = @now WHERE task_id = @taskId;";
+        command.Parameters.AddWithValue("@plan", planJson ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("o"));
+        command.Parameters.AddWithValue("@taskId", taskId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static AgentTask ReadTask(System.Data.Common.DbDataReader reader)
+    {
+        return new AgentTask(
+            TaskId: reader.GetString(0),
+            SessionId: reader.GetString(1),
+            Objective: reader.GetString(2),
+            Status: Enum.TryParse<TaskStatus>(reader.GetString(3), out var status) ? status : TaskStatus.Running,
+            CreatedAtUtc: DateTime.Parse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            UpdatedAtUtc: DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            PlanJson: reader.IsDBNull(6) ? null : reader.GetString(6),
+            Summary: reader.IsDBNull(7) ? null : reader.GetString(7));
+    }
+
+    /// <summary>
+    /// Upserts a run record (start and end of one execution attempt at a task).
+    /// </summary>
+    public async Task SaveRunAsync(TaskRun run)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO runs (run_id, task_id, status, started_at, ended_at, turn_count)
+            VALUES (@runId, @taskId, @status, @startedAt, @endedAt, @turnCount);
+        ";
+        command.Parameters.AddWithValue("@runId", run.RunId);
+        command.Parameters.AddWithValue("@taskId", run.TaskId);
+        command.Parameters.AddWithValue("@status", run.Status.ToString());
+        command.Parameters.AddWithValue("@startedAt", run.StartedAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@endedAt", (object?)(run.EndedAtUtc?.ToString("o")) ?? DBNull.Value);
+        command.Parameters.AddWithValue("@turnCount", run.TurnCount);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// All runs for a task, oldest first — the durable execution history used to answer
+    /// "which run was executing and how did it end?" after a restart.
+    /// </summary>
+    public async Task<List<TaskRun>> GetRunsAsync(string taskId)
+    {
+        var result = new List<TaskRun>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT run_id, task_id, status, started_at, ended_at, turn_count FROM runs WHERE task_id = @taskId ORDER BY started_at ASC;";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new TaskRun(
+                RunId: reader.GetString(0),
+                TaskId: reader.GetString(1),
+                Status: Enum.TryParse<RunStatus>(reader.GetString(2), out var status) ? status : RunStatus.Running,
+                StartedAtUtc: DateTime.Parse(reader.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                EndedAtUtc: reader.IsDBNull(4) ? null : DateTime.Parse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                TurnCount: reader.GetInt32(5)));
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Deletes a chat session and cascades to delete all associated messages.
     /// </summary>
     public async Task DeleteSessionAsync(string sessionId)
@@ -492,8 +681,8 @@ public class MessageStore
 
         await using var command = connection.CreateCommand();
         command.CommandText = @"
-            INSERT OR REPLACE INTO queued_messages (id, session_id, content, mode, status, created_at, attempt_count, position)
-            VALUES (@id, @sessionId, @content, @mode, @status, @createdAt, @attemptCount, @position);
+            INSERT OR REPLACE INTO queued_messages (id, session_id, content, mode, status, created_at, attempt_count, position, task_id)
+            VALUES (@id, @sessionId, @content, @mode, @status, @createdAt, @attemptCount, @position, @taskId);
         ";
         command.Parameters.AddWithValue("@id", msg.Id.ToString());
         command.Parameters.AddWithValue("@sessionId", msg.SessionId);
@@ -503,6 +692,7 @@ public class MessageStore
         command.Parameters.AddWithValue("@createdAt", msg.CreatedAt.ToString("o"));
         command.Parameters.AddWithValue("@attemptCount", msg.AttemptCount);
         command.Parameters.AddWithValue("@position", msg.Position);
+        command.Parameters.AddWithValue("@taskId", (object?)msg.TaskId ?? DBNull.Value);
 
         await command.ExecuteNonQueryAsync();
     }
@@ -533,7 +723,7 @@ public class MessageStore
         await using var connection = await CreateConnectionAsync();
 
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, session_id, content, mode, status, created_at, attempt_count, position FROM queued_messages ORDER BY position ASC, created_at ASC;";
+        command.CommandText = "SELECT id, session_id, content, mode, status, created_at, attempt_count, position, task_id FROM queued_messages ORDER BY position ASC, created_at ASC;";
 
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -547,7 +737,8 @@ public class MessageStore
                 Status = (QueuedMessageStatus)reader.GetInt32(4),
                 CreatedAt = DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
                 AttemptCount = reader.GetInt32(6),
-                Position = reader.GetInt32(7)
+                Position = reader.GetInt32(7),
+                TaskId = reader.IsDBNull(8) ? null : reader.GetString(8)
             });
         }
 

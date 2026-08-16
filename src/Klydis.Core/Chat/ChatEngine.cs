@@ -26,7 +26,13 @@ public enum ChatStreamEventType
     ToolResult,
     StreamEnd,
     Error,
-    MemorySummarizing
+    MemorySummarizing,
+
+    /// <summary>Supervisor accepted a task_complete claim — the task is verified done.</summary>
+    GoalComplete,
+
+    /// <summary>Supervisor rejected a task_complete claim (plan items still open).</summary>
+    CompletionRejected
 }
 
 /// <summary>
@@ -215,7 +221,9 @@ public class ChatEngine(
     ILogger<ChatEngine> logger,
     ModelMessageQueue? messageQueue = null,
     Klydis.Core.RAG.VectorStore? vectorStore = null,
-    Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null) : IGoalCompletionVerifier
+    Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null,
+    Klydis.Core.Tasks.TaskManager? taskManager = null,
+    Klydis.Core.Tasks.AgentRuntime? agentRuntime = null) : IGoalCompletionVerifier
 {
     private readonly List<ChatMessage> _history = new();
     private readonly Klydis.Core.Learning.AdaptiveLearningService? _adaptiveLearning = adaptiveLearning;
@@ -234,7 +242,29 @@ public class ChatEngine(
     private int _consecutiveBlockedToolCalls = 0;
 
     public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
-    
+
+    private readonly Klydis.Core.Tasks.TaskManager? _taskManager = taskManager;
+    private readonly Klydis.Core.Tasks.AgentRuntime? _runtime = agentRuntime;
+
+    // Cross-method supervisor signal: set when the deterministic gate accepts task_complete
+    // inside the inner generation loop, read by the outer StreamResponseAsync finally to end
+    // the run as Completed. Reset at the start of every turn.
+    private bool _goalCompletedThisTurn;
+
+    /// <summary>
+    /// The task the most recent turn resolved to (set per turn by the task resolver), or
+    /// null when no task layer is active. Exposed so the UI can stamp queue enqueues and
+    /// observe the current task identity.
+    /// </summary>
+    public string? CurrentTaskId { get; private set; }
+
+    /// <summary>
+    /// The objective of the current task, injected into the prompt as the immutable task
+    /// contract so the model always knows what task it is working (report §44) — and so the
+    /// completion gate can compare claims against the actual objective.
+    /// </summary>
+    public string? CurrentTaskObjective { get; private set; }
+
     /// <summary>
     /// Calculates the rolling compression threshold: when HISTORY tokens reach this, older
     /// context is summarized into WorldState. The threshold is a fraction of the budget that
@@ -337,6 +367,79 @@ public class ChatEngine(
             return Array.Empty<ToolExecutor.PlanEntry>();
         }
     }
+
+    // ---- Harness-owned initial planner (report §5 / §51-P0) ----
+    // The runtime establishes a baseline plan for actionable requests; the model refines or
+    // replaces it. This removes the "the model must remember to call plan" dependency while
+    // keeping the checklist fully model-editable via the 'plan' tool.
+    private static readonly string[] StarterPlanItems =
+    {
+        "Understand the request and inspect the relevant files and state",
+        "Design the approach and define what 'done' looks like",
+        "Implement the solution",
+        "Verify the result (build, tests, evidence)"
+    };
+
+    // Verbs that imply a multi-step task worth a plan. Short messages and pure questions
+    // ("what is 2+2") are deliberately excluded by the length gate in IsActionableTaskRequest.
+    private static readonly string[] TaskActionVerbs =
+    {
+        "build", "create", "implement", "develop", "refactor", "migrate", "port",
+        "optimize", "analyze", "investigate", "research", "debug", "fix", "test",
+        "design", "configure", "integrate", "set up", "make", "write", "document",
+        "compare", "evaluate", "review", "add", "install", "deploy", "summarize", "produce"
+    };
+
+    /// <summary>
+    /// True when the message reads as a substantive, actionable task (long enough to be a
+    /// real request AND contains a task verb). Trivial questions and one-liners skip the
+    /// scaffolding ceremony entirely.
+    /// </summary>
+    private static bool IsActionableTaskRequest(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message) || message.Length < 40) return false;
+        string lower = message.ToLowerInvariant();
+        return TaskActionVerbs.Any(v => lower.Contains(v, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Seeds a baseline plan once per user message. Seeded when the session has no plan, or
+    /// when the existing plan belongs to a PREVIOUS task and the new message reads as a new
+    /// task (actionable + substantial) — the harness then replaces the obsolete checklist with
+    /// a fresh scaffold stamped to the new message. Short steering messages ("change the
+    /// color to blue") leave the existing plan untouched so a mid-task steer keeps its
+    /// checklist; a genuine steer is still re-adopted as the current task's plan the moment
+    /// the model mutates it via the 'plan' tool.
+    /// </summary>
+    private async Task SeedInitialPlanIfNeededAsync(string sessionId, string userMessage)
+    {
+        try
+        {
+            if (!IsActionableTaskRequest(userMessage)) return;
+
+            var existing = toolExecutor.GetSessionPlanEntries(sessionId);
+            if (existing.Count == 0)
+            {
+                await toolExecutor.SeedSessionPlanAsync(sessionId, StarterPlanItems);
+                return;
+            }
+
+            string? owner = toolExecutor.GetSessionPlanOwner(sessionId);
+            if (!string.IsNullOrEmpty(owner) && owner != userMessage)
+            {
+                logger.LogInformation(
+                    "Replacing obsolete plan from a previous task with a fresh harness-seeded plan for the current message.");
+                await toolExecutor.SeedSessionPlanAsync(sessionId, StarterPlanItems);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Seeding must never break a turn — a missing scaffold is strictly better than a
+            // failed send. The model can still establish a plan itself via the 'plan' tool.
+            logger.LogDebug(ex, "Failed to seed initial plan for session {SessionId}.", sessionId);
+        }
+    }
+
     public bool IsGenerating { get; private set; }
     public double TokensPerSecond { get; private set; }
 
@@ -348,6 +451,16 @@ public class ChatEngine(
     /// (default, preserving current behavior).
     /// </summary>
     public TimeSpan? MaxTurnDuration { get; set; }
+
+    /// <summary>
+    /// Stall watchdog threshold for the per-turn activity clock: if the turn produces NO
+    /// stream events (tokens, tool-call boundaries, iteration progress) for this long, the
+    /// turn is cancelled and ends with a stall notice. This is a HANG guard, not a runtime
+    /// cap — legitimately long tool calls and slow re-prefills reset the clock, so it only
+    /// fires when the pipeline is genuinely parked (an await that never resumes leaves the
+    /// UI stuck on "Working…" forever; observed 2026-08-16 mid-auto-continuation).
+    /// </summary>
+    private static readonly TimeSpan TurnStallThreshold = TimeSpan.FromSeconds(300);
     /// <summary>
     /// Gets a snapshot of the conversation history. Returns a copy rather than a live view
     /// because the generation task mutates <c>_history</c> (Add/AddRange/Clear) while UI
@@ -581,8 +694,67 @@ public class ChatEngine(
         IsGenerating = true;
         _recentTools.Clear();
         bool activeGoalMode = isGoalMode ?? IsGoalMode;
-        
+
+        // Set by the supervisor when a task_complete claim passes the deterministic gate;
+        // ends the turn (and the run) with a completion event.
+        _goalCompletedThisTurn = false;        // Stamp the user message this turn executes onto the tool executor BEFORE any tool call
+        // runs, so plan mutations record the task boundary (which message's task the plan
+        // belongs to). Cleared in the finally below so direct tool invocations outside a turn
+        // never inherit a stale owner.
+        toolExecutor.CurrentTaskUserMessage = userMessage;
+
         string generatingSessionId = CurrentSessionId;
+
+        // Task resolution: classify this user message (NEW / CONTINUE / STEER / REOPEN)
+        // BEFORE the model runs and persist the decision. The task the message belongs to
+        // drives the plan shown, the queue offered, and the completion gate — a new task in
+        // the same chat never inherits the old task's checklist, because plan/queue isolation
+        // is enforced at the storage layer, not by prompting. On a task switch the previous
+        // task's plan is already mirrored in its record; sessions.plan_json is swapped to the
+        // new task's plan and the live checklist re-armed.
+        string? previousTaskId = null;
+        if (_taskManager != null)
+        {
+            try
+            {
+                var previousTask = await _taskManager.GetCurrentTaskAsync(generatingSessionId);
+                previousTaskId = previousTask?.TaskId;
+                var task = await _taskManager.ResolveOrCreateCurrentTaskAsync(generatingSessionId, userMessage);
+                if (task.TaskId != previousTaskId)
+                {
+                    try
+                    {
+                        string? newTaskPlan = await _taskManager.GetPlanAsync(task.TaskId);
+                        await messageStore.SaveSessionPlanAsync(generatingSessionId, newTaskPlan);
+                        toolExecutor.ResetSessionPlanState(generatingSessionId);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogDebug(ex, "Failed to swap plan state on task switch for session {SessionId}.", generatingSessionId);
+                    }
+                }
+                CurrentTaskId = task.TaskId;
+                CurrentTaskObjective = task.Objective;
+                toolExecutor.CurrentTaskId = task.TaskId;
+                if (_runtime != null)
+                {
+                    await _runtime.EnsureRunAsync(task.TaskId);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Task layer failures degrade to legacy session-scoped behavior — never a
+                // broken turn.
+                logger.LogDebug(ex, "Task resolution failed for session {SessionId}; continuing without task scoping.", generatingSessionId);
+            }
+        }
+
+        // Harness-owned initial planner: for an actionable multi-step request the runtime
+        // establishes a baseline plan BEFORE the model's first turn, so the task has a durable
+        // backbone (PLAN tab, completion gate, stagnation tracker) without depending on the
+        // model remembering to call the 'plan' tool. Runs once per user message — see
+        // SeedInitialPlanIfNeededAsync for the new-task-vs-steer boundary.
+        await SeedInitialPlanIfNeededAsync(generatingSessionId, userMessage);
 
         // C6: Complete any deferred WorldState consolidation from a previous turn BEFORE this
         // turn reads WorldState, so prompt builds never race with consolidation writes.
@@ -660,6 +832,16 @@ public class ChatEngine(
         finally
         {
             await enumerator.DisposeAsync();
+            if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+            {
+                // The run ends with the turn: Completed when the supervisor sealed the task,
+                // otherwise the run is closed as a partial attempt (the task itself stays
+                // Running and resumable).
+                await _runtime.EndRunAsync(CurrentTaskId,
+                    _goalCompletedThisTurn ? Klydis.Core.Tasks.RunStatus.Completed : Klydis.Core.Tasks.RunStatus.Cancelled);
+            }
+            toolExecutor.CurrentTaskUserMessage = null;
+            toolExecutor.CurrentTaskId = null;
             IsGenerating = false;
         }
     }
@@ -752,6 +934,17 @@ public class ChatEngine(
         // regenerated — but only a bounded number of times per user turn, so a pathological
         // model cannot spin forever (each correction rebuilds and re-prefills the whole prompt).
         int selfCorrectionsThisTurn = 0;
+
+        // EOS-decline guard: a chunk that ends because the MODEL ended its own turn (stop
+        // token) mid-sentence, with no tool call, is the model declining to continue — NOT an
+        // output-budget cut. Pushing once is the auto-continuation's purpose (a lazy model
+        // finishes when nudged), but a model that keeps declining answers each push with a
+        // fresh tiny turn, and pushing again only churns full re-prefills of an ever-growing
+        // prompt (observed: 11-16 consecutive mid-sentence chunks, ~10k output tokens, zero
+        // tool calls, then a permanent stall). Cap the declines at 2, then deliver the
+        // partial response with a clear notice instead of cascading.
+        int eosDeclinesThisTurn = 0;
+        const int MaxConsecutiveEosDeclines = 2;
         const int MaxSelfCorrectionsPerTurn = 3;
 
         // Rescue mode: after escalating corrections are exhausted and the model is STILL
@@ -827,9 +1020,36 @@ public class ChatEngine(
 
         var turnStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
+        // Turn-level stall watchdog: if NO stream activity (tokens, tool-call boundaries,
+        // iteration progress) occurs for TurnStallThreshold while the turn is running, the
+        // linked token is cancelled and the turn ends with a stall notice. This converts the
+        // "Working… forever" failure mode into a bounded, diagnosed stop: the generation
+        // pipeline can park on an await that never resumes (observed 2026-08-16: a turn froze
+        // mid-auto-continuation with zero new log lines, no thread executing the pipeline,
+        // and the chat header stuck on Working… indefinitely). The clock resets on every
+        // token/event and around tool execution, so legitimately long tool calls and slow
+        // re-prefills never trip it — 5 minutes of absolute silence is a genuine hang.
+        using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        DateTime lastTurnActivityUtc = DateTime.UtcNow;
+        bool stallWatchdogFired = false;
+        bool toolCallInProgress = false;
+        using var stallTimer = new System.Threading.Timer(_ =>
+        {
+            if (stallWatchdogFired || toolCallInProgress) return;
+            if (DateTime.UtcNow - lastTurnActivityUtc > TurnStallThreshold)
+            {
+                stallWatchdogFired = true;
+                logger.LogWarning(
+                    "Turn stall watchdog fired: no stream activity for {StallSeconds} seconds while the turn was running. Cancelling the turn so the UI can release the Working state.",
+                    (int)TurnStallThreshold.TotalSeconds);
+                try { stallCts.Cancel(); } catch (ObjectDisposedException) { }
+            }
+        }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
+
         while (iterationCount < MAX_ITERATIONS)
         {
             iterationCount++;
+            lastTurnActivityUtc = DateTime.UtcNow;
 
             // Wall-clock budget: a turn is bounded by MaxTurnDuration (when set) in addition
             // to the iteration cap — checked between iterations so a native decode is never
@@ -848,11 +1068,13 @@ public class ChatEngine(
             int estimatedHistoryTokens = activeHistory.Sum(TokensOf);
             if (estimatedHistoryTokens >= rollingThreshold)
             {
+                lastTurnActivityUtc = DateTime.UtcNow;
                 yield return new ChatStreamEvent(ChatStreamEventType.MemorySummarizing, "🧠 Summarizing conversation context and saving to memory...");
                 int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 262144);
                 logger.LogInformation("Active history tokens ({Tokens}) reached rolling compression threshold ({Threshold}). Compressing older context into WorldState. Keeping {KeepRecent} recent tokens.",
                     estimatedHistoryTokens, rollingThreshold, keepRecent);
                 bool compressed = await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, rollingThreshold, keepRecent);
+                lastTurnActivityUtc = DateTime.UtcNow;
                 if (compressed && CurrentSessionId == generatingSessionId)
                 {
                     // Keep the UI history and the idle context gauge in sync with the model's
@@ -870,8 +1092,14 @@ public class ChatEngine(
             }
 
             var session = await messageStore.GetSessionAsync(generatingSessionId);
+        // World State is SUMMARIZED HISTORICAL CONTEXT from earlier in the conversation, not
+        // an active obligation list. Without explicit framing, models treat summarized old
+        // tasks inside it ("the user wants a landing page…") as open work and resume them on
+        // the next turn instead of the current task (observed: the model kept executing a
+        // previous task for an entire session). The injected header now says so explicitly.
         var worldStateHeader = (session != null && !string.IsNullOrWhiteSpace(session.WorldState))
-            ? $"\n\nLong-term Memory / World State (summarized older context):\n{session.WorldState}"
+            ? $"\n\nLong-term Memory / World State (summarized HISTORICAL context from earlier in this conversation):\n{session.WorldState}\n" +
+              $"The World State above is background history ONLY — it is not a list of active tasks. Do NOT resume, continue, or re-attempt anything described in it unless the user's latest message explicitly asks you to."
             : "";
 
         if (MessageQueue != null && toolExecutor.MessageQueue == null)
@@ -879,12 +1107,30 @@ public class ChatEngine(
             toolExecutor.MessageQueue = MessageQueue;
         }
 
-        var pendingQueue = MessageQueue?.GetPending(generatingSessionId);
+        // Task boundary for the queue notice: when the session's plan belongs to a PREVIOUS
+        // user message (an earlier task), queued items may refer to that task. The model must
+        // not let old queued messages override the task in the latest message — warn it
+        // explicitly instead of presenting every queued item as a fresh obligation.
+        bool planBelongsToPreviousTask = false;
+        try
+        {
+            string? planOwnerForBoundary = toolExecutor.GetSessionPlanOwner(generatingSessionId);
+            planBelongsToPreviousTask = !string.IsNullOrEmpty(planOwnerForBoundary) && planOwnerForBoundary != currentUserMessage;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to read plan owner for queue boundary notice.");
+        }
+
+        var pendingQueue = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId);
         var queueNotice = (pendingQueue != null && pendingQueue.Count > 0)
             ? "\n\n[PENDING QUEUED USER MESSAGES AVAILABLE]\n" +
               "You have pending queued message(s) from the user waiting in the queue:\n" +
               string.Join("\n", pendingQueue.Select(m => $"- Queue ID: {m.Id} | Mode: {m.Mode} | Content: \"{m.Content}\"")) +
-              "\nWhen you reach an optimal point during your reasoning or execution task to incorporate a queued message, call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to retrieve and steer using that message."
+              "\nWhen you reach an optimal point during your reasoning or execution task to incorporate a queued message, call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to retrieve and steer using that message." +
+              (planBelongsToPreviousTask
+                  ? "\nCaution: some of these queued messages may relate to your PREVIOUS task. Your LATEST message defines the CURRENT task — do not let old queued items override it. Incorporate them only if they still apply to the current task."
+                  : string.Empty)
             : "";
 
         string ragNotice = "";
@@ -1025,6 +1271,18 @@ public class ChatEngine(
             logger.LogDebug(ex, "Failed to load session artifacts for prompt context.");
         }
 
+        // Harness task contract: the current task (id + objective) is immutable context that
+        // must survive every compaction and never be confused with earlier tasks in the same
+        // chat. Injected every iteration, directly above the plan it governs.
+        if (!string.IsNullOrEmpty(CurrentTaskId) && !string.IsNullOrWhiteSpace(CurrentTaskObjective))
+        {
+            var taskContractHeader = "\n\nHARNESS TASK CONTRACT (the current task — authoritative):\n" +
+                $"  Task: {CurrentTaskId}\n" +
+                $"  Objective: {CurrentTaskObjective}\n" +
+                "This task defines the work. Earlier tasks in this chat are COMPLETE HISTORY — do not resume them unless this task changes.";
+            sysPrompt = sysPrompt.TrimEnd() + taskContractHeader;
+        }
+
         // Agent's current task plan / todo list, maintained through the 'plan' tool. The
         // prompt is rebuilt on EVERY loop iteration, so the model always sees its own
         // checklist (with [x] checkmarks) and its reported progress — this is what closes the
@@ -1035,21 +1293,54 @@ public class ChatEngine(
             if (currentPlan.Count > 0)
             {
                 int planProgress = toolExecutor.GetSessionPlanProgress(generatingSessionId);
-                var planHeader = "\n\nCURRENT TASK PLAN (your todo list — shown live to the user in the PLAN tab; keep it updated as you work and check off completed items with the 'plan' tool):\n" +
-                    string.Join("\n", currentPlan.Select(l => $"  {l}")) +
-                    (planProgress >= 0 ? $"\nOverall progress: {planProgress}%" : string.Empty);
+                // Task boundary: a plan is CURRENT when it belongs to the task this turn is
+                // executing. With the task layer active, the executor's plan was swapped to the
+                // current task on resolution, so it is current by construction — the owner
+                // (message) check only applies to legacy sessions without task scoping, where
+                // a plan left over from an EARLIER message in the same chat is identifiable
+                // deterministically and must NOT be injected as active work. The observed
+                // contamination: the model kept executing the previous task's todo list after
+                // the user moved on, and the contract's "Next required action" line (derived
+                // from that stale plan) was actively commanding the old task.
+                string? planOwner = toolExecutor.GetSessionPlanOwner(generatingSessionId);
+                bool planIsCurrentTask = !string.IsNullOrEmpty(CurrentTaskId)
+                    ? true
+                    : string.IsNullOrEmpty(planOwner) || planOwner == currentUserMessage;
 
-                // EXECUTION STATE continuation contract — deterministic from durable sources
-                // (plan checklist + queue), so rolling compaction can never erase the semantics
-                // of what remains REQUIRED ("D = NOT COMPLETE"). This is the model window's
-                // state, as opposed to the WorldState narrative summary.
-                var contract = ContinuationContractBuilder.Build(
-                    string.Empty,
-                    toolExecutor.GetSessionPlanEntries(generatingSessionId),
-                    MessageQueue?.GetPending(generatingSessionId).Count ?? 0);
-                planHeader += "\n" + ContinuationContractBuilder.Format(contract);
+                if (planIsCurrentTask)
+                {
+                    var planHeader = "\n\nCURRENT TASK PLAN (your todo list for the task in your LATEST user message — shown live to the user in the PLAN tab; keep it updated as you work and check off completed items with the 'plan' tool):\n" +
+                        string.Join("\n", currentPlan.Select(l => $"  {l}")) +
+                        (planProgress >= 0 ? $"\nOverall progress: {planProgress}%" : string.Empty) +
+                        "\nNOTE: This plan belongs ONLY to the task in your latest user message. If your latest message is a NEW task, this plan is OBSOLETE — do NOT execute its items. Replace it with a fresh 'plan' (action=create) or clear it, then work the new task.";
 
-                sysPrompt = sysPrompt.TrimEnd() + planHeader;
+                    // EXECUTION STATE continuation contract — deterministic from durable sources
+                    // (plan checklist + queue), so rolling compaction can never erase the
+                    // semantics of what remains REQUIRED ("D = NOT COMPLETE"). This is the
+                    // model window's state, as opposed to the WorldState narrative summary.
+                    var contract = ContinuationContractBuilder.Build(
+                        string.Empty,
+                        toolExecutor.GetSessionPlanEntries(generatingSessionId),
+                        MessageQueue?.GetPending(generatingSessionId).Count ?? 0);
+                    planHeader += "\n" + ContinuationContractBuilder.Format(contract);
+
+                    sysPrompt = sysPrompt.TrimEnd() + planHeader;
+                }
+                else
+                {
+                    // The checklist belongs to a task in an EARLIER user message. Present it as
+                    // reference-only history, never as an obligation list: no status, no
+                    // "current step", no "next required action" — those would command the old
+                    // task. The model decides whether the new message steers the same task (in
+                    // which case re-engaging the plan re-stamps it as current via the 'plan'
+                    // tool) or starts a fresh one (in which case it must create its own plan).
+                    logger.LogInformation(
+                        "Plan belongs to a previous task (owner differs from the current user message); suppressing it as active work for this turn.");
+                    var obsoleteHeader = "\n\nPREVIOUS TASK PLAN (checklist from an EARLIER message in this chat — NOT your current task):\n" +
+                        string.Join("\n", currentPlan.Select(l => $"  {l}")) +
+                        "\nThis checklist belongs to a task you already finished or moved on from. Do NOT continue, complete, or re-attempt any item above unless your LATEST user message explicitly re-engages that task. If your current task needs a checklist, create a fresh one with the 'plan' tool (action=create) — replace this one rather than executing it.";
+                    sysPrompt = sysPrompt.TrimEnd() + obsoleteHeader;
+                }
             }
         }
         catch (Exception ex)
@@ -1313,22 +1604,51 @@ public class ChatEngine(
         var streamParser = new ChatStreamParser(isQwenThinkingModel);
 
         // Stream tokens
-        await foreach (var token in inferenceEngine.StreamTokensAsync(prompt, stopTokens, sysPromptTokens, ct))
+        bool generationStalled = false;
+        var tokenStream = inferenceEngine.StreamTokensAsync(prompt, stopTokens, sysPromptTokens, stallCts.Token);
+        await using (var tokenEnumerator = tokenStream.GetAsyncEnumerator(stallCts.Token))
         {
-            fullResponseBuilder.Append(token);
-            streamParser.Append(token);
-            // The parser may have injected a </think> (qwen tool call inside the pre-opened
-            // think block); keep the raw accumulator in sync so the sanitizer sees the close.
-            fullResponseBuilder.Append(streamParser.ConsumeInjectedRawText());
-            while (streamParser.TryDequeue(out var evt))
+            while (true)
             {
-                if (evt.Type == ChatStreamEventType.Token)
+                string token;
+                try
                 {
-                    visibleTextBuilder.Append(evt.Content);
+                    if (!await tokenEnumerator.MoveNextAsync()) break;
+                    token = tokenEnumerator.Current;
                 }
-                yield return evt;
-            }
+                catch (OperationCanceledException) when (stallWatchdogFired && !ct.IsCancellationRequested)
+                {
+                    // The stall watchdog (not the user) cancelled this generation after
+                    // TurnStallThreshold of absolute silence. Surface a clear notice and end the
+                    // turn so the UI's finally block runs and the Working indicator clears —
+                    // previously this parked forever with zero diagnostics.
+                    generationStalled = true;
+                    break;
+                }
 
+                fullResponseBuilder.Append(token);
+                streamParser.Append(token);
+                // The parser may have injected a </think> (qwen tool call inside the pre-opened
+                // think block); keep the raw accumulator in sync so the sanitizer sees the close.
+                fullResponseBuilder.Append(streamParser.ConsumeInjectedRawText());
+                while (streamParser.TryDequeue(out var evt))
+                {
+                    if (evt.Type == ChatStreamEventType.Token)
+                    {
+                        visibleTextBuilder.Append(evt.Content);
+                    }
+                    lastTurnActivityUtc = DateTime.UtcNow;
+                    yield return evt;
+                }
+            }
+        }
+
+        if (generationStalled)
+        {
+            logger.LogWarning("Turn generation cancelled by the stall watchdog after {StallSeconds} seconds without stream activity.", (int)TurnStallThreshold.TotalSeconds);
+            yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                "⚠ The model stopped responding (no output for several minutes). The turn was ended so the app can recover — send your message again to continue.");
+            break;
         }
 
         // Flush whatever remained buffered at the end of the stream (discarding partial tool
@@ -1566,6 +1886,7 @@ public class ChatEngine(
             {
                 bool forceTurnTermination = false;
                 bool validationEscalated = false;
+                int completionRejectionsThisTurn = 0;
 
                 foreach (var req in toolCallRequests)
                 {
@@ -1635,8 +1956,61 @@ public class ChatEngine(
                     consecutiveToolParseFailures = 0;
 
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolCall, req.Name, new Dictionary<string, object> { ["Arguments"] = req.Arguments });
-                    
-                    var result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, ct, inferenceEngine.CurrentModelPath);
+
+                    // Tool-call boundaries reset the stall clock, and the watchdog is paused
+                    // for the duration: a long tool run is legitimate work bounded by the
+                    // tool's own dispatch timeout (crawl_url may legitimately run 10 minutes),
+                    // never a stall. The flag is cleared in finally so a throwing tool cannot
+                    // leave the watchdog permanently disabled.
+                    lastTurnActivityUtc = DateTime.UtcNow;
+                    toolCallInProgress = true;
+                    ToolResult result;
+                    try
+                    {
+                        result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, stallCts.Token, inferenceEngine.CurrentModelPath);
+                    }
+                    finally
+                    {
+                        toolCallInProgress = false;
+                        lastTurnActivityUtc = DateTime.UtcNow;
+                    }
+
+                    // SUPERVISOR GATE — task_complete: the model's completion claim is an
+                    // INPUT, never authoritative. The deterministic verifier (AgentSupervisor)
+                    // checks the plan checklist; accepted ⇒ the task is sealed Completed and
+                    // the turn ends; rejected ⇒ the reason is injected as the tool result and
+                    // the loop continues so the model finishes the open work.
+                    if (req.Name.Equals("task_complete", StringComparison.OrdinalIgnoreCase)
+                        && _runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+                    {
+                        string? claimSummary = null;
+                        if (req.Arguments != null && req.Arguments.TryGetValue("summary", out var summaryObj))
+                        {
+                            claimSummary = ToolExecutor.UnwrapJsonElement(summaryObj)?.ToString();
+                        }
+
+                        var planForGate = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                        var (accepted, rejectionReason) = await _runtime.EvaluateCompletionClaimAsync(CurrentTaskId, planForGate, claimSummary);
+
+                        if (accepted)
+                        {
+                            _goalCompletedThisTurn = true;
+                            logger.LogInformation("Supervisor accepted task_complete for task {TaskId}; task sealed Completed.", CurrentTaskId);
+                            yield return new ChatStreamEvent(ChatStreamEventType.GoalComplete,
+                                claimSummary ?? "Task completed.",
+                                new Dictionary<string, object> { ["TaskId"] = CurrentTaskId });
+                            break; // exit the tool loop; the goalCompletedThisTurn check below ends the turn
+                        }
+
+                        completionRejectionsThisTurn++;
+                        string gateRejection = $"[SYSTEM — COMPLETION CLAIM REJECTED BY DETERMINISTIC VERIFIER]\nYour task_complete call was NOT accepted as completion. The harness verified the plan checklist and found open work:\n  {rejectionReason}\nReal 'done' requires every plan item to be checked off. Finish the open item(s) above, verify your work, then call task_complete again only when the checklist is genuinely empty.\n";
+                        logger.LogWarning("Supervisor REJECTED task_complete for task {TaskId} (rejection {N}): {Reason}", CurrentTaskId, completionRejectionsThisTurn, rejectionReason);
+                        var gateRejObj = new ChatMessage(ChatRole.Tool, gateRejection, "task_complete");
+                        AddToSessionHistory(activeHistory, gateRejObj, generatingSessionId);
+                        await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, gateRejection, 0, null);
+                        yield return new ChatStreamEvent(ChatStreamEventType.CompletionRejected, rejectionReason ?? "Completion claim rejected");
+                        continue; // skip the ordinary tool-result handling for this call
+                    }
 
                     // Executor rejected a STRUCTURALLY INVALID call (missing required argument,
                     // malformed path). Route it into the parse-failure escalation ladder instead
@@ -1684,6 +2058,13 @@ public class ChatEngine(
                     await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, toolOutput, 0, null);
                     
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolResult, toolOutput, new Dictionary<string, object> { ["Success"] = result.Success });
+                }
+
+                if (_goalCompletedThisTurn)
+                {
+                    // Supervisor sealed the task — end the turn (the run is closed as
+                    // Completed in StreamResponseAsync's finally).
+                    break;
                 }
 
                 if (validationEscalated)
@@ -1746,6 +2127,59 @@ public class ChatEngine(
                 bool cutShortMidStream = inferenceEngine.LastGenerationWasCutShort;
                 bool isTruncatedMidGeneration = IsTruncatedMidGeneration(fullResponse, visibleResponse);
                 bool visibleEmpty = string.IsNullOrWhiteSpace(visibleTextBuilder.ToString());
+
+                // End-reason classification: a genuine budget/mid-stream cut (the harness ended
+                // the stream) is truncation and must auto-continue. A chunk the MODEL ended
+                // itself (stop token) mid-sentence, with no tool call, is the model declining
+                // to continue — repeated declines are a degenerate pattern, not truncation.
+                bool endedOnOwnStopToken = !hitOutputCap && !cutShortMidStream &&
+                                           !inferenceEngine.LastGenerationWasCancelled &&
+                                           inferenceEngine.LastGenerationLoopInfo == null;
+                bool declinedMidSentence = endedOnOwnStopToken && isTruncatedMidGeneration && !visibleEmpty;
+                eosDeclinesThisTurn = declinedMidSentence ? eosDeclinesThisTurn + 1 : 0;
+
+                // Explicit continuation reason (ContinuationReason): the loop's decisions are
+                // diagnosable events, never the model's own narrative of why it stopped. A
+                // harness-ended stream (output cap / mid-stream cut) is genuine truncation and
+                // auto-continues; a chunk the model ended itself mid-sentence is the model
+                // declining to continue; anything else that resumes is step-incomplete work.
+                var continuationReason = hitOutputCap || cutShortMidStream
+                    ? ContinuationReason.GenerationTruncated
+                    : endedOnOwnStopToken
+                        ? ContinuationReason.ModelEndedEarly
+                        : ContinuationReason.StepIncomplete;
+
+                // Supervisor: classify the generation outcome and record the runtime's decision
+                // against the durable task state. The branch mechanics below implement the
+                // decision; the decision itself is owned by the supervisor, so the loop's
+                // choices are explicit, logged, and testable instead of being scattered
+                // conditions. (The per-turn rejection counter currently lives inside the tool
+                // execution scope; the full rejections-based Pause decision lands with the
+                // loop extraction.)
+                if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+                {
+                    try
+                    {
+                        var outcome = _runtime.ClassifyGeneration(
+                            hitOutputCap, cutShortMidStream,
+                            inferenceEngine.LastGenerationWasCancelled,
+                            endedOnOwnStopToken,
+                            inferenceEngine.LastGenerationPromptFilledWindow,
+                            visibleEmpty);
+                        var planNow = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                        var pendingNow = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId).Count ?? 0;
+                        var decision = await _runtime.DecideAfterTurnAsync(
+                            CurrentTaskId, outcome, claimAccepted: false, planNow, pendingNow,
+                            completionRejections: 0, maxCompletionRejections: 3);
+                        logger.LogInformation(
+                            "Supervisor: outcome={Outcome} decision={Decision} reason={Reason} nextStep={NextStep}",
+                            outcome, decision.Decision, decision.Reason, decision.NextStepId ?? "—");
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogDebug(ex, "Supervisor decision logging failed.");
+                    }
+                }
 
                 // A qwen thinking model that never closed its think block produced reasoning
                 // only — all streamed content was ThinkingTokens, so there is nothing visible to
@@ -1813,15 +2247,36 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Generation was interrupted — the model was switched or unloaded while responding. Your message is still here; send it again once the model has finished loading.");
                     break;
                 }
-                else if ((isTruncatedMidGeneration || hitOutputCap || cutShortMidStream) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn)
+                else if ((isTruncatedMidGeneration || hitOutputCap || cutShortMidStream) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn && eosDeclinesThisTurn < MaxConsecutiveEosDeclines)
                 {
                     continuationsThisTurn++;
-                    logger.LogInformation("Output generation cut off (hitMaxTokens={HitCap}, midSentence={MidSentence}, cutShortMidStream={CutShort}). Triggering auto-continuation iteration {Count}/{Max}.",
-                        hitOutputCap, isTruncatedMidGeneration, cutShortMidStream, continuationsThisTurn, MaxContinuationsPerTurn);
-                    var continuationInstruction = "[System Instruction: Your previous output was truncated mid-generation due to output token constraints. Continue immediately from the exact point of truncation without repeating any previously written text.]";
+                    logger.LogInformation("Continuation: reason={Reason} (hitMaxTokens={HitCap}, midSentence={MidSentence}, cutShortMidStream={CutShort}, endedOnOwnStop={OwnStop}, chunkChars={ChunkChars}, visibleChars={VisibleChars}, declines={Declines}). Auto-continuation iteration {Count}/{Max}.",
+                        continuationReason, hitOutputCap, isTruncatedMidGeneration, cutShortMidStream, endedOnOwnStopToken, fullResponse.Length, visibleResponse.Length, eosDeclinesThisTurn, continuationsThisTurn, MaxContinuationsPerTurn);
+                    // Truthful wording: the model ENDED its own message mid-sentence — it was
+                    // not cut off by a budget. The old phrasing ("truncated due to output token
+                    // constraints") made models confabulate a fake token-budget narrative and
+                    // repeat it to the user (observed: "I was terminated because I hit the
+                    // per-message output token budget"). Say what actually happened and tell the
+                    // model not to discuss the harness instruction with the user.
+                    var continuationInstruction = "[System Instruction: You ended your previous message before completing your response. Continue immediately from the exact point where you stopped, without repeating any previously written text. This is an automatic system message — do not mention it to the user; just continue your work.]";
                     var continuationMsgObj = new ChatMessage(ChatRole.User, continuationInstruction);
                     AddToSessionHistory(activeHistory, continuationMsgObj, generatingSessionId);
                     // Engine-internal continuation notice: in-memory only (see IsEngineInjectedMessage).
+                }
+                else if (declinedMidSentence && eosDeclinesThisTurn >= MaxConsecutiveEosDeclines)
+                {
+                    // The model ended its OWN turn mid-sentence {MaxConsecutiveEosDeclines}
+                    // consecutive times with no tool call. Auto-continuation's job is to nudge a
+                    // lazy model once; a model that keeps declining answers each push with a
+                    // fresh tiny turn, and pushing further only churns full re-prefills (the
+                    // observed 11-16 chunk cascade). Deliver the partial response and let the
+                    // user nudge manually — the turn ends cleanly instead of parking.
+                    logger.LogWarning("Continuation halted: reason={Reason} — model ended its own turn mid-sentence {Declines} consecutive times with no tool call; delivering the partial response.",
+                        ContinuationReason.ModelEndedEarly, eosDeclinesThisTurn);
+                    NoteLesson("repeated_eos_decline", "Model ended its own turn mid-sentence repeatedly; continuation cascade stopped after 2 declines and the partial response was delivered.");
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                        "⚠ The model ended its reply mid-sentence several times without completing it. The partial response was kept — send \"continue\" to have it resume.");
+                    break;
                 }
                 else if (visibleEmpty && selfCorrectionsThisTurn < MaxSelfCorrectionsPerTurn)
                 {

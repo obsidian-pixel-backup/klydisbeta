@@ -517,8 +517,8 @@
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding IsWorking}" Value="True">
                                                                     <DataTrigger.EnterActions>
-                                                                        <BeginStoryboard>
-                                                                            <Storyboard x:Name="SessionWorkingPulse">
+                                                                        <BeginStoryboard x:Name="SessionWorkingPulse">
+                                                                            <Storyboard>
                                                                                 <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.25" Duration="0:0:0.6" AutoReverse="True" RepeatBehavior="Forever"/>
                                                                             </Storyboard>
                                                                         </BeginStoryboard>
@@ -728,8 +728,8 @@
                                             <Style.Triggers>
                                                 <DataTrigger Binding="{Binding SelectedSession.IsWorking}" Value="True">
                                                     <DataTrigger.EnterActions>
-                                                        <BeginStoryboard>
-                                                            <Storyboard x:Name="HeaderWorkingPulse">
+                                                        <BeginStoryboard x:Name="HeaderWorkingPulse">
+                                                            <Storyboard>
                                                                 <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.25" Duration="0:0:0.6" AutoReverse="True" RepeatBehavior="Forever"/>
                                                             </Storyboard>
                                                         </BeginStoryboard>

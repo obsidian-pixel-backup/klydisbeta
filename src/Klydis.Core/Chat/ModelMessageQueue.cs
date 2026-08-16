@@ -52,6 +52,14 @@ public record QueuedMessage
     public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
 
     /// <summary>
+    /// The task this message belongs to, when known. Stamped at enqueue time with the
+    /// session's current task, so the model only ever sees the CURRENT task's queued items
+    /// (hard isolation boundary). Null for legacy rows / pre-task enqueues, which fall back
+    /// to session-scoped visibility.
+    /// </summary>
+    public string? TaskId { get; init; }
+
+    /// <summary>
     /// Explicit position in the session's processing order (0 = first). Set on enqueue and
     /// renormalized by <see cref="ModelMessageQueue.Reorder"/>; persisted so a drag-and-drop
     /// reordering survives restarts. Items with equal position fall back to CreatedAt (FIFO),
@@ -128,7 +136,7 @@ public class ModelMessageQueue
     /// <summary>
     /// Enqueues a new message for processing or steering.
     /// </summary>
-    public QueuedMessage Enqueue(string sessionId, string content, QueuedMessageMode mode = QueuedMessageMode.Steer)
+    public QueuedMessage Enqueue(string sessionId, string content, QueuedMessageMode mode = QueuedMessageMode.Steer, string? taskId = null)
     {
         if (string.IsNullOrWhiteSpace(content))
             throw new ArgumentException("Queued content cannot be empty.", nameof(content));
@@ -141,7 +149,8 @@ public class ModelMessageQueue
             Content = content,
             Mode = mode,
             Status = QueuedMessageStatus.Queued,
-            CreatedAt = DateTime.UtcNow
+            CreatedAt = DateTime.UtcNow,
+            TaskId = taskId
         };
 
         lock (_lock)
@@ -196,6 +205,28 @@ public class ModelMessageQueue
     }
 
     /// <summary>
+    /// Pending queued messages for a session scoped to ONE task. This is the isolation
+    /// boundary the model sees: items stamped with a different task (or legacy items with no
+    /// task) are not offered to the model as obligations of the current task. Callers pass
+    /// the task id the current turn resolved to; a null task id degrades to the full
+    /// session view (legacy behavior).
+    /// </summary>
+    public IReadOnlyList<QueuedMessage> GetPending(string sessionId, string? taskId)
+    {
+        if (string.IsNullOrEmpty(taskId))
+        {
+            return GetPending(sessionId);
+        }
+        EnsureLoaded();
+        lock (_lock)
+        {
+            return InProcessingOrder(_queue
+                .Where(m => m.SessionId == sessionId && m.Status == QueuedMessageStatus.Queued && m.TaskId == taskId))
+                .ToList();
+        }
+    }
+
+    /// <summary>
     /// Gets pending steer messages for a given session.
     /// </summary>
     public IReadOnlyList<QueuedMessage> GetPendingSteer(string sessionId)
@@ -205,6 +236,26 @@ public class ModelMessageQueue
         {
             return InProcessingOrder(_queue
                 .Where(m => m.SessionId == sessionId && m.Mode == QueuedMessageMode.Steer && m.Status == QueuedMessageStatus.Queued))
+                .ToList();
+        }
+    }
+
+    /// <summary>
+    /// Pending steer messages scoped to one task — the task-isolated variant used by the
+    /// incorporate_queued_message tool so a new task's run cannot incorporate an old task's
+    /// queued message. Null task id degrades to the session view.
+    /// </summary>
+    public IReadOnlyList<QueuedMessage> GetPendingSteer(string sessionId, string? taskId)
+    {
+        if (string.IsNullOrEmpty(taskId))
+        {
+            return GetPendingSteer(sessionId);
+        }
+        EnsureLoaded();
+        lock (_lock)
+        {
+            return InProcessingOrder(_queue
+                .Where(m => m.SessionId == sessionId && m.Mode == QueuedMessageMode.Steer && m.Status == QueuedMessageStatus.Queued && m.TaskId == taskId))
                 .ToList();
         }
     }

@@ -97,7 +97,7 @@ public sealed class ToolCallConstrainedSamplingPipeline : ISamplingPipeline
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Grammar-constrained sampling failed; falling back to free-form for the rest of this generation.");
+            _logger?.LogWarning(ex, "Grammar-constrained sampling failed (format={Format}, constrainedActive={ConstrainedActive}); falling back to free-form for the rest of this generation.", _format, useConstrained);
             _disabled = true;
             token = _freeForm.Sample(ctx, index);
         }

@@ -24,6 +24,12 @@ public partial class App : Application
 
     public App()
     {
+        // Register BEFORE any window or service starts: an unhandled exception on a
+        // non-UI thread (threadpool continuation, Task.Run fault) never reaches
+        // DispatcherUnhandledException — the 2026-08-16 native access violation died with
+        // zero app-side trace for exactly this reason (WER caught it, the app didn't).
+        RegisterGlobalExceptionHandlers();
+
         try
         {
             InitializeComponent();
@@ -35,16 +41,40 @@ public partial class App : Application
         }
     }
 
-    protected override async void OnStartup(StartupEventArgs e)
+    /// <summary>
+    /// Captures every failure mode the process can die from and writes a full forensic dump
+    /// (exception chain + stack traces + native log tail) to %LOCALAPPDATA%\Klydis\logs\fatal_error.txt.
+    /// </summary>
+    private void RegisterGlobalExceptionHandlers()
     {
-        base.OnStartup(e);
+        // Unhandled exceptions on non-UI threads (the crash class that killed the app on
+        // 2026-08-16: an access violation escaping a detached async continuation). The process
+        // still terminates, but the dump is written first.
+        AppDomain.CurrentDomain.UnhandledException += (s, args) =>
+            Klydis.Core.Diagnostics.CrashLog.WriteFatal(
+                args.ExceptionObject as Exception ?? new Exception("Non-Exception failure object: " + args.ExceptionObject),
+                $"AppDomain.UnhandledException (IsTerminating={args.IsTerminating})");
 
+        // Faulted fire-and-forget tasks surface here at GC time; log them and mark observed so
+        // the runtime does not additionally kill the process for the unobserved fault.
+        TaskScheduler.UnobservedTaskException += (s, args) =>
+        {
+            Klydis.Core.Diagnostics.CrashLog.WriteFatal(args.Exception, "TaskScheduler.UnobservedTaskException");
+            args.SetObserved();
+        };
+
+        // UI-thread exceptions: log, then shut down cleanly instead of crashing.
         this.DispatcherUnhandledException += (s, args) =>
         {
-            Klydis.Core.Diagnostics.KlydisLog.AppendFatalError(args.Exception + Environment.NewLine);
+            Klydis.Core.Diagnostics.CrashLog.WriteFatal(args.Exception, "DispatcherUnhandledException");
             args.Handled = true;
             Current.Shutdown();
         };
+    }
+
+    protected override async void OnStartup(StartupEventArgs e)
+    {
+        base.OnStartup(e);
 
         var serviceCollection = new ServiceCollection();
         ConfigureServices(serviceCollection);
@@ -98,6 +128,8 @@ public partial class App : Application
         services.AddLogging(configure =>
         {
             configure.AddConsole();
+            // Durable mirror of ALL ILogger output (Debug and up) into the rotating app.log.
+            configure.AddProvider(new Klydis.Core.Diagnostics.KlydisLogFileLoggerProvider());
             configure.SetMinimumLevel(LogLevel.Debug);
         });
 
@@ -132,6 +164,8 @@ public partial class App : Application
         services.AddSingleton<MessageStore>();
         services.AddSingleton<ContextOrchestrator>();
         services.AddSingleton<ModelMessageQueue>();
+        services.AddSingleton<Klydis.Core.Tasks.TaskManager>();
+        services.AddSingleton<Klydis.Core.Tasks.AgentRuntime>();
         services.AddSingleton<Klydis.Core.Learning.AdaptiveLearningService>();
         services.AddSingleton<Klydis.Core.Chat.CamoufoxManager>();
         services.AddSingleton<Klydis.Core.Chat.StealthBrowserService>();
@@ -160,7 +194,8 @@ public partial class App : Application
                 sp.GetService<Klydis.Core.RAG.VectorStore>(),
                 sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
                 sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>(),
-                sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>()
+                sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>(),
+                sp.GetService<Klydis.Core.Tasks.TaskManager>()
             );
             // Default to Standard (approval gate for risky/flagged tools). AutoPilot mode
             // executes arbitrary PowerShell with no approval gate, which combined with
@@ -180,7 +215,9 @@ public partial class App : Application
                 sp.GetRequiredService<ILogger<ChatEngine>>(),
                 sp.GetService<ModelMessageQueue>(),
                 sp.GetService<Klydis.Core.RAG.VectorStore>(),
-                sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>()
+                sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>(),
+                sp.GetService<Klydis.Core.Tasks.TaskManager>(),
+                sp.GetService<Klydis.Core.Tasks.AgentRuntime>()
             );
             var themeService = sp.GetService<ThemeService>();
             if (themeService != null)
@@ -209,6 +246,9 @@ public partial class App : Application
 
     protected override async void OnExit(ExitEventArgs e)
     {
+        // Marker so a clean exit is distinguishable from a crash in fatal_error.txt.
+        Klydis.Core.Diagnostics.CrashLog.WriteShutdown();
+
         try
         {
             if (ServiceProvider is IAsyncDisposable asyncDisposable)

@@ -27,17 +27,110 @@ public class SkillLibraryManager
     {
         _logger = logger;
         string rootDir = baseDirectory ?? AppDomain.CurrentDomain.BaseDirectory;
-        
-        // Find project root if running from bin
-        string projectRoot = FindProjectRoot(rootDir) ?? rootDir;
 
-        _skillsBasePath = Path.Combine(projectRoot, "assets", "skills");
+        if (baseDirectory != null)
+        {
+            // Explicit base (tests/fixtures): keep the historical behavior — find a project
+            // root above it, else use the directory itself.
+            string projectRoot = FindProjectRoot(rootDir) ?? rootDir;
+            _skillsBasePath = Path.Combine(projectRoot, "assets", "skills");
+        }
+        else
+        {
+            // Resolve dev-tree vs installed layout. A dev tree is a repo checkout, which
+            // always has KlydisBeta.sln somewhere above the app base — the sln is the ONLY
+            // reliable marker. A "populated assets/skills" heuristic would mistake an
+            // installed build for a project root (the installer ships assets/skills/custom
+            // next to the exe) and then try to write skill_states.json into Program Files,
+            // which throws UnauthorizedAccessException for standard users.
+            string? devRoot = FindDevRoot(rootDir);
+            if (devRoot != null)
+            {
+                _skillsBasePath = Path.Combine(devRoot, "assets", "skills");
+            }
+            else
+            {
+                // Installed build: bundled skills are read-only next to the exe, so the
+                // working copy (skill_states.json, imported skills) lives in the user profile
+                // — the same %USERPROFILE%\.klydis home NativeEngineManager uses. Seeded once
+                // from the bundled assets on first run.
+                _skillsBasePath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".klydis", "skills");
+                SeedFromBundledSkills();
+            }
+        }
+
         _awesomeSkillsPath = Path.Combine(_skillsBasePath, "awesome-llm-skills");
         _customSkillsPath = Path.Combine(_skillsBasePath, "custom");
         _userStateFilePath = Path.Combine(_skillsBasePath, "skill_states.json");
 
         Directory.CreateDirectory(_skillsBasePath);
         Directory.CreateDirectory(_customSkillsPath);
+    }
+
+    /// <summary>
+    /// Walks up from <paramref name="startPath"/> looking for KlydisBeta.sln — the definitive
+    /// repo-checkout marker. Used to decide dev-tree vs installed layout.
+    /// </summary>
+    private static string? FindDevRoot(string startPath)
+    {
+        var dir = new DirectoryInfo(startPath);
+        while (dir != null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "KlydisBeta.sln")))
+            {
+                return dir.FullName;
+            }
+            dir = dir.Parent;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Copies the bundled skills shipped next to the exe (<c>assets\skills</c>) into the
+    /// user-writable skills directory — once, on first run. If the user directory already
+    /// exists with content it is left untouched so imported/customized skills are never
+    /// clobbered. Never throws: a seeding failure must not break startup.
+    /// </summary>
+    private void SeedFromBundledSkills()
+    {
+        try
+        {
+            string bundledSkillsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "skills");
+            if (!Directory.Exists(bundledSkillsPath)) return;
+
+            // First run only: nothing (or nothing but an empty shell) in the user directory yet.
+            if (Directory.Exists(_skillsBasePath) &&
+                Directory.GetFileSystemEntries(_skillsBasePath).Length > 0)
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(_skillsBasePath);
+            CopyDirectoryContents(bundledSkillsPath, _skillsBasePath);
+            _logger?.LogInformation("Seeded bundled skills from {Source} into {Target}.", bundledSkillsPath, _skillsBasePath);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to seed bundled skills into {Target}; continuing with an empty skills library.", _skillsBasePath);
+        }
+    }
+
+    private static void CopyDirectoryContents(string sourceDir, string targetDir)
+    {
+        foreach (var file in Directory.GetFiles(sourceDir))
+        {
+            File.Copy(file, Path.Combine(targetDir, Path.GetFileName(file)), overwrite: false);
+        }
+
+        foreach (var subDir in Directory.GetDirectories(sourceDir))
+        {
+            string name = Path.GetFileName(subDir);
+            string target = Path.Combine(targetDir, name);
+            Directory.CreateDirectory(target);
+            CopyDirectoryContents(subDir, target);
+        }
     }
 
     private static string? FindProjectRoot(string currentPath)

@@ -86,8 +86,14 @@ public partial class MainViewModel : ObservableObject
         CurrentView = ChatViewModel;
         ActivePanel = ActivePanel.Chat;
 
-        // Background dependency update check (throttled to once per day, never blocks startup).
+        // Developer-only dependency update check (throttled to once per day, never blocks
+        // startup). Gated to DEBUG builds: it reads repo-relative .csproj paths and shells out
+        // to `dotnet restore`, neither of which exists on an end-user machine (an installed
+        // build has no solution, no project files, and no .NET SDK). In Release the status-bar
+        // affordance stays unreachable because _dependencyUpdates is never populated.
+#if DEBUG
         StartDependencyUpdateCheck();
+#endif
     }
 
     /// <summary>

@@ -35,6 +35,9 @@ public static class KlydisLog
     public static string HardLogPath => Path.Combine(LogDirectory, "hard_log.txt");
     public static string FatalErrorPath => Path.Combine(LogDirectory, "fatal_error.txt");
 
+    /// <summary>Rotating mirror of the app's ILogger pipeline (see KlydisLogFileLoggerProvider).</summary>
+    public static string AppLogPath => Path.Combine(LogDirectory, "app.log");
+
     /// <summary>
     /// Appends a line to the given path, rotating the file first when it exceeds
     /// <see cref="MaxFileBytes"/>. Never throws.

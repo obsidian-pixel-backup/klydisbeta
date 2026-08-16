@@ -1685,7 +1685,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var text = InputText;
         InputText = string.Empty;
         var sessionId = SelectedSession?.Id ?? string.Empty;
-        _messageQueue?.Enqueue(sessionId, text, SelectedQueueMode);
+        // Stamp the item with the session's current task so the engine only offers the
+        // CURRENT task's queued messages to the model (task-scoped queue isolation).
+        _messageQueue?.Enqueue(sessionId, text, SelectedQueueMode, _chatEngine?.CurrentTaskId);
         ProcessNextQueuedMessageIfAvailable();
     }
 
@@ -1801,7 +1803,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var newText = item.EditText.Trim();
 
         _messageQueue?.Remove(item.Id);
-        _messageQueue?.Enqueue(sessionId, newText, mode);
+        _messageQueue?.Enqueue(sessionId, newText, mode, _chatEngine?.CurrentTaskId);
     }
 
     [RelayCommand]
