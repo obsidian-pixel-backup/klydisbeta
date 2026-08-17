@@ -150,57 +150,132 @@ public static class AgentSupervisor
     }
 
     /// <summary>
-    /// P1.8: the snapshot-based decision. The TaskExecutionSnapshot is the ONLY input — the
-    /// supervisor derives the plan, current step, queue, outcome and state delta from it and
-    /// delegates to the plan-checklist decision. Keeping one verdict owner means the live
-    /// loop and any caller agree on what happens next.
+    /// P1.8: the snapshot-based decision. The <see cref="TaskExecutionSnapshot"/> is the ONLY
+    /// input — the supervisor derives the plan, current step, queue, outcome and state delta
+    /// from it and decides directly. This is the authoritative decision path; the legacy
+    /// plan-checklist overload above is kept only for pre-snapshot callers.
+    ///
+    /// STATE DELTA IS THE PRIMARY PROGRESS SIGNAL (text ≠ progress):
+    ///   - NoAction + no state delta        → protocol repair
+    ///   - ToolCall + no state delta        → suspicious / repeated / failed action (repair)
+    ///   - ToolCall + meaningful state delta → continue
+    ///   - Verification + evidence          → advance (fall through to continue)
+    ///   - Verification + no evidence       → reject (keep the step open, VerificationFailed)
+    ///   - Text-only turn on an execution step with no state change → protocol repair
+    ///
+    /// Completion claims (CompletionClaimAccepted) and the rejection/stall counters are all
+    /// INPUTS here; none of them can terminate a task by themselves.
     /// </summary>
     public static SupervisorDecision DecideAfterTurn(
         TaskExecutionSnapshot snapshot,
         int maxCompletionRejections = 3,
         int maxStalledTurns = 6)
     {
+        if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+
         var steps = TaskStepBuilder.Build(snapshot.Plan, snapshot.TaskId);
         string? nextStepId = SelectNextStep(steps);
-
-        // NO-FACTUAL-PROGRESS RULE: the model's text volume is never progress. When the
-        // current step's contract requires an EXECUTABLE action (inspection, mutation,
-        // verification, research, commands) and this generation changed ZERO task state
-        // (no tool executed, no plan move, no file change), a text-only "completed turn" is
-        // exactly the 2,500-token essay failure — route it to RepairProtocol like
-        // NoActionProduced. Reason/Summary/UserInput steps are exempt (their deliverable IS
-        // text). ToolCallProduced outcomes are exempt (a failed tool is still execution the
-        // next repair can learn from).
         var currentStep = snapshot.CurrentStep ?? TaskStepBuilder.CurrentStep(steps);
-        // Only genuinely COMPLETED text-only generations are "talking": a cancelled turn, a
-        // truncation, a degenerate loop, or an already-classified NoActionProduced must keep
-        // their own recovery paths (AwaitUser / auto-continue / loop correction).
-        bool completedTextOnly = snapshot.Outcome is GenerationOutcome.CompletedTurn
-            or GenerationOutcome.ModelEndedEarly;
-        if (completedTextOnly &&
-            currentStep != null &&
-            RequiresExecution(currentStep.ExpectedActionKind) &&
-            !snapshot.MadeFactualProgress &&
-            snapshot.OpenPlanItems > 0)
+        bool openWork = snapshot.OpenPlanItems > 0;
+        var delta = snapshot.StateDelta ?? StateDelta.Empty;
+        bool madeProgress = !delta.IsEmpty;
+
+        // 1. A harness-accepted completion claim seals the task — the ONLY path to CompleteTask.
+        if (snapshot.CompletionClaimAccepted)
         {
-            return new SupervisorDecision(
-                ExecutionDecision.RepairProtocol,
-                ContinuationReason.NoActionProduced,
-                currentStep.StepId);
+            return new SupervisorDecision(ExecutionDecision.CompleteTask, ContinuationReason.CompletionAccepted);
         }
 
-        var decision = DecideAfterTurn(
-            claimAccepted: false,
-            snapshot.Outcome,
-            snapshot.Plan,
-            snapshot.PendingQueueItems,
-            snapshot.CompletionRejections,
-            maxCompletionRejections,
-            snapshot.ConsecutiveStalledTurns,
-            maxStalledTurns);
+        // 2. Hard interrupts: the user cancelled, or the generation failed.
+        if (snapshot.Outcome == GenerationOutcome.Cancelled)
+        {
+            return new SupervisorDecision(ExecutionDecision.AwaitUser, ContinuationReason.UserCancelled);
+        }
+        if (snapshot.Outcome == GenerationOutcome.Error)
+        {
+            return new SupervisorDecision(ExecutionDecision.FailTask, ContinuationReason.Error);
+        }
 
-        // The snapshot knows the step records; surface the step id rather than raw text.
-        return decision with { NextStepId = nextStepId ?? decision.NextStepId };
+        // 3. A model that keeps claiming completion while work stays open is the "same action
+        //    without progress" failure — halt before cycling forever.
+        if (snapshot.CompletionRejections >= maxCompletionRejections)
+        {
+            return new SupervisorDecision(ExecutionDecision.Pause, ContinuationReason.VerificationFailed, nextStepId);
+        }
+
+        // 4. Repeated tool turns with no plan progress = silent failure; reassess the approach.
+        if (snapshot.ConsecutiveStalledTurns >= maxStalledTurns && openWork)
+        {
+            return new SupervisorDecision(ExecutionDecision.Replan, ContinuationReason.StagnationDetected, nextStepId);
+        }
+
+        // 5. Autonomous-mode protocol failure: the model produced text but NO action (no tool
+        //    call, no completion claim, no replan) while work remains open.
+        if (snapshot.Outcome == GenerationOutcome.NoActionProduced && openWork)
+        {
+            return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced, nextStepId);
+        }
+
+        // 6. A parsed tool call that changed ZERO task state is a suspicious/repeated/failed
+        //    action — the model asked for a tool but nothing executed (gate rejection), the
+        //    plan did not move, and no file changed. Repair the protocol rather than treating
+        //    the un-executed call as progress.
+        if (snapshot.Outcome == GenerationOutcome.ToolCallProduced && !madeProgress && openWork)
+        {
+            return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.FailedActionNoProgress, nextStepId);
+        }
+
+        // 7. NO-FACTUAL-PROGRESS RULE: the model's text volume is never progress. When the
+        //    current step's contract requires an EXECUTABLE action (inspection, mutation,
+        //    verification, research, commands) and this generation changed ZERO task state, a
+        //    text-only "completed turn" is exactly the 2,500-token essay failure — route it to
+        //    RepairProtocol. Reason/Summary/UserInput steps are exempt (their deliverable IS
+        //    text). Only genuinely COMPLETED text-only generations are "talking": a cancelled
+        //    turn, a truncation, a degenerate loop, or an already-classified NoActionProduced
+        //    keep their own recovery paths (AwaitUser / auto-continue / loop correction).
+        if (openWork && !madeProgress &&
+            snapshot.Outcome is GenerationOutcome.CompletedTurn or GenerationOutcome.ModelEndedEarly &&
+            currentStep != null && RequiresExecution(currentStep.ExpectedActionKind))
+        {
+            return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced, currentStep.StepId);
+        }
+
+        // 8. A verification step whose turn produced NO evidence is not verified: "done" is
+        //    rejected — the step stays open and the model must produce evidence (build, tests,
+        //    inspection) rather than narrating success.
+        if (openWork && currentStep?.ExpectedActionKind == StepActionKind.Verification &&
+            !delta.Contains(StateDeltaKind.EvidenceAdded))
+        {
+            return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.VerificationFailed, nextStepId);
+        }
+
+        // 9. Open work remains → continue the current step.
+        if (openWork)
+        {
+            var reason = snapshot.Outcome switch
+            {
+                GenerationOutcome.OutputBudgetExhausted or GenerationOutcome.GenerationCutShort => ContinuationReason.GenerationTruncated,
+                GenerationOutcome.ModelEndedEarly => ContinuationReason.ModelEndedEarly,
+                GenerationOutcome.ContextExhausted => ContinuationReason.ContextCompacted,
+                GenerationOutcome.DegenerateLoop => ContinuationReason.ModelEndedEarly,
+                _ => ContinuationReason.StepIncomplete
+            };
+            return new SupervisorDecision(ExecutionDecision.ContinueStep, reason, nextStepId);
+        }
+
+        // 10. Queued work pending → continue.
+        if (snapshot.PendingQueueItems > 0)
+        {
+            return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.StepIncomplete, nextStepId);
+        }
+
+        // 11. All items are checked off but the model didn't seal completion — direct it to.
+        if (snapshot.Plan.Count > 0)
+        {
+            return new SupervisorDecision(ExecutionDecision.Verify, ContinuationReason.StepIncomplete, nextStepId);
+        }
+
+        return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.StepIncomplete, nextStepId);
     }
 
     /// <summary>

@@ -22,7 +22,8 @@ public sealed record TaskExecutionSnapshot(
     GenerationOutcome Outcome,
     StateDelta StateDelta,
     int CompletionRejections,
-    int ConsecutiveStalledTurns)
+    int ConsecutiveStalledTurns,
+    bool CompletionClaimAccepted = false)
 {
     /// <summary>Number of plan items still open — the completion gate's core fact.</summary>
     public int OpenPlanItems => Plan.Count(e => !e.Done);

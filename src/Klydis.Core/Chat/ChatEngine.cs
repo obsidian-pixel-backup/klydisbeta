@@ -1142,7 +1142,9 @@ public class ChatEngine(
         var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
         var tools = toolsDisabled ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
-        var toolsSchema = toolsDisabled ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
+        // P1.8: the FULL schema is kept for the qwen-prelude/grammar gate below; the schema the
+        // model actually sees is sliced per-iteration to the current step's allowed set.
+        var fullToolsSchema = toolsDisabled ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
 
         // Qwen3.5/Qwen3.6 thinking models (qwen35 / qwen35moe architectures): their embedded chat
         // template expects (a) tools presented as an OpenAI-style JSON schema inside a <tools>
@@ -1164,7 +1166,7 @@ public class ChatEngine(
         string lessonsSection = toolsDisabled
             ? string.Empty
             : await (_adaptiveLearning?.BuildLessonsSectionAsync(modelName, ct: ct) ?? Task.FromResult(string.Empty));
-        bool useQwenNativePrelude = !toolsDisabled && isQwenThinkingModel && !string.IsNullOrWhiteSpace(toolsSchema);
+        bool useQwenNativePrelude = !toolsDisabled && isQwenThinkingModel && !string.IsNullOrWhiteSpace(fullToolsSchema);
         if (_adaptiveLearning != null && useQwenNativePrelude)
         {
             useQwenNativePrelude = !await _adaptiveLearning.HasNativeToolFormatIssuesAsync(modelName, ct);
@@ -1200,6 +1202,11 @@ public class ChatEngine(
 
         int iterationCount = 0;
         const int MAX_ITERATIONS = 100;
+
+        // Turn-level count of task_complete claims the deterministic gate rejected this turn
+        // (across all iterations). Feeds the snapshot so the supervisor's Pause decision
+        // reflects the real rejection history instead of a hardcoded zero.
+        int completionRejectionsThisTurnTotal = 0;
 
         // Auto-continuation ("your output was truncated — continue") budget: long-form
         // generations (stories, reports) are resumed across chunks, so the instruction may be
@@ -1340,6 +1347,49 @@ public class ChatEngine(
         {
             iterationCount++;
             lastTurnActivityUtc = DateTime.UtcNow;
+
+            // P1.8 — the current step's execution contract, resolved ONCE per iteration from the
+            // durable plan. Every prompt projection in this iteration (the sliced tool schema,
+            // CURRENT STEP ALLOWED TOOLS, the CURRENT ACTION CONTRACT) and the runtime Action
+            // Gate derive from this TaskStep / its ActionObligation — never from re-classifying
+            // step text here. ChatEngine RENDERS the obligation; StepClassifier (the single
+            // owner of step semantics) is never called directly in the loop.
+            Klydis.Core.Tasks.TaskStep? currentStepForTurn = null;
+            Klydis.Core.Tasks.ActionObligation? currentObligationForTurn = null;
+            try
+            {
+                currentStepForTurn = Klydis.Core.Tasks.TaskStepBuilder.CurrentStep(
+                    Klydis.Core.Tasks.TaskStepBuilder.Build(
+                        toolExecutor.GetSessionPlanEntries(generatingSessionId), CurrentTaskId));
+                currentObligationForTurn = currentStepForTurn == null
+                    ? null
+                    : Klydis.Core.Tasks.ActionObligation.FromStep(currentStepForTurn);
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Failed to resolve the current step for the prompt contract.");
+            }
+
+            // P1.8 — expose ONLY the current step's allowed tools in the model schema. The model
+            // sees a small, deterministic obligation surface instead of the full tool universe,
+            // so a weaker model never has to hold "40 tools exist but only 3 are allowed right
+            // now" in its head. The Action Gate remains the runtime second line of defense
+            // against the full registered surface. When the step declares no restriction
+            // (StepClassification.Default), the full schema stays visible.
+            string toolsSchema = fullToolsSchema;
+            if (!toolsDisabled && currentStepForTurn?.AllowedTools != null && tools.Count > 0)
+            {
+                var allowedForStep = currentStepForTurn.AllowedTools;
+                var sliced = new List<ToolDefinition>(tools.Count);
+                foreach (var t in tools)
+                {
+                    if (allowedForStep.Contains(t.Name)) sliced.Add(t);
+                }
+                if (sliced.Count > 0)
+                {
+                    toolsSchema = toolExecutor.FormatToolsForPrompt(sliced);
+                }
+            }
 
             // Wall-clock budget: a turn is bounded by MaxTurnDuration (when set) in addition
             // to the iteration cap — checked between iterations so a native decode is never
@@ -1645,11 +1695,8 @@ public class ChatEngine(
                     try
                     {
                         // P1.8: the current step's allowed tools come from its TaskStep record
-                        // (built by the single StepClassifier), not from text matching here.
-                        var stepForPolicy = Klydis.Core.Tasks.TaskStepBuilder.CurrentStep(
-                            Klydis.Core.Tasks.TaskStepBuilder.Build(
-                                toolExecutor.GetSessionPlanEntries(generatingSessionId), CurrentTaskId));
-                        var stepAllowedForPrompt = stepForPolicy?.AllowedTools;
+                        // (resolved once per iteration above) — never from text matching here.
+                        var stepAllowedForPrompt = currentStepForTurn?.AllowedTools;
                         if (stepAllowedForPrompt != null)
                         {
                             planHeader += "\nCURRENT STEP ALLOWED TOOLS (this step may ONLY call these tools):\n" +
@@ -1692,26 +1739,20 @@ public class ChatEngine(
         // model must not have to infer that it is supposed to act (review §31/§16).
         if (isGoalMode && !toolsDisabled)
         {
-            string nextStepText;
-            try
-            {
-                var planNow = toolExecutor.GetSessionPlanEntries(generatingSessionId);
-                nextStepText = planNow.FirstOrDefault(e => !e.Done)?.Text
-                    ?? "no open plan step — verify the result and call 'task_complete'";
-            }
-            catch (Exception ex)
-            {
-                logger.LogDebug(ex, "Failed to read plan for the autonomous action contract.");
-                nextStepText = "inspect the workspace and proceed with the task";
-            }
+            // P1.8: the contract is rendered from the current TaskStep's ActionObligation — the
+            // single owner of step semantics. ChatEngine never re-classifies step text itself
+            // (no StepClassifier.Classify call lives in the loop). The obligation is resolved
+            // once per iteration above; when it cannot be read, fall back to the generic
+            // directive.
+            string nextStepText = currentObligationForTurn?.Title
+                ?? "no open plan step — verify the result and call 'task_complete'";
 
             // The contract is OBLIGATION-AWARE: a Reason step (capture requirements / creative
             // direction) has NO workspace tools — demanding "a tool action now" on such a step
             // would force the model into a tool call the gate then rejects (the Qwen export's
             // failure: it invented web-research tools for a requirements step). The required
             // output follows the step's expected action kind instead of assuming tool_call.
-            var stepClass = Klydis.Core.Tasks.StepClassifier.Classify(nextStepText);
-            string requiredOutput = stepClass.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Reason
+            string requiredOutput = currentObligationForTurn?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Reason
                 ? "REQUIRED OUTPUT THIS TURN: produce the design direction / reasoning this step requires as TEXT. No workspace tool is permitted for this step — the runtime will reject any tool call.\n"
                 : "REQUIRED OUTPUT THIS TURN: perform exactly ONE tool action from the current step's allowed set — inspect, modify, or verify. Text alone is NOT accepted as task progress.\n";
             string creativeLeadLine = IsCreativeLeadRequest(currentUserMessage)
@@ -2479,6 +2520,29 @@ public class ChatEngine(
                         result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, stallCts.Token, inferenceEngine.CurrentModelPath);
                         // P1.8: record the factual tool execution for the state delta.
                         turnState.RecordTool(req.Name, result.Success);
+                        // P1.8: a successful file write/edit is a factual FILE change — the
+                        // delta records it so file mutation is observable progress, not just a
+                        // tool that ran.
+                        if (result.Success &&
+                            (req.Name.Equals("write_file", StringComparison.OrdinalIgnoreCase) ||
+                             req.Name.Equals("edit_file", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            string? changedPath = null;
+                            if (req.Arguments != null && req.Arguments.TryGetValue("path", out var pathArg))
+                            {
+                                changedPath = ToolExecutor.UnwrapJsonElement(pathArg)?.ToString();
+                            }
+                            turnState.RecordFileChanged(changedPath ?? req.Name);
+                        }
+
+                        // P1.8: on a Verification step, a successful tool execution IS evidence —
+                        // recorded so the supervisor can distinguish a step that produced
+                        // verification evidence from one that merely ran tools without verifying.
+                        if (result.Success &&
+                            currentTaskStep?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Verification)
+                        {
+                            turnState.RecordEvidence($"{req.Name} succeeded");
+                        }
                         // P1.12: a SUCCESSFUL side-effect-bearing action is now part of this
                         // run's executed set — the gate will reject a replay of the same
                         // action instead of duplicating its effects. Read-only tools are not
@@ -2527,6 +2591,7 @@ public class ChatEngine(
                         }
 
                         completionRejectionsThisTurn++;
+                        completionRejectionsThisTurnTotal++;
                         string gateRejection = $"[SYSTEM — COMPLETION CLAIM REJECTED BY DETERMINISTIC VERIFIER]\nYour task_complete call was NOT accepted as completion. The harness verified the plan checklist and found open work:\n  {rejectionReason}\nReal 'done' requires every plan item to be checked off. Finish the open item(s) above, verify your work, then call task_complete again only when the checklist is genuinely empty.\n";
                         logger.LogWarning("Supervisor REJECTED task_complete for task {TaskId} (rejection {N}): {Reason}", CurrentTaskId, completionRejectionsThisTurn, rejectionReason);
                         var gateRejObj = new ChatMessage(ChatRole.Tool, gateRejection, "task_complete");
@@ -2752,8 +2817,9 @@ public class ChatEngine(
                             pendingNow,
                             outcome,
                             turnState.Build(),
-                            CompletionRejections: 0,
-                            ConsecutiveStalledTurns: 0);
+                            CompletionRejections: completionRejectionsThisTurnTotal,
+                            ConsecutiveStalledTurns: 0,
+                            CompletionClaimAccepted: _goalCompletedThisTurn);
                         // _runtime is a captured field; the enclosing null guard cannot be
                         // narrowed across awaits, so suppress explicitly (the guard holds).
                         var decision = await _runtime!.DecideAfterTurnAsync(snapshot, maxCompletionRejections: 3);

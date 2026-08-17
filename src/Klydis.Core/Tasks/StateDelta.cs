@@ -46,7 +46,10 @@ public sealed record StateDelta(IReadOnlyList<StateDeltaEntry> Entries)
 
     public bool IsEmpty => Entries.Count == 0;
 
-    public bool Has(StateDeltaKind kind) => Entries.Count > 0 && Entries[^1].Kind == kind;
+    /// <summary>True when ANY entry of the kind exists. (P1.8-Fix-5: this is the contains
+    /// semantics — a turn of ToolExecuted/ToolSucceeded/FileChanged must report
+    /// Has(ToolExecuted) == true even though ToolExecuted is not the LAST entry.)</summary>
+    public bool Has(StateDeltaKind kind) => Contains(kind);
 
     /// <summary>True when any entry of the kind exists.</summary>
     public bool Contains(StateDeltaKind kind)

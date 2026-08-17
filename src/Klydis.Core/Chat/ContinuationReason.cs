@@ -43,5 +43,11 @@ public enum ContinuationReason
 
     /// <summary>Autonomous mode produced text but no action — the protocol-repair loop must
     /// re-engage the model with a compact action-required instruction.</summary>
-    NoActionProduced
+    NoActionProduced,
+
+    /// <summary>A parsed tool call changed ZERO task state (nothing executed, no plan move,
+    /// no file change) while work remains open — a suspicious/repeated/failed action. The
+    /// protocol-repair loop re-engages the model; text and un-executed calls are never
+    /// progress.</summary>
+    FailedActionNoProgress
 }

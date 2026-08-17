@@ -67,11 +67,19 @@ public static class StepClassifier
         "creative lead"
     };
 
+    /// <summary>
+    /// Mutation markers are ACTION VERBS ONLY. Generic nouns (design, page, section,
+    /// component, hero, style) are deliberately NOT signals: "Design the landing-page
+    /// architecture and visual direction" is a PLANNING step (a design direction, not a
+    /// file edit), and a bare noun like "page" says nothing about whether the model should
+    /// be handed write_file. Classification must never sweep a design/planning step into
+    /// the mutation surface — that is exactly the misclassification that handed the Qwen
+    /// export write_file on a step whose deliverable is a design decision.
+    /// </summary>
     private static readonly string[] MutationMarkers =
     {
         "build the", "implement", "create the", "write the", "add the", "update the",
-        "fix the", "design the", "style the", "hero", "component", "section", "page",
-        "landing page", "configure", "refactor", "develop the"
+        "fix the", "modify", "edit", "configure", "refactor", "develop the"
     };
 
     private static readonly string[] ResearchMarkers =
@@ -81,10 +89,17 @@ public static class StepClassifier
         "gather requirements", "gather the"
     };
 
+    /// <summary>
+    /// Planning markers include the design verbs: "Design the landing-page architecture and
+    /// visual direction", "Design the approach" and "Design the UI layout" are PLANNING
+    /// steps (their deliverable is a design direction), so "design the" selects Plan — and
+    /// because Planning is evaluated BEFORE Mutation, those steps can never be swept into
+    /// the file-mutation surface.
+    /// </summary>
     private static readonly string[] PlanningMarkers =
     {
         "plan the", "create a plan", "define the architecture", "design the architecture",
-        "outline the", "generate the plan", "architecture"
+        "design the", "outline the", "generate the plan", "architecture"
     };
 
     /// <summary>
@@ -133,6 +148,20 @@ public static class StepClassifier
                                   "Creative proposals allowed when the user asked for a creative lead" },
                 condition: "requirements captured / creative direction produced");
         }
+        // PLANNING comes BEFORE inspection/mutation (semantic precedence, P1.8-Fix-1): a
+        // design/architecture step is a Plan (its deliverable is a design direction), never
+        // a FileMutation. "Design the landing-page architecture and visual direction" must
+        // yield AllowedTools = { plan } + control tools — NOT write_file/edit_file — or the
+        // model is handed the mutation surface for a step whose output is a decision.
+        if (PlanningMarkers.Any(t.Contains))
+        {
+            return Make(StepActionKind.Plan,
+                new[] { "plan" },
+                skills: new[] { "planning" },
+                artifacts: Array.Empty<string>(),
+                criteria: new[] { "Plan reflects reality" },
+                condition: "plan created or revised");
+        }
         if (InspectionMarkers.Any(t.Contains))
         {
             return Make(StepActionKind.Inspect,
@@ -141,15 +170,6 @@ public static class StepClassifier
                 artifacts: Array.Empty<string>(),
                 criteria: new[] { "Workspace inspected", "Findings factual (no invented contents)" },
                 condition: "workspace inspection evidence");
-        }
-        if (MutationMarkers.Any(t.Contains))
-        {
-            return Make(StepActionKind.FileMutation,
-                new[] { "read_file", "write_file", "edit_file", "list_directory", "search_files" },
-                skills: new[] { "file-mutation" },
-                artifacts: new[] { "Code/Document changed" },
-                criteria: new[] { "Files actually changed", "No syntax errors" },
-                condition: "file mutation evidence");
         }
         if (ResearchMarkers.Any(t.Contains))
         {
@@ -160,14 +180,14 @@ public static class StepClassifier
                 criteria: new[] { "Findings from real tool results only" },
                 condition: "research evidence");
         }
-        if (PlanningMarkers.Any(t.Contains))
+        if (MutationMarkers.Any(t.Contains))
         {
-            return Make(StepActionKind.Plan,
-                new[] { "plan" },
-                skills: new[] { "planning" },
-                artifacts: Array.Empty<string>(),
-                criteria: new[] { "Plan reflects reality" },
-                condition: "plan created or revised");
+            return Make(StepActionKind.FileMutation,
+                new[] { "read_file", "write_file", "edit_file", "list_directory", "search_files" },
+                skills: new[] { "file-mutation" },
+                artifacts: new[] { "Code/Document changed" },
+                criteria: new[] { "Files actually changed", "No syntax errors" },
+                condition: "file mutation evidence");
         }
 
         // No marker matched: no restriction (existence-gated only), no specific action kind.
