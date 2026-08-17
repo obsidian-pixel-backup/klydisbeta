@@ -616,6 +616,9 @@ public class ChatEngine(
     /// </summary>
     public KvCacheMemoryEstimate? CurrentKvCacheEstimate => inferenceEngine.CurrentKvCacheEstimate;
 
+    /// <summary>The loaded model's context window size in tokens (diagnostics/exports).</summary>
+    public uint ContextSize => inferenceEngine.ContextSize;
+
     /// <summary>
     /// Clears the chat history to start a new session.
     /// </summary>
@@ -1106,6 +1109,21 @@ public class ChatEngine(
         // Fail-closed: when the task layer itself failed, the turn runs with tools disabled
         // and no task context (same exposure as conversation) plus an explicit runtime notice.
         bool toolsDisabled = isConversation || taskLayerFailed;
+
+        // P1.8 — factual state collector: what ACTUALLY changed this turn (tool executions,
+        // plan/step progress). The supervisor's notion of progress comes from this, never
+        // from how much text the model produced.
+        var turnState = new Klydis.Core.Tasks.TurnStateCollector();
+        IReadOnlyList<ToolExecutor.PlanEntry>? planAtTurnStart = null;
+        try
+        {
+            planAtTurnStart = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+        }
+        catch (Exception ex)
+        {
+            // Plan unavailable — the delta simply won't report plan changes.
+            logger.LogDebug(ex, "Failed to capture turn-start plan for state delta.");
+        }
 
         // P1.6a: resolve the chat-template family through the model profile first — the
         // profile implements the corrected priority order (explicit override → embedded GGUF
@@ -1626,9 +1644,12 @@ public class ChatEngine(
                     // anything not listed is rejected before execution regardless of this text.
                     try
                     {
-                        var stepForPolicy = toolExecutor.GetSessionPlanEntries(generatingSessionId)
-                            .FirstOrDefault(e => !e.Done)?.Text;
-                        var stepAllowedForPrompt = Klydis.Core.Tasks.StepToolPolicy.ResolveAllowedTools(stepForPolicy);
+                        // P1.8: the current step's allowed tools come from its TaskStep record
+                        // (built by the single StepClassifier), not from text matching here.
+                        var stepForPolicy = Klydis.Core.Tasks.TaskStepBuilder.CurrentStep(
+                            Klydis.Core.Tasks.TaskStepBuilder.Build(
+                                toolExecutor.GetSessionPlanEntries(generatingSessionId), CurrentTaskId));
+                        var stepAllowedForPrompt = stepForPolicy?.AllowedTools;
                         if (stepAllowedForPrompt != null)
                         {
                             planHeader += "\nCURRENT STEP ALLOWED TOOLS (this step may ONLY call these tools):\n" +
@@ -1683,9 +1704,25 @@ public class ChatEngine(
                 logger.LogDebug(ex, "Failed to read plan for the autonomous action contract.");
                 nextStepText = "inspect the workspace and proceed with the task";
             }
+
+            // The contract is OBLIGATION-AWARE: a Reason step (capture requirements / creative
+            // direction) has NO workspace tools — demanding "a tool action now" on such a step
+            // would force the model into a tool call the gate then rejects (the Qwen export's
+            // failure: it invented web-research tools for a requirements step). The required
+            // output follows the step's expected action kind instead of assuming tool_call.
+            var stepClass = Klydis.Core.Tasks.StepClassifier.Classify(nextStepText);
+            string requiredOutput = stepClass.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Reason
+                ? "REQUIRED OUTPUT THIS TURN: produce the design direction / reasoning this step requires as TEXT. No workspace tool is permitted for this step — the runtime will reject any tool call.\n"
+                : "REQUIRED OUTPUT THIS TURN: perform exactly ONE tool action from the current step's allowed set — inspect, modify, or verify. Text alone is NOT accepted as task progress.\n";
+            string creativeLeadLine = IsCreativeLeadRequest(currentUserMessage)
+                ? "CREATIVE LEAD: the user asked you to take a creative lead — propose a working direction (name, copy, palette, layout) clearly labeled PROPOSED instead of asking for details. Unknowns never block execution.\n"
+                : "";
+
             sysPrompt = sysPrompt.TrimEnd() + "\n\n### CURRENT ACTION CONTRACT (AUTONOMOUS MODE — READ IMMEDIATELY BEFORE RESPONDING)\n" +
                 "CURRENT STEP: " + nextStepText + "\n" +
-                "REQUIRED OUTPUT THIS TURN: perform a tool action now — inspect, modify, or verify. Text alone is NOT accepted as task progress.\n" +
+                requiredOutput +
+                "RUNTIME OWNS: the plan, step transitions, tool execution, verification and completion. You do NOT plan the steps, create a todo list, advance steps yourself, or narrate the runtime — you produce ONE valid action for the current step.\n" +
+                creativeLeadLine +
                 "DO NOT: greet the user, ask permission, ask what to do next, or describe what you would do. Execute the next action.\n" +
                 "DELIVERABLES: code, pages, reports, and designs belong in FILES — write them with 'write_file' and let the user view them in the PREVIEW tab. Do NOT dump large code blocks or markup into the chat reply.\n" +
                 "FACTS: only what the user stated or a tool verified is KNOWN. Never present assumptions or creative suggestions as user-provided facts — company name, products, audience, and existing assets are UNKNOWN until stated or verified.\n" +
@@ -2289,23 +2326,27 @@ public class ChatEngine(
                 bool validationEscalated = false;
                 int completionRejectionsThisTurn = 0;
 
-                // P1.7a — ACTION GATE setup: deterministic pre-execution validation. The
-                // registered surface, the current open step and its allowed-tool policy are
-                // resolved ONCE per turn; every request is validated against them before
-                // execution. Rejection is a RUNTIME decision — prompt text never is.
+                // P1.7a/P1.8 — ACTION GATE setup: deterministic pre-execution validation. The
+                // registered surface and the current step's execution contract (TaskStep →
+                // ActionObligation, produced by the single StepClassifier) are resolved ONCE
+                // per turn; every request is validated against them before execution.
+                // Rejection is a RUNTIME decision — prompt text never is.
                 var registeredToolDefs = await toolExecutor.GetToolDefinitionsAsync();
+                TaskStep? currentTaskStep = null;
                 string? currentStepText = null;
                 try
                 {
-                    currentStepText = toolExecutor.GetSessionPlanEntries(generatingSessionId)
-                        .FirstOrDefault(e => !e.Done)?.Text;
+                    currentTaskStep = Klydis.Core.Tasks.TaskStepBuilder.CurrentStep(
+                        Klydis.Core.Tasks.TaskStepBuilder.Build(
+                            toolExecutor.GetSessionPlanEntries(generatingSessionId), CurrentTaskId));
+                    currentStepText = currentTaskStep?.Title;
                 }
                 catch (Exception ex)
                 {
                     // No plan state is fine — the existence gate still applies.
                     logger.LogDebug(ex, "Failed to read current step for action gate.");
                 }
-                var stepAllowedTools = Klydis.Core.Tasks.StepToolPolicy.ResolveAllowedTools(currentStepText);
+                var stepAllowedTools = currentTaskStep?.AllowedTools;
                 int actionGateRejectionsThisTurn = 0;
                 int turnActionOrdinal = 0;
                 string? activeRunId = _runtime?.GetActiveRunId(CurrentTaskId ?? string.Empty);
@@ -2428,6 +2469,8 @@ public class ChatEngine(
                     try
                     {
                         result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, stallCts.Token, inferenceEngine.CurrentModelPath);
+                        // P1.8: record the factual tool execution for the state delta.
+                        turnState.RecordTool(req.Name, result.Success);
                     }
                     finally
                     {
@@ -2662,9 +2705,40 @@ public class ChatEngine(
                             noActionProduced: noActionProducedThisTurn);
                         var planNow = toolExecutor.GetSessionPlanEntries(generatingSessionId);
                         var pendingNow = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId).Count ?? 0;
-                        var decision = await _runtime.DecideAfterTurnAsync(
-                            CurrentTaskId, outcome, claimAccepted: false, planNow, pendingNow,
-                            completionRejections: 0, maxCompletionRejections: 3);
+
+                        // P1.8: plan progress this turn is factual evidence — a step checked
+                        // off is progress; text is not.
+                        if (planAtTurnStart != null)
+                        {
+                            int doneBefore = planAtTurnStart.Count(e => e.Done);
+                            int doneNow = planNow.Count(e => e.Done);
+                            if (doneNow > doneBefore)
+                            {
+                                foreach (var done in planNow.Where(p => p.Done &&
+                                             planAtTurnStart.Any(b => b.Text == p.Text && !b.Done)))
+                                {
+                                    turnState.RecordStepCompleted(done.Text);
+                                }
+                                turnState.RecordPlanChange($"plan advanced: {doneBefore} -> {doneNow} of {planNow.Count} done");
+                            }
+                        }
+
+                        var currentStep = Klydis.Core.Tasks.TaskStepBuilder.CurrentStep(
+                            Klydis.Core.Tasks.TaskStepBuilder.Build(planNow, CurrentTaskId));
+                        var snapshot = new Klydis.Core.Tasks.TaskExecutionSnapshot(
+                            CurrentTaskId,
+                            CurrentTaskObjective,
+                            _runtime?.GetActiveRunId(CurrentTaskId ?? string.Empty),
+                            currentStep,
+                            planNow,
+                            pendingNow,
+                            outcome,
+                            turnState.Build(),
+                            CompletionRejections: 0,
+                            ConsecutiveStalledTurns: 0);
+                        // _runtime is a captured field; the enclosing null guard cannot be
+                        // narrowed across awaits, so suppress explicitly (the guard holds).
+                        var decision = await _runtime!.DecideAfterTurnAsync(snapshot, maxCompletionRejections: 3);
                         logger.LogInformation(
                             "Supervisor: outcome={Outcome} decision={Decision} reason={Reason} nextStep={NextStep}",
                             outcome, decision.Decision, decision.Reason, decision.NextStepId ?? "—");
@@ -2928,6 +3002,30 @@ public class ChatEngine(
     }
 
     /// <summary>
+    /// Detects a user request to take a creative lead ("TAKE A CREATIVE LEAD", "don't expect
+    /// details from me", "your call", ...). These requests flip the UnknownPolicy to
+    /// CreativeProposal: missing details become clearly-labeled proposals, never blockers —
+    /// the model must not ask for what the user explicitly delegated. Detection is
+    /// conservative: only explicit creative-freedom signals match; everything else keeps the
+    /// ask-first default.
+    /// </summary>
+    private static bool IsCreativeLeadRequest(string? userMessage)
+    {
+        if (string.IsNullOrWhiteSpace(userMessage)) return false;
+        string t = userMessage.ToLowerInvariant();
+        return t.Contains("creative lead") ||
+               t.Contains("creative freedom") ||
+               t.Contains("creative control") ||
+               t.Contains("don't expect details") ||
+               t.Contains("dont expect details") ||
+               t.Contains("do not expect details") ||
+               t.Contains("your call") ||
+               t.Contains("you decide") ||
+               t.Contains("use your judgment") ||
+               t.Contains("take the lead");
+    }
+
+    /// <summary>
     /// Builds the action directive for an autonomous loop correction from the current step
     /// text. The directive follows the step's expected action instead of assuming a tool
     /// call: implementation/inspection steps demand ONE tool call; verification steps demand
@@ -2948,24 +3046,26 @@ public class ChatEngine(
             return "Execute exactly ONE tool call that advances the current task. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute.";
         }
 
-        string step = currentStep.ToLowerInvariant();
-        bool isVerificationStep = ContainsAny(step,
-            "verify", "verification", "build", "test", "run the", "preview", "inspect the result");
-        bool isSummaryStep = ContainsAny(step, "summarize", "present the", "finalize");
+        // P1.8: the directive is derived from the step's ACTION OBLIGATION — the classifier
+        // (single owner of step semantics) produces the expected action kind and allowed
+        // tools; this method only renders them. No phrase matching lives here anymore.
+        var step = Klydis.Core.Tasks.TaskStepBuilder.FromPlanEntry(
+            new ToolExecutor.PlanEntry(currentStep, false), 0, null);
+        var obligation = Klydis.Core.Tasks.ActionObligation.FromStep(step)!;
+        string tools = obligation.AllowedTools == null
+            ? "any registered tool (existence-checked by the runtime)"
+            : string.Join(", ", obligation.AllowedTools.OrderBy(n => n, StringComparer.Ordinal));
 
-        if (isSummaryStep)
+        return obligation.ExpectedActionKind switch
         {
-            return $"The current step '{currentStep}' requires the final deliverable. Produce it NOW as your response — write it to a file if it is code or a document ('write_file'), then present the result. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — deliver.";
-        }
-        if (isVerificationStep)
-        {
-            return $"The current step '{currentStep}' requires verification EVIDENCE. Execute the verification now — run the build/tests or inspect the files ('run_command', 'read_file') and report the factual result. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — verify.";
-        }
-        return $"Execute exactly ONE tool call that advances the current step '{currentStep}'. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute.";
+            Klydis.Core.Tasks.StepActionKind.Summary =>
+                $"The current step '{currentStep}' requires the final deliverable. Produce it NOW — write it to a file if it is code or a document ('write_file'), then present the result. Allowed tools for this step: [{tools}]. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — deliver.",
+            Klydis.Core.Tasks.StepActionKind.Verification =>
+                $"The current step '{currentStep}' requires verification EVIDENCE. Execute the verification now — run the build/tests or inspect the files and report the factual result. Allowed tools for this step: [{tools}]. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — verify.",
+            _ =>
+                $"Execute exactly ONE tool call that advances the current step '{currentStep}'. Allowed tools for this step: [{tools}]. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute."
+        };
     }
-
-    private static bool ContainsAny(string text, params string[] markers)
-        => markers.Any(m => text.Contains(m, StringComparison.Ordinal));
 
     /// <summary>
     /// Short human-readable description of a loop reason, used for the user-visible notice.

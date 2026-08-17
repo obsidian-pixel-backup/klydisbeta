@@ -174,6 +174,17 @@ public class AgentRuntime(
     }
 
     /// <summary>
+    /// P1.8: the supervisor's decision from a TaskExecutionSnapshot — the ONLY input the
+    /// supervisor needs. The live loop builds the snapshot (task/run/step/plan/queue/outcome/
+    /// state delta) and hands it over; the decision is pure and deterministic.
+    /// </summary>
+    public Task<SupervisorDecision> DecideAfterTurnAsync(
+        TaskExecutionSnapshot snapshot,
+        int maxCompletionRejections = 3,
+        int maxStalledTurns = 6)
+        => Task.FromResult(AgentSupervisor.DecideAfterTurn(snapshot, maxCompletionRejections, maxStalledTurns));
+
+    /// <summary>
     /// The supervisor's decision after a generation, evaluated against the live durable state.
     /// Pure decision; the caller implements the mechanics.
     /// </summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using Klydis.Core.Chat;
 
 namespace Klydis.Core.Tasks;
@@ -21,6 +22,9 @@ public enum ActionGateError
 
     /// <summary>A required parameter is missing from the action's arguments.</summary>
     MissingRequiredArgument,
+
+    /// <summary>A present argument violates the parameter's declared type or enum.</summary>
+    InvalidArgument,
 
     /// <summary>run_command was called with another tool's name as the command.</summary>
     CommandDisguisedAsTool
@@ -45,6 +49,7 @@ public readonly record struct ActionGateVerdict(
 ///
 ///   tool exists in the registered surface        (MODEL_INVENTED_TOOL)
 ///   tool is permitted by the current step        (ACTION_NOT_ALLOWED_FOR_STEP)
+///     (null step set = no restriction; empty set = NO tools permitted)
 ///   required arguments are present               (ACTION_SCHEMA_INVALID)
 ///   run_command is not disguising another tool   (MODEL_INVENTED_TOOL)
 ///
@@ -59,6 +64,7 @@ public static class ActionGate
     public const string UnknownToolCode = "MODEL_INVENTED_TOOL";
     public const string ToolNotAllowedForStepCode = "ACTION_NOT_ALLOWED_FOR_STEP";
     public const string MissingRequiredArgumentCode = "ACTION_SCHEMA_INVALID";
+    public const string InvalidArgumentCode = "ACTION_SCHEMA_INVALID";
     public const string CommandDisguisedAsToolCode = "MODEL_INVENTED_TOOL";
 
     /// <summary>The machine-searchable error code for a gate error.</summary>
@@ -67,6 +73,7 @@ public static class ActionGate
         ActionGateError.UnknownTool => UnknownToolCode,
         ActionGateError.ToolNotAllowedForStep => ToolNotAllowedForStepCode,
         ActionGateError.MissingRequiredArgument => MissingRequiredArgumentCode,
+        ActionGateError.InvalidArgument => InvalidArgumentCode,
         ActionGateError.CommandDisguisedAsTool => CommandDisguisedAsToolCode,
         _ => "ACTION_GATE_UNKNOWN"
     };
@@ -101,11 +108,14 @@ public static class ActionGate
                 available, currentStep);
         }
 
-        // 2. Step scoping: when the current step declares an allowed-tool set, the action must
-        //    be in it. (Harness-control tools are always permitted by the caller's policy —
-        //    StepToolPolicy unions them in — but the gate validates whatever it is given.)
-        if (stepAllowedTools != null && stepAllowedTools.Count > 0 &&
-            !stepAllowedTools.Contains(request.Name))
+        // 2. Step scoping: a NON-NULL allowed-tool set is authoritative — the action must be
+        //    in it. NULL means the step declares NO restriction (existence-gated only). An
+        //    EMPTY set (or one containing only control tools) means NO workspace tool is
+        //    permitted — requirement/creative-direction steps are exactly that case. The two
+        //    states are semantically distinct and must not be collapsed: null = "not yet
+        //    declared", empty = "explicitly none". Harness-control tools (plan, task_complete,
+        //    ...) are unioned in by StepClassifier so they always pass.
+        if (stepAllowedTools != null && !stepAllowedTools.Contains(request.Name))
         {
             var allowed = string.Join(", ", stepAllowedTools
                 .OrderBy(n => n, StringComparer.Ordinal));
@@ -128,6 +138,32 @@ public static class ActionGate
             return new ActionGateVerdict(false, ActionGateError.MissingRequiredArgument,
                 $"Tool '{request.Name}' is missing required argument(s): [{string.Join(", ", missing)}]. " +
                 "Provide every required argument and retry.",
+                null, currentStep);
+        }
+
+        // 3b. Type + enum validation: a PRESENT argument must match the parameter's declared
+        // type and (when declared) its enum. A write_file path of 123, a plan action of
+        // "banana", or a max_results of -99999 is rejected before execution — invalid
+        // arguments must not reach the executor and create recovery loops.
+        var typeErrors = new List<string>();
+        foreach (var p in toolDef.Parameters)
+        {
+            var val = FindArgumentValue(request.Arguments, p.Name);
+            if (val == null) continue;
+            if (!IsTypeCompatible(val, p.Type))
+            {
+                typeErrors.Add($"{p.Name} (expected type {p.Type})");
+            }
+            else if (p.Enum != null && p.Enum.Length > 0 && !IsEnumValue(val, p.Enum))
+            {
+                typeErrors.Add($"{p.Name} (must be one of: {string.Join(", ", p.Enum)})");
+            }
+        }
+        if (typeErrors.Count > 0)
+        {
+            return new ActionGateVerdict(false, ActionGateError.InvalidArgument,
+                $"Tool '{request.Name}' has invalid argument value(s): [{string.Join("; ", typeErrors)}]. " +
+                "Correct the argument types/values and retry.",
                 null, currentStep);
         }
 
@@ -179,6 +215,54 @@ public static class ActionGate
             return !string.IsNullOrWhiteSpace(val.ToString());
         }
         return false;
+    }
+
+    private static object? FindArgumentValue(IDictionary<string, object>? args, string paramName)
+    {
+        if (args == null) return null;
+        foreach (var kvp in args)
+        {
+            if (!string.Equals(kvp.Key, paramName, StringComparison.OrdinalIgnoreCase)) continue;
+            return ToolExecutor.UnwrapJsonElement(kvp.Value);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Whether an argument value is compatible with a ToolParameter type declaration. Handles
+    /// the primitive shapes the parsers produce (string / JsonElement string / numbers /
+    /// booleans). A JSON string that holds a number stays a string — type mismatches like
+    /// path=123 (number where string declared) are what this rejects.
+    /// </summary>
+    private static bool IsTypeCompatible(object? val, string declaredType)
+    {
+        if (val == null) return true; // absence is the required-args check's job
+        string type = declaredType.ToLowerInvariant();
+        switch (type)
+        {
+            case "string":
+                return val is string || val is JsonElement je && je.ValueKind == JsonValueKind.String;
+            case "integer":
+                return val is int or long ||
+                       val is JsonElement jn && jn.ValueKind == JsonValueKind.Number &&
+                       jn.TryGetInt64(out _);
+            case "number":
+                return val is int or long or double or float ||
+                       val is JsonElement num && num.ValueKind == JsonValueKind.Number;
+            case "boolean":
+                return val is bool ||
+                       val is JsonElement jb && (jb.ValueKind == JsonValueKind.True || jb.ValueKind == JsonValueKind.False);
+            default:
+                // Unknown declared type: be permissive rather than wrongly rejecting.
+                return true;
+        }
+    }
+
+    private static bool IsEnumValue(object? val, string[] allowed)
+    {
+        string? text = val is string s ? s : val?.ToString();
+        if (string.IsNullOrEmpty(text)) return false;
+        return allowed.Any(a => string.Equals(a, text, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string? TryReadStringArg(IDictionary<string, object>? args, string key)

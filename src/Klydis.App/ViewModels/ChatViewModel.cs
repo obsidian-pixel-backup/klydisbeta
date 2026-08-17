@@ -2271,15 +2271,63 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (dialog.ShowDialog() == true)
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"Chat: {SelectedSession.Title}");
-            sb.AppendLine($"Exported: {DateTime.Now}");
-            sb.AppendLine(new string('=', 40));
+
+            // ===== Verbose header: app, session, task, and FULL model diagnostics =====
+            sb.AppendLine("============================================================");
+            sb.AppendLine("KLYDIS CHAT EXPORT");
+            sb.AppendLine("============================================================");
+            sb.AppendLine($"App version: {GetAppVersion()}");
+            sb.AppendLine($"Session: {SelectedSession.Title}");
+            sb.AppendLine($"SessionId: {SelectedSession.Id}");
+            sb.AppendLine($"Exported: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine();
+            sb.AppendLine("--- TASK ---");
+            sb.AppendLine($"TaskId: {_chatEngine?.CurrentTaskId ?? "(no active task)"}");
+            sb.AppendLine($"Objective: {_chatEngine?.CurrentTaskObjective ?? "(none)"}");
+            sb.AppendLine();
+            sb.AppendLine("--- MODEL ---");
+            var profile = _chatEngine?.CurrentModelProfile;
+            if (profile == null)
+            {
+                sb.AppendLine("(no model profile available — model not loaded)");
+            }
+            else
+            {
+                var adapter = _chatEngine?.CurrentProtocolAdapter;
+                sb.AppendLine($"Model: {profile.ModelId}");
+                sb.AppendLine($"Path: {profile.ModelPath}");
+                sb.AppendLine($"Architecture: {profile.Architecture}");
+                sb.AppendLine($"ChatTemplate: {profile.Template}");
+                sb.AppendLine($"Reasoning: {profile.Reasoning}");
+                sb.AppendLine($"ToolProtocol: {profile.ToolProtocol}");
+                sb.AppendLine($"PreferredProtocol: {profile.PreferredProtocol}");
+                sb.AppendLine($"SupportedProtocols: {string.Join(", ", profile.SupportedProtocols)}");
+                sb.AppendLine($"FallbackProtocols: {(profile.FallbackProtocols.Count > 0 ? string.Join(", ", profile.FallbackProtocols) : "(none)")}");
+                sb.AppendLine($"NativeTools: {profile.SupportsNativeTools} | StructuredOutput: {profile.SupportsStructuredOutput} | Grammar: {profile.SupportsGrammar} | Thinking: {profile.SupportsThinking} | ToolContinuation: {profile.SupportsToolContinuation}");
+                sb.AppendLine($"ToolCalling: {profile.ToolCalling} | Continuation: {profile.Continuation} | Repair: {profile.Repair}");
+                sb.AppendLine($"ProtocolConfidence: {profile.ProtocolConfidence:0.00}");
+                sb.AppendLine($"ProtocolKey: {Klydis.Core.Protocol.ProtocolRegistry.ResolveProtocolKey(profile) ?? "legacy-fallback"}");
+                sb.AppendLine($"Adapter: {adapter?.GetType().Name ?? "legacy-fallback (no registered adapter)"}");
+                sb.AppendLine($"Fingerprint: {profile.Fingerprint}");
+                sb.AppendLine($"ProfileVersion: {profile.ProfileVersion}");
+            }
+            sb.AppendLine($"ContextSize: {_chatEngine?.ContextSize ?? 0} tokens");
+            sb.AppendLine();
+            sb.AppendLine("--- MESSAGES ---");
+            sb.AppendLine(new string('=', 60));
             sb.AppendLine();
 
             foreach (var msg in dbMessages)
             {
-                sb.AppendLine($"[{msg.Timestamp:yyyy-MM-dd HH:mm:ss}] {msg.Role.ToString().ToUpperInvariant()}:");
+                sb.Append($"[{msg.Timestamp:yyyy-MM-dd HH:mm:ss}] {msg.Role.ToString().ToUpperInvariant()}");
+                if (msg.IsConsolidated) sb.Append(" (consolidated)");
+                if (msg.TokenCount > 0) sb.Append($" | tokens: {msg.TokenCount}");
+                sb.AppendLine(":");
                 sb.AppendLine(msg.Content);
+                if (!string.IsNullOrWhiteSpace(msg.ToolCallsJson))
+                {
+                    sb.AppendLine($"ToolCalls: {msg.ToolCallsJson}");
+                }
                 sb.AppendLine(new string('-', 40));
                 sb.AppendLine();
             }
@@ -2300,6 +2348,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         return TitleSanitizer.SanitizeTitle(title);
     }
+
+    private static string GetAppVersion()
+        => System.Reflection.CustomAttributeExtensions
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(
+                System.Reflection.Assembly.GetExecutingAssembly())?.InformationalVersion
+            ?? System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+            ?? "unknown";
 
     private static string StripToolCallBlocks(string text)
     {

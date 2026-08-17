@@ -9,9 +9,14 @@ namespace Klydis.Core.Tasks;
 /// baseline plan for an actionable request BEFORE the model's first turn, so the task has a
 /// durable backbone without depending on the model remembering to call 'plan'. The plan is a
 /// task-specific checklist (not a generic four-item scaffold): for common request domains the
-/// generator produces real implementation steps — e.g. a landing-page request gets hero /
-/// services / gallery / CTA / responsive / preview steps instead of "Understand → Design →
-/// Implement → Verify". The model may refine or replace it via the 'plan' tool.
+/// generator produces real implementation steps.
+///
+/// The plan is deliberately SMALL and high-level: the old twelve-step landing-page plan
+/// over-prescribed sections (hero/services/gallery/CTA) before the workspace or requirements
+/// existed, which incentivized the model to manufacture missing information and plan its own
+/// sub-execution. Six well-defined steps with a single executable current step are much
+/// safer for weaker models than a large plan plus the full tool catalog. The model may
+/// refine or expand it via the 'plan' tool AFTER the design step exists.
 /// </summary>
 public static class InitialPlanGenerator
 {
@@ -25,8 +30,11 @@ public static class InitialPlanGenerator
 
         string lower = userMessage.ToLowerInvariant();
 
-        // Web / landing-page work is the most common autonomous build request — give it the
-        // concrete section-by-section plan rather than a generic scaffold.
+        // Web / landing-page work is the most common autonomous build request. The plan is
+        // six high-level steps: capture (reason, no tools) → inspect (filesystem) → design
+        // (plan) → implement (file mutation) → preview/verify (evidence) → finalize. Detailed
+        // sections (hero, services, gallery, CTA, responsive) EMERGE from the design step
+        // once the workspace is known — they are never pre-asserted.
         if (ContainsAny(lower, "landing page", "website", "web page", "web site", "homepage",
             "portfolio site", "react site", "frontend", "vite", "html page", "landing-page"))
         {
@@ -68,18 +76,12 @@ public static class InitialPlanGenerator
 
     private static IReadOnlyList<string> LandingPageSteps() => new[]
     {
-        "Analyze the business, target audience and page requirements",
-        "Inspect the existing project structure and tech stack",
-        "Define the landing-page architecture and visual direction",
-        "Build the hero section",
-        "Build the services section",
-        "Build the gallery / portfolio section",
-        "Build the CTA / contact section",
-        "Add responsive behavior",
-        "Run a local preview",
-        "Inspect the visual result",
-        "Fix issues found during inspection",
-        "Final verification (build, preview, requirements)"
+        "Capture the requirements and creative direction",
+        "Inspect the workspace and existing project structure",
+        "Design the landing-page architecture and visual direction",
+        "Implement the landing page (hero, services, gallery, CTA, responsive)",
+        "Run a local preview and verify the result",
+        "Finalize the deliverable and summarize"
     };
 
     private static IReadOnlyList<string> ApiSteps() => new[]

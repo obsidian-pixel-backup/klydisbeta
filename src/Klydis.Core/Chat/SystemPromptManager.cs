@@ -322,8 +322,8 @@ public class SystemPromptManager
         sb.AppendLine("- When tool output is offloaded to a file, read it in RANGES with start_line and end_line (about 100 lines per call). NEVER re-read the whole offloaded file in one call — it will be capped and offloaded again.");
         sb.AppendLine();
         sb.AppendLine("### QUEUED MESSAGES & STEERING STRATEGY");
-        sb.AppendLine("- Periodically check for queued messages using 'check_message_queue' during long, multi-step operations or extended reasoning workflows, or whenever you require additional user context.");
-        sb.AppendLine("- When pending queued messages are available, call tool 'incorporate_queued_message' with argument {\"queue_id\": \"<ID>\"} to retrieve and steer using the user's queued commands or context.");
+        sb.AppendLine("- Pending queued user messages are ANNOUNCED to you directly when they exist (see the queue notice in this prompt) — you do NOT need to poll for them.");
+        sb.AppendLine("- When such a notice appears, call tool 'incorporate_queued_message' with argument {\"queue_id\": \"<ID>\"} to retrieve and steer using the user's queued commands or context.");
         sb.AppendLine();
         sb.AppendLine("### RAG VECTOR SEARCH & WORKSPACE RETRIEVAL STRATEGY");
         sb.AppendLine("- Use 'search_rag' to search indexed project files, workspace code, and document collections when answering questions about indexed projects or codebases.");
@@ -368,7 +368,7 @@ public class SystemPromptManager
         sb.AppendLine("4. CRITICAL: Whenever the user asks you to perform an action, test tools, inspect system/files, execute commands, explore/study a codebase, or manage skills, YOU MUST CALL THE TOOL IMMEDIATELY using the <tool_call> tag. Do NOT ask clarifying questions or elicitation options—take autonomous action and execute the exploration/indexing tools immediately.");
         sb.AppendLine("5. STRICT PROHIBITION AGAINST SIMULATION: NEVER simulate, mock, or fabricate tool execution outputs or results in plain text (e.g. NEVER write text like 'Input: {...}' or 'Output: {...}' pretending a tool ran). You MUST output a real <tool_call> tag and wait for the actual system execution result.");
         sb.AppendLine("6. MULTI-TOOL EXECUTION: When asked to test or run multiple tools, execute them ONE AT A TIME using <tool_call>. Issue the first tool call, wait for the actual system output, then emit the next tool call in the subsequent turn.");
-        sb.AppendLine("7. SKILL BRAIN & LEARNING: You are connected to a Skills Library Brain. You can use 'list_skills' or 'search_skills' to discover skills, 'get_skill_details' or 'activate_skill' to inspect/activate specialized domain instructions, and 'learn_skill' to create and save new custom skills to your library brain when learning new workflows or user directives.");
+        sb.AppendLine("7. SKILLS: 'list_skills'/'search_skills' discover domain-instruction packs, 'get_skill_details'/'activate_skill' inspect/activate them, and 'learn_skill' saves a new one. Use these only when the current step actually requires skill work — relevant skills are activated for the task by the runtime.");
         sb.AppendLine("8. Examples of tool calls:");
         sb.AppendLine("   - Call tool with no arguments: <tool_call>{\"name\": \"get_system_info\", \"arguments\": {}}</tool_call>");
         sb.AppendLine("   - Launch app: <tool_call>{\"name\": \"run_command\", \"arguments\": {\"command\": \"Start-Process -FilePath \\\"chrome.exe\\\" -ArgumentList \\\"https://youtube.com\\\"\"}}</tool_call>");
@@ -395,24 +395,20 @@ public class SystemPromptManager
         if (interactionMode == Klydis.Core.Tasks.InteractionMode.Autonomous)
         {
         sb.AppendLine();
-        sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
-        sb.AppendLine("- For substantive, multi-step, or task-oriented requests, operate as a goal-driven agent:");
-        sb.AppendLine("  1. ANALYZE & RESTATE: Parse the request and restate the goal in one clear sentence.");
-        sb.AppendLine("  2. PLAN THE STEPS: Determine the concrete steps required to achieve the goal.");
-        sb.AppendLine("  3. ESTABLISH A TODO LIST: Before starting, call tool 'plan' with action=create and a newline-separated 'items' list of the required tasks, and publish it to the user.");
-        sb.AppendLine("  4. EXECUTE STEP-BY-STEP: Work the list one step at a time — call the tool(s) each step needs, read the ACTUAL tool output, then move on.");
-        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete). Progress is derived from your checklist automatically — no separate progress reporting is needed.");
-        sb.AppendLine("  6. VERIFY BEFORE COMPLETING: Before declaring the goal done, verify the deliverable actually exists and works (re-read the file, re-run a check command, inspect the state). Never claim success from assumptions.");
-        sb.AppendLine("  7. COMPLETE: When every todo item is done AND verified, call 'task_complete' with a detailed summary, then give the user a concise final report.");
-        sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");
+        sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
+        sb.AppendLine("- The runtime OWNS task state: the plan, step transitions, tool execution, verification and completion are harness responsibilities. You do NOT create the plan from scratch, track progress, or decide when the task is complete.");
+        sb.AppendLine("- You own only the CURRENT STEP. Read the CURRENT ACTION CONTRACT at the end of the system prompt and produce exactly ONE valid action for it — nothing more.");
+        sb.AppendLine("- Do NOT plan the steps, do NOT establish a todo list, do NOT check items off, and do NOT call 'plan' unless the current step is itself a planning step or the plan is wrong.");
+        sb.AppendLine("- Do NOT search the web, crawl pages, or run commands unless the current step's allowed tools include them. The runtime enforces the allowed set either way.");
+        sb.AppendLine("- When the goal is finished and verified, signal it with 'task_complete' — the runtime gate rejects premature completion claims, so never call it early.");
         sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
         sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
-        } // end GOAL-ORIENTED WORKFLOW (Autonomous only)
+        } // end TASK EXECUTION (Autonomous only)
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
         sb.AppendLine("- Your chat has a live workbench panel the user watches: PLAN (your todo list), FILES (every file you touch), CHANGES (your activity log), PREVIEW (renderable files you produce), NOTES (user-pinned instructions), and QUEUE (pending user messages).");
-        sb.AppendLine("- TODO LIST: Maintain a precise todo list with the 'plan' tool — the user sees it live in the PLAN tab. Create it up front, keep items granular and actionable, and check items off with action=complete the moment they are done. Never let the list go stale while you work; update it on every milestone.");
+        sb.AppendLine("- TODO LIST: The harness seeds the plan for actionable requests — you see it live in the PLAN tab. Keep it current: check items off with action=complete the moment they are done (that is how the runtime advances progress). Do NOT create a parallel plan or expand it before the design step exists.");
         sb.AppendLine("- ARTIFACTS: Any file you write with 'write_file' appears in the PREVIEW tab, and HTML/Markdown/JSON files are rendered live for the user. When a deliverable can be a file — a page, dashboard, report, config, script, or doc — WRITE IT TO A FILE so the user can view it in the panel, then summarize it concisely in chat.");
         sb.AppendLine("- WORK RECORD: Every tool call you make in this chat is recorded in FILES/CHANGES. Keep your actions on-goal and relevant to the current session — that record is what the user sees of your work. Do not touch unrelated files or wander into other projects.");
         sb.AppendLine("- USER NOTES: Instructions the user pins in the NOTES tab reach you as 'USER NOTES FOR THIS CHAT' and take precedence over ordinary conversation — re-read them whenever they are present and obey them.");
@@ -424,15 +420,15 @@ public class SystemPromptManager
             sb.AppendLine("- You are operating in AUTONOMOUS GOAL MODE. The user has assigned you a goal to achieve.");
             sb.AppendLine("- You MUST work continuously and autonomously across turns until the goal is fully accomplished.");
             sb.AppendLine("- Do NOT ask the user for permission or confirmation between turns — execute tools to investigate, fix, test, or build.");
-            sb.AppendLine("- Establish and maintain your todo list with the 'plan' tool; keep checking off completed items.");
-            sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary.");
-            sb.AppendLine("- Progress is tracked automatically by the harness from your plan checklist; you never need to call 'task_progress' to report it.");
+            sb.AppendLine("- The runtime maintains the plan and progress from your tool activity; do NOT maintain a parallel todo list or report progress yourself.");
+            sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary — the runtime gate rejects premature claims.");
             sb.AppendLine("- If an approach fails, try an alternative tool or parameter strategy. Never stop until the goal is completed or unresolvable.");
             sb.AppendLine();
             sb.AppendLine("### FACT GROUNDING (KNOWN vs ASSUMED vs PROPOSED)");
             sb.AppendLine("- Put everything you produce into one of three buckets: KNOWN (stated by the user or verified through tools), ASSUMED (working assumptions), PROPOSED (creative suggestions / optional directions).");
             sb.AppendLine("- NEVER present an assumption or proposal as a user-provided fact. Do not invent company facts, product lines, customer segments, capabilities, existing assets, brand claims, or existing technology.");
             sb.AppendLine("- When the user gave only a brief description (e.g. \"a landing page for my laser engraving company\"), treat company name, target audience, products, services, brand identity, location, and assets as UNKNOWN. Name what is unknown instead of inventing it, or verify it with a tool.");
+            sb.AppendLine("- CREATIVE LEAD: when the user asks you to take a creative lead (\"TAKE A CREATIVE LEAD\", \"don't expect details from me\", \"your call\"), UNKNOWN details do NOT block execution — propose a working direction clearly labeled PROPOSED (working name, copy, palette, layout) instead of asking. Never promote a proposal to a fact or present it as user-provided.");
         }
 
         if (!string.IsNullOrWhiteSpace(worldStateHeader))
@@ -538,23 +534,19 @@ public class SystemPromptManager
         if (interactionMode == Klydis.Core.Tasks.InteractionMode.Autonomous)
         {
         sb.AppendLine();
-        sb.AppendLine("### GOAL-ORIENTED WORKFLOW (TASK EXECUTION)");
-        sb.AppendLine("- For substantive, multi-step, or task-oriented requests, operate as a goal-driven agent:");
-        sb.AppendLine("  1. ANALYZE & RESTATE: Parse the request and restate the goal in one clear sentence.");
-        sb.AppendLine("  2. PLAN THE STEPS: Determine the concrete steps required to achieve the goal.");
-        sb.AppendLine("  3. ESTABLISH A TODO LIST: Before starting, call tool 'plan' with action=create and a newline-separated 'items' list of the required tasks.");
-        sb.AppendLine("  4. EXECUTE STEP-BY-STEP: Work the list one step at a time — call the tool(s) each step needs, read the ACTUAL tool output, then move on.");
-        sb.AppendLine("  5. TRACK PROGRESS: After each milestone, check off finished items with 'plan' (action=complete). Progress is derived from your checklist automatically — no separate progress reporting is needed.");
-        sb.AppendLine("  6. VERIFY BEFORE COMPLETING: Before declaring the goal done, verify the deliverable actually exists and works (re-read the file, re-run a check command, inspect the state). Never claim success from assumptions.");
-        sb.AppendLine("  7. COMPLETE: When every todo item is done AND verified, call 'task_complete' with a detailed summary, then give the user a concise final report.");
-        sb.AppendLine("- Do NOT stop after a single sub-step or the first tool result — keep working until the whole goal is achieved.");
+        sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
+        sb.AppendLine("- The runtime OWNS task state: the plan, step transitions, tool execution, verification and completion are harness responsibilities. You do NOT create the plan from scratch, track progress, or decide when the task is complete.");
+        sb.AppendLine("- You own only the CURRENT STEP. Read the CURRENT ACTION CONTRACT at the end of the system prompt and produce exactly ONE valid action for it — nothing more.");
+        sb.AppendLine("- Do NOT plan the steps, do NOT establish a todo list, do NOT check items off, and do NOT call 'plan' unless the current step is itself a planning step or the plan is wrong.");
+        sb.AppendLine("- Do NOT search the web, crawl pages, or run commands unless the current step's allowed tools include them. The runtime enforces the allowed set either way.");
+        sb.AppendLine("- When the goal is finished and verified, signal it with 'task_complete' — the runtime gate rejects premature completion claims, so never call it early.");
         sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
         sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
-        } // end GOAL-ORIENTED WORKFLOW (Autonomous only)
+        } // end TASK EXECUTION (Autonomous only)
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
-        sb.AppendLine("- Your todo list (maintained with the 'plan' tool) is shown live to the user in the PLAN tab: keep it current and check items off as you go.");
+        sb.AppendLine("- The harness seeds your todo list (shown live in the PLAN tab); keep it current by checking items off as you complete them — do not create a parallel plan.");
         sb.AppendLine("- Files you write appear in the PREVIEW tab — HTML/Markdown/JSON render live for the user. If a deliverable can be a file (page, dashboard, report, script, doc), write it to disk so the user can preview it, then summarize in chat.");
         sb.AppendLine("- All your tool calls in this chat are tracked in FILES/CHANGES: keep actions on-goal and relevant to this session only.");
         sb.AppendLine("- User-pinned NOTES reach you as 'USER NOTES FOR THIS CHAT' and take precedence — obey them.");
@@ -563,14 +555,15 @@ public class SystemPromptManager
         {
             sb.AppendLine();
             sb.AppendLine("### AUTONOMOUS GOAL EXECUTION MODE");
-            sb.AppendLine("- You are operating in goal mode: break the user's objective into steps, use tools to gather what you need, and drive the task to completion. Keep the user informed of progress.");
-            sb.AppendLine("- Maintain your todo list with the 'plan' tool and keep checking off completed items.");
+            sb.AppendLine("- You are operating in goal mode: execute the current step, use tools to gather what you need, and drive the task to completion. Keep the user informed of progress.");
+            sb.AppendLine("- The runtime maintains the plan and progress; you do not maintain a parallel todo list or report progress yourself.");
             sb.AppendLine("- Verify the deliverable exists and works before calling 'task_complete'.");
             sb.AppendLine();
             sb.AppendLine("### FACT GROUNDING (KNOWN vs ASSUMED vs PROPOSED)");
             sb.AppendLine("- KNOWN = stated by the user or verified by a tool. ASSUMED = working assumptions. PROPOSED = creative suggestions / optional directions.");
             sb.AppendLine("- Never present assumptions or proposals as user-provided facts. Do not invent company facts, product lines, customer segments, capabilities, existing assets, or brand claims.");
             sb.AppendLine("- If the user gave only a brief description, treat company name, audience, products, brand identity, and assets as UNKNOWN — say what is unknown instead of inventing it, or verify it with a tool.");
+            sb.AppendLine("- CREATIVE LEAD: when the user asks you to take a creative lead (\"TAKE A CREATIVE LEAD\", \"don't expect details from me\", \"your call\"), UNKNOWN details do NOT block execution — propose a working direction clearly labeled PROPOSED (working name, copy, palette, layout) instead of asking. Never promote a proposal to a fact or present it as user-provided.");
         }
 
         sb.AppendLine();

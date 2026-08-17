@@ -48,10 +48,16 @@ public static class AgentSupervisor
     }
 
     /// <summary>
-    /// The next step to work: the first open plan item. Returns its text (a stable step id
-    /// arrives with first-class TaskStep records).
+    /// The next step to work: the first open TaskStep (in plan order). Returns its StepId.
     /// </summary>
-    public static string? SelectNextStep(IReadOnlyList<ToolExecutor.PlanEntry> plan)
+    public static string? SelectNextStep(IReadOnlyList<TaskStep> steps)
+        => steps.FirstOrDefault(s => s.IsOpen)?.StepId;
+
+    /// <summary>
+    /// Legacy projection: the first open plan item's text. Kept for callers that still work
+    /// on raw plan entries; new code goes through TaskStep records.
+    /// </summary>
+    public static string? SelectNextStepText(IReadOnlyList<ToolExecutor.PlanEntry> plan)
         => plan.FirstOrDefault(e => !e.Done)?.Text;
 
     /// <summary>
@@ -96,7 +102,7 @@ public static class AgentSupervisor
         if (outcome == GenerationOutcome.NoActionProduced && openCount > 0)
         {
             return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced,
-                SelectNextStep(plan));
+                SelectNextStepText(plan));
         }
 
         // A model that keeps claiming completion while work stays open is the "same action
@@ -104,17 +110,17 @@ public static class AgentSupervisor
         if (completionRejections >= maxCompletionRejections)
         {
             return new SupervisorDecision(ExecutionDecision.Pause, ContinuationReason.VerificationFailed,
-                SelectNextStep(plan));
+                SelectNextStepText(plan));
         }
 
         // Repeated tool turns with no plan progress = silent failure; reassess the approach.
         if (consecutiveStalledTurns >= maxStalledTurns && openCount > 0)
         {
             return new SupervisorDecision(ExecutionDecision.Replan, ContinuationReason.StagnationDetected,
-                SelectNextStep(plan));
+                SelectNextStepText(plan));
         }
 
-        string? nextStep = SelectNextStep(plan);
+        string? nextStep = SelectNextStepText(plan);
 
         if (openCount > 0)
         {
@@ -141,5 +147,33 @@ public static class AgentSupervisor
         }
 
         return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.StepIncomplete, nextStep);
+    }
+
+    /// <summary>
+    /// P1.8: the snapshot-based decision. The TaskExecutionSnapshot is the ONLY input — the
+    /// supervisor derives the plan, current step, queue, outcome and state delta from it and
+    /// delegates to the plan-checklist decision. Keeping one verdict owner means the live
+    /// loop and any caller agree on what happens next.
+    /// </summary>
+    public static SupervisorDecision DecideAfterTurn(
+        TaskExecutionSnapshot snapshot,
+        int maxCompletionRejections = 3,
+        int maxStalledTurns = 6)
+    {
+        var steps = TaskStepBuilder.Build(snapshot.Plan, snapshot.TaskId);
+        string? nextStepId = SelectNextStep(steps);
+
+        var decision = DecideAfterTurn(
+            claimAccepted: false,
+            snapshot.Outcome,
+            snapshot.Plan,
+            snapshot.PendingQueueItems,
+            snapshot.CompletionRejections,
+            maxCompletionRejections,
+            snapshot.ConsecutiveStalledTurns,
+            maxStalledTurns);
+
+        // The snapshot knows the step records; surface the step id rather than raw text.
+        return decision with { NextStepId = nextStepId ?? decision.NextStepId };
     }
 }
