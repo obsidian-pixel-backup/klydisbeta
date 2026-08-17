@@ -2350,6 +2350,12 @@ public class ChatEngine(
                 int actionGateRejectionsThisTurn = 0;
                 int turnActionOrdinal = 0;
                 string? activeRunId = _runtime?.GetActiveRunId(CurrentTaskId ?? string.Empty);
+                // Run-scoped idempotency set (P1.12): actions that SUCCESSFULLY executed in
+                // this run are recorded by replay key (tool + canonicalized args). The gate
+                // rejects a re-execution of a side-effect-bearing action — a recovery loop
+                // must never duplicate a command or destructive call. Read-only tools are
+                // exempt (re-reading is safe).
+                var executedThisRun = new HashSet<string>(StringComparer.Ordinal);
 
                 foreach (var req in toolCallRequests)
                 {
@@ -2426,7 +2432,9 @@ public class ChatEngine(
                     // through run_command. The rejection is injected as the tool result so the
                     // next generation sees exactly why and what it MAY call.
                     var gateVerdict = Klydis.Core.Tasks.ActionGate.Validate(
-                        req, registeredToolDefs, stepAllowedTools, currentStepText);
+                        req, registeredToolDefs, stepAllowedTools, currentStepText,
+                        workspaceRoot: null, // no task workspace root yet — boundary enforcement activates with the TaskStep workspace milestone
+                        alreadyExecuted: executedThisRun);
                     if (!gateVerdict.Allowed)
                     {
                         actionGateRejectionsThisTurn++;
@@ -2471,6 +2479,16 @@ public class ChatEngine(
                         result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, stallCts.Token, inferenceEngine.CurrentModelPath);
                         // P1.8: record the factual tool execution for the state delta.
                         turnState.RecordTool(req.Name, result.Success);
+                        // P1.12: a SUCCESSFUL side-effect-bearing action is now part of this
+                        // run's executed set — the gate will reject a replay of the same
+                        // action instead of duplicating its effects. Read-only tools are not
+                        // recorded (re-reading is safe and legitimate).
+                        if (result.Success &&
+                            Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(req.Name) !=
+                                Klydis.Core.Tasks.ToolSideEffectLevel.ReadOnly)
+                        {
+                            executedThisRun.Add(Klydis.Core.Tasks.ActionGate.ComputeReplayKey(req));
+                        }
                     }
                     finally
                     {

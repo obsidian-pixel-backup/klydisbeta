@@ -163,6 +163,32 @@ public static class AgentSupervisor
         var steps = TaskStepBuilder.Build(snapshot.Plan, snapshot.TaskId);
         string? nextStepId = SelectNextStep(steps);
 
+        // NO-FACTUAL-PROGRESS RULE: the model's text volume is never progress. When the
+        // current step's contract requires an EXECUTABLE action (inspection, mutation,
+        // verification, research, commands) and this generation changed ZERO task state
+        // (no tool executed, no plan move, no file change), a text-only "completed turn" is
+        // exactly the 2,500-token essay failure — route it to RepairProtocol like
+        // NoActionProduced. Reason/Summary/UserInput steps are exempt (their deliverable IS
+        // text). ToolCallProduced outcomes are exempt (a failed tool is still execution the
+        // next repair can learn from).
+        var currentStep = snapshot.CurrentStep ?? TaskStepBuilder.CurrentStep(steps);
+        // Only genuinely COMPLETED text-only generations are "talking": a cancelled turn, a
+        // truncation, a degenerate loop, or an already-classified NoActionProduced must keep
+        // their own recovery paths (AwaitUser / auto-continue / loop correction).
+        bool completedTextOnly = snapshot.Outcome is GenerationOutcome.CompletedTurn
+            or GenerationOutcome.ModelEndedEarly;
+        if (completedTextOnly &&
+            currentStep != null &&
+            RequiresExecution(currentStep.ExpectedActionKind) &&
+            !snapshot.MadeFactualProgress &&
+            snapshot.OpenPlanItems > 0)
+        {
+            return new SupervisorDecision(
+                ExecutionDecision.RepairProtocol,
+                ContinuationReason.NoActionProduced,
+                currentStep.StepId);
+        }
+
         var decision = DecideAfterTurn(
             claimAccepted: false,
             snapshot.Outcome,
@@ -176,4 +202,13 @@ public static class AgentSupervisor
         // The snapshot knows the step records; surface the step id rather than raw text.
         return decision with { NextStepId = nextStepId ?? decision.NextStepId };
     }
+
+    /// <summary>
+    /// True when the step's contract requires an executable action (a tool call), as opposed
+    /// to a step whose deliverable is text (reasoning/requirements, summaries, user input).
+    /// </summary>
+    private static bool RequiresExecution(StepActionKind kind)
+        => kind is StepActionKind.Inspect or StepActionKind.Research or
+            StepActionKind.FileMutation or StepActionKind.CommandExecution or
+            StepActionKind.TerminalInteraction or StepActionKind.Verification;
 }

@@ -9,13 +9,22 @@ namespace Klydis.Core.Protocol;
 /// </summary>
 public static class ProtocolRegistry
 {
+    // Thread safety (review: multiple sessions / model switches / tests resolve protocols
+    // concurrently — the dictionary and the defaults flag were unsynchronized mutable
+    // statics). A single lock covers both; resolution copies the factory reference under the
+    // lock so the dictionary is never read while another thread mutates it.
+    private static readonly object _sync = new();
     private static readonly Dictionary<string, Func<ModelProfile, IModelProtocol>> _factories = new(StringComparer.Ordinal);
     private static bool _defaultsRegistered;
 
     /// <summary>Registers a protocol factory keyed by protocol kind.</summary>
     public static void Register(string protocolKey, Func<ModelProfile, IModelProtocol> factory)
     {
-        _factories[protocolKey] = factory ?? throw new ArgumentNullException(nameof(factory));
+        if (factory == null) throw new ArgumentNullException(nameof(factory));
+        lock (_sync)
+        {
+            _factories[protocolKey] = factory;
+        }
     }
 
     /// <summary>
@@ -26,16 +35,22 @@ public static class ProtocolRegistry
     /// </summary>
     public static void RegisterDefaultAdapters()
     {
-        if (_defaultsRegistered) return;
-        _defaultsRegistered = true;
-        Register("qwen-native", static profile => new QwenProtocolAdapter(profile));
+        lock (_sync)
+        {
+            if (_defaultsRegistered) return;
+            _defaultsRegistered = true;
+            _factories["qwen-native"] = static profile => new QwenProtocolAdapter(profile);
+        }
     }
 
     /// <summary>Clears all registrations (used by tests).</summary>
     public static void Reset()
     {
-        _factories.Clear();
-        _defaultsRegistered = false;
+        lock (_sync)
+        {
+            _factories.Clear();
+            _defaultsRegistered = false;
+        }
     }
 
     /// <summary>
@@ -48,6 +63,11 @@ public static class ProtocolRegistry
         {
             ToolProtocol.QwenNative => "qwen-native",
             ToolProtocol.Antml => "antml",
+            ToolProtocol.OpenAiStyle => "openai-style",
+            // Unknown = NO protocol claimed until a capability probe proves one (the
+            // optimistic mapping to "generic-json" would make every unknown GGUF enter a
+            // JSON execution protocol it was never trained to produce).
+            ToolProtocol.Unknown => null,
             _ => "generic-json"
         };
 
@@ -57,8 +77,14 @@ public static class ProtocolRegistry
     /// </summary>
     public static IModelProtocol? Resolve(ModelProfile profile)
     {
+        if (profile == null) throw new ArgumentNullException(nameof(profile));
         string? key = ResolveProtocolKey(profile);
         if (key == null) return null;
-        return _factories.TryGetValue(key, out var factory) ? factory(profile) : null;
+        Func<ModelProfile, IModelProtocol>? factory;
+        lock (_sync)
+        {
+            factory = _factories.TryGetValue(key, out var f) ? f : null;
+        }
+        return factory?.Invoke(profile);
     }
 }

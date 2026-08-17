@@ -27,7 +27,14 @@ public enum ActionGateError
     InvalidArgument,
 
     /// <summary>run_command was called with another tool's name as the command.</summary>
-    CommandDisguisedAsTool
+    CommandDisguisedAsTool,
+
+    /// <summary>A file-tool path escapes the task workspace root (absolute escape or ../ traversal).</summary>
+    WorkspaceBoundaryViolation,
+
+    /// <summary>The same non-read-only action already executed in this run — a replay after
+    /// recovery would duplicate its side effects.</summary>
+    ReplayDetected
 }
 
 /// <summary>
@@ -66,6 +73,8 @@ public static class ActionGate
     public const string MissingRequiredArgumentCode = "ACTION_SCHEMA_INVALID";
     public const string InvalidArgumentCode = "ACTION_SCHEMA_INVALID";
     public const string CommandDisguisedAsToolCode = "MODEL_INVENTED_TOOL";
+    public const string WorkspaceBoundaryViolationCode = "ACTION_OUTSIDE_WORKSPACE";
+    public const string ReplayDetectedCode = "REPLAY_DETECTED";
 
     /// <summary>The machine-searchable error code for a gate error.</summary>
     public static string ErrorCode(ActionGateError error) => error switch
@@ -75,6 +84,8 @@ public static class ActionGate
         ActionGateError.MissingRequiredArgument => MissingRequiredArgumentCode,
         ActionGateError.InvalidArgument => InvalidArgumentCode,
         ActionGateError.CommandDisguisedAsTool => CommandDisguisedAsToolCode,
+        ActionGateError.WorkspaceBoundaryViolation => WorkspaceBoundaryViolationCode,
+        ActionGateError.ReplayDetected => ReplayDetectedCode,
         _ => "ACTION_GATE_UNKNOWN"
     };
 
@@ -87,7 +98,9 @@ public static class ActionGate
         ToolCallRequest request,
         IEnumerable<ToolDefinition> registeredTools,
         IReadOnlySet<string>? stepAllowedTools = null,
-        string? currentStep = null)
+        string? currentStep = null,
+        string? workspaceRoot = null,
+        IReadOnlySet<string>? alreadyExecuted = null)
     {
         if (request == null) throw new ArgumentNullException(nameof(request));
         if (registeredTools == null) throw new ArgumentNullException(nameof(registeredTools));
@@ -167,6 +180,36 @@ public static class ActionGate
                 null, currentStep);
         }
 
+        // 3c. REPLAY DETECTION: an action that already executed in this run must not execute
+        // again when it carries side effects — a recovery loop must never duplicate a command
+        // or destructive call. ReadOnly tools are exempt (re-reading is safe and legitimate).
+        // Identity is tool + canonicalized arguments, so identical calls across turns,
+        // context resets and protocol fallbacks are the same logical action.
+        if (alreadyExecuted != null &&
+            alreadyExecuted.Contains(ComputeReplayKey(request)) &&
+            Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(request.Name) !=
+                Klydis.Core.Tasks.ToolSideEffectLevel.ReadOnly)
+        {
+            return new ActionGateVerdict(false, ActionGateError.ReplayDetected,
+                $"Tool '{request.Name}' with IDENTICAL arguments already executed in this run. " +
+                "Re-executing it would duplicate its side effects — do NOT repeat it. Read the " +
+                "existing result or take a different action.",
+                null, currentStep);
+        }
+
+        // 3d. Workspace boundary: when a workspace root is supplied, file-tool paths must stay
+        // inside it. Absolute escapes and ../ traversal are rejected before execution.
+        if (!string.IsNullOrWhiteSpace(workspaceRoot))
+        {
+            string? boundary = Klydis.Core.Tasks.WorkspaceBoundaryValidator.Validate(
+                request.Name, request.Arguments, workspaceRoot);
+            if (boundary != null)
+            {
+                return new ActionGateVerdict(false, ActionGateError.WorkspaceBoundaryViolation,
+                    boundary, null, currentStep);
+            }
+        }
+
         // 4. Command disguise: run_command called with another registered tool's name as the
         //    command ("run_command(\"search_web ...\")") is the export's exact misuse — the
         //    model tried to invoke a tool through the shell. The tool must be called directly.
@@ -203,6 +246,15 @@ public static class ActionGate
         var argsHash = ComputeArgsHash(request.Arguments);
         return $"A-{taskId ?? "?"}-{runId ?? "?"}-{turnOrdinal}-{request.Name}-{argsHash}";
     }
+
+    /// <summary>
+    /// The replay identity of an action: tool + canonicalized arguments. Intentionally does
+    /// NOT include the turn/generation, so the same logical action across a context reset or
+    /// protocol fallback is recognized as the same action — the idempotency key recovery
+    /// uses to avoid re-executing side effects.
+    /// </summary>
+    public static string ComputeReplayKey(ToolCallRequest request)
+        => request.Name + "|" + ComputeArgsHash(request.Arguments);
 
     private static bool HasNonEmptyArgument(IDictionary<string, object>? args, string paramName)
     {

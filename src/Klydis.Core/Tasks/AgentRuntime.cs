@@ -85,6 +85,41 @@ public class AgentRuntime(
             return bumped;
         }
 
+        // RUN RECOVERY (restart safety): no run is active in this process, so check the
+        // durable store for a run a PREVIOUS process left open (Running/Suspended). The
+        // process ownership of that run was lost — mark it Interrupted (the durable
+        // hierarchy shows the interruption) and start a fresh resumable run. Without this,
+        // every restart created a brand-new run while the database still showed a Running
+        // run — Task → Run → Turn was not recoverable across process boundaries.
+        try
+        {
+            var stale = await _store.GetRunsAsync(taskId);
+            var open = stale
+                .Where(r => r.Status == RunStatus.Running || r.Status == RunStatus.Suspended)
+                .OrderByDescending(r => r.StartedAtUtc)
+                .FirstOrDefault();
+            if (open != null)
+            {
+                var interrupted = open with
+                {
+                    Status = RunStatus.Interrupted,
+                    EndedAtUtc = DateTime.UtcNow
+                };
+                await _store.SaveRunAsync(interrupted);
+                _logger?.LogWarning(
+                    "Run {RunId} for task {TaskId} was left {Status} by a previous process; " +
+                    "marked Interrupted and starting a fresh resumable run.",
+                    open.RunId, taskId, open.Status);
+            }
+        }
+        catch (Exception ex)
+        {
+            // A failed recovery scan must not block execution: the fresh run below is still
+            // created and persisted. The old run remains stale in the store (observable),
+            // which is safer than not creating the new run at all.
+            _logger?.LogDebug(ex, "Run recovery scan failed for task {TaskId}; continuing with a fresh run.", taskId);
+        }
+
         var run = new TaskRun(
             RunId: "R-" + Guid.NewGuid().ToString("N")[..12],
             TaskId: taskId,

@@ -42,11 +42,23 @@ public static class ModelProfileFactory
         bool isThinking = reasoning == ReasoningProtocol.NativeThinkBlock;
         bool nativeTools = toolProtocol == ToolProtocol.QwenNative;
 
+        // UNKNOWN models are CONSERVATIVE (review: never assume a capability the profile has
+        // not established). A Generic template means nothing was learned about the model's
+        // tool dialect — the protocol is Unknown, structured output/continuation are NOT
+        // assumed, and ToolCalling is Unsupported until a capability probe upgrades the
+        // profile. The optimistic defaults (GenericJson + SupportsStructuredOutput=true +
+        // Continuation=true) would let a future GenericJson adapter silently push every
+        // unknown GGUF into an execution protocol it was never trained to produce.
+        bool unknownFamily = template == ChatTemplate.Generic;
+
         // Supported/preferred/fallback dialects: a qwen-family model supports both the native
-        // format and generic JSON, preferring native; everything else prefers generic JSON.
+        // format and generic JSON, preferring native; known non-qwen families prefer generic
+        // JSON; unknown families claim NO protocol until probed.
         ToolProtocol[] supported = nativeTools
             ? new[] { ToolProtocol.QwenNative, ToolProtocol.GenericJson }
-            : new[] { ToolProtocol.GenericJson };
+            : unknownFamily
+                ? Array.Empty<ToolProtocol>()
+                : new[] { ToolProtocol.GenericJson };
 
         return new ModelProfile
         {
@@ -57,14 +69,16 @@ public static class ModelProfileFactory
             Reasoning = reasoning,
             ToolProtocol = toolProtocol,
             SupportedProtocols = supported,
-            PreferredProtocol = nativeTools ? ToolProtocol.QwenNative : ToolProtocol.GenericJson,
+            PreferredProtocol = nativeTools ? ToolProtocol.QwenNative
+                : unknownFamily ? ToolProtocol.Unknown : ToolProtocol.GenericJson,
             FallbackProtocols = nativeTools ? new[] { ToolProtocol.GenericJson } : Array.Empty<ToolProtocol>(),
             SupportsNativeTools = nativeTools,
-            SupportsStructuredOutput = toolProtocol == ToolProtocol.GenericJson || nativeTools,
+            SupportsStructuredOutput = (toolProtocol == ToolProtocol.GenericJson || nativeTools) && !unknownFamily,
             SupportsGrammar = nativeTools, // grammar-constrained qwen-native tool calls
             SupportsThinking = isThinking,
-            SupportsToolContinuation = true, // optimistic until the capability probe refines it
-            ToolCalling = nativeTools ? CapabilityLevel.Usable : CapabilityLevel.Experimental,
+            SupportsToolContinuation = !unknownFamily, // never assumed for unknown models
+            ToolCalling = nativeTools ? CapabilityLevel.Usable
+                : unknownFamily ? CapabilityLevel.Unsupported : CapabilityLevel.Experimental,
             Continuation = CapabilityLevel.Experimental,
             Repair = CapabilityLevel.Experimental
         };
@@ -128,6 +142,13 @@ public static class ModelProfileFactory
         if (template == ChatTemplate.Qwen)
         {
             return ToolProtocol.QwenNative;
+        }
+        // Unknown family: we have NOT established how this model expresses tool calls.
+        // Claiming GenericJson here is the optimism the review rejected — the profile says
+        // Unknown until a capability probe proves otherwise.
+        if (template == ChatTemplate.Generic)
+        {
+            return ToolProtocol.Unknown;
         }
         return ToolProtocol.GenericJson;
     }

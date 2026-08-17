@@ -101,10 +101,76 @@ public static class CanonicalActionNormalizer
         return m.Success ? m.Groups[1].Value : null;
     }
 
+    /// <summary>
+    /// Extracts the arguments JSON object from a structured tool call. Uses a balanced-brace
+    /// scanner to LOCATE candidate blocks and JsonDocument to VALIDATE them — the old
+    /// <c>\{[^{}]*\}</c> regex truncated nested objects at the first closing brace, so
+    /// {"arguments":{"options":{"foo":"bar"}}} lost its tail and produced invalid JSON.
+    /// Regex only locates; structured JSON is parsed, never interpreted by pattern.
+    /// </summary>
     private static string? ExtractArgumentsJson(string response)
     {
-        var m = System.Text.RegularExpressions.Regex.Match(response,
-            @"""arguments""\s*:\s*(\{[^{}]*\})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        return m.Success ? m.Groups[1].Value : null;
+        int idx = 0;
+        while ((idx = response.IndexOf("\"arguments\"", idx, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            int colon = response.IndexOf(':', idx + 11);
+            if (colon < 0) break;
+            int open = response.IndexOf('{', colon);
+            if (open < 0)
+            {
+                idx = colon + 1;
+                continue;
+            }
+            int close = FindMatchingBrace(response, open);
+            if (close < 0)
+            {
+                idx = colon + 1;
+                continue;
+            }
+            string candidate = response.Substring(open, close - open + 1);
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(candidate);
+                if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    return candidate;
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Not a JSON object — keep scanning for the next "arguments" key.
+            }
+            idx = colon + 1;
+        }
+        return null;
+    }
+
+    /// <summary>Finds the index of the brace matching the opening brace at <paramref name="open"/>.</summary>
+    private static int FindMatchingBrace(string text, int open)
+    {
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (int i = open; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (inString)
+            {
+                if (escaped) { escaped = false; continue; }
+                if (c == '\\') { escaped = true; continue; }
+                if (c == '"') inString = false;
+                continue;
+            }
+            switch (c)
+            {
+                case '"': inString = true; break;
+                case '{': depth++; break;
+                case '}':
+                    depth--;
+                    if (depth == 0) return i;
+                    break;
+            }
+        }
+        return -1;
     }
 }
