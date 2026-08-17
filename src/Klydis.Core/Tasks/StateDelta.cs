@@ -145,13 +145,15 @@ public sealed class TurnStateCollector
         => RecordEvidence(EvidenceKind.Unspecified, description);
 
     /// <summary>Records typed verification evidence (P1.10) — the kind lets the supervisor
-    /// distinguish "a build passed" from "a file was read".</summary>
-    public void RecordEvidence(EvidenceKind kind, string description)
+    /// distinguish "a build passed" from "a file was read". Subject/tool/step scope the
+    /// evidence so it cannot satisfy the wrong step (P1.10).</summary>
+    public void RecordEvidence(EvidenceKind kind, string description,
+        string? subject = null, string? toolName = null, string? stepId = null)
     {
         lock (_lock)
         {
             _entries.Add(new StateDeltaEntry(StateDeltaKind.EvidenceAdded, description, DateTime.UtcNow,
-                new Evidence(kind, description, DateTime.UtcNow)));
+                new Evidence(kind, description, DateTime.UtcNow, subject, toolName, stepId)));
         }
     }
 

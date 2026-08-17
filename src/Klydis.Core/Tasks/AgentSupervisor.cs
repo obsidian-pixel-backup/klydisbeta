@@ -61,10 +61,15 @@ public static class AgentSupervisor
         => plan.FirstOrDefault(e => !e.Done)?.Text;
 
     /// <summary>
-    /// Decides what happens after a generation, given the generation outcome and the durable
-    /// task state (plan checklist, queue, rejection/stall counters). The decision is
-    /// independent of anything the model said about being done or hitting limits.
+    /// LEGACY plan-checklist overload — kept only for pre-snapshot callers, NOT part of the
+    /// live decision path. The snapshot overload below is authoritative and the only one the
+    /// runtime uses; this one cannot see the state delta, typed evidence, or the actual
+    /// current step, so it silently reintroduces the old checklist-only semantics if used.
+    /// Callers migrate to <see cref="DecideAfterTurn(TaskExecutionSnapshot,int,int)"/>.
     /// </summary>
+    [Obsolete("Use DecideAfterTurn(TaskExecutionSnapshot, ...) — the snapshot path is " +
+        "authoritative and the only one the live loop uses. This plan-checklist overload " +
+        "will be removed; it ignores StateDelta/Evidence/CurrentStep.")]
     public static SupervisorDecision DecideAfterTurn(
         bool claimAccepted,
         GenerationOutcome outcome,
@@ -244,16 +249,23 @@ public static class AgentSupervisor
             return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced, currentStep.StepId);
         }
 
-        // 8. A verification step whose turn produced NO VERIFICATION-CAPABLE evidence is not
-        //    verified: "done" is rejected — the step stays open and the model must produce
-        //    evidence of a kind that actually verifies (P1.10: a successful build/test/preview,
-        //    a screenshot, a satisfied requirement, a successful command). Weak inspection-only
-        //    evidence (FileExists from read_file, FileChanged from write_file) and failure
-        //    kinds do NOT verify — "a tool ran" is not "the thing was verified".
-        if (openWork && currentStep?.ExpectedActionKind == StepActionKind.Verification &&
-            !delta.HasVerificationEvidence())
+        // 8. A verification step is satisfied only by evidence matching its PREDICATE
+        //    (P1.10/P1.14): the kinds the step actually requires (BuildPassed for "run the
+        //    build", PreviewLoaded for "run a local preview", ...). Evidence of a kind the
+        //    step does not require — incl. CommandSucceeded ("echo hello ran") and weak
+        //    inspection (FileExists/FileChanged) — does NOT verify. "A tool ran" is not
+        //    "the thing was verified". When the step derives no specific predicate, any
+        //    verification-capable evidence qualifies (legacy fallback).
+        if (openWork && currentStep?.ExpectedActionKind == StepActionKind.Verification)
         {
-            return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.VerificationFailed, nextStepId);
+            var expectedKinds = StepClassifier.ClassifyEvidenceKinds(currentStep.Title);
+            bool satisfied = expectedKinds.Count > 0
+                ? delta.EvidenceEntries.Any(e => expectedKinds.Contains(e.Kind))
+                : delta.HasVerificationEvidence();
+            if (!satisfied)
+            {
+                return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.VerificationFailed, nextStepId);
+            }
         }
 
         // 9. Open work remains → continue the current step.

@@ -220,9 +220,13 @@ public class AgentRuntime(
         => Task.FromResult(AgentSupervisor.DecideAfterTurn(snapshot, maxCompletionRejections, maxStalledTurns));
 
     /// <summary>
-    /// The supervisor's decision after a generation, evaluated against the live durable state.
-    /// Pure decision; the caller implements the mechanics.
+    /// LEGACY plan-checklist overload — no live callers remain (ChatEngine uses the snapshot
+    /// path). It cannot see the state delta, typed evidence, or the current step, so it
+    /// silently reintroduces the old checklist-only semantics. Will be removed with the
+    /// legacy supervisor overload.
     /// </summary>
+    [Obsolete("Use DecideAfterTurnAsync(TaskExecutionSnapshot, ...) — the snapshot path is " +
+        "authoritative; this plan-checklist overload ignores StateDelta/Evidence/CurrentStep.")]
     public Task<SupervisorDecision> DecideAfterTurnAsync(
         string taskId,
         GenerationOutcome outcome,

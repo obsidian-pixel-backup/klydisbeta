@@ -6,11 +6,13 @@ namespace Klydis.Core.Tasks;
 /// The typed kind of verification evidence a tool execution produced (P1.10). A Verification
 /// step is not verified by "a tool ran successfully" — it is verified by EVIDENCE OF A
 /// SPECIFIC KIND. Reading package.json succeeding is not evidence the application builds; a
-/// successful build command is. The supervisor's verification gate reasons over these kinds.
+/// successful build command is. The supervisor's verification gate reasons over these kinds,
+/// and a step's EXPECTED kinds (from <see cref="StepClassifier.ClassifyEvidenceKinds"/>) act
+/// as the verification predicate: evidence must match what the step actually requires.
 /// </summary>
 public enum EvidenceKind
 {
-    /// <summary>Legacy/untyped evidence recorded before typed kinds existed (kept for back-compat; treated as verification-capable).</summary>
+    /// <summary>Legacy/untyped evidence recorded before typed kinds existed (kept for back-compat; treated as verification-capable only when the step declares no typed criteria).</summary>
     Unspecified,
 
     BuildPassed,
@@ -26,16 +28,34 @@ public enum EvidenceKind
     CommandFailed,
     ScreenshotCaptured,
     RequirementSatisfied,
-    ArtifactCreated
+
+    /// <summary>An artifact was CREATED — proves existence, NOT correctness (never verification-capable).</summary>
+    ArtifactCreated,
+
+    /// <summary>An artifact was actually VALIDATED (rendered, checked, opened) — verification-capable.</summary>
+    ArtifactValidated
 }
 
-/// <summary>A single piece of typed verification evidence.</summary>
-public sealed record Evidence(EvidenceKind Kind, string Description, DateTime TimestampUtc)
+/// <summary>
+/// A single piece of typed verification evidence. The subject identifies WHAT was verified
+/// (a project file, a URL, a command) so evidence cannot accidentally satisfy the wrong
+/// step, and the step id ties it to the step that produced it (P1.10).
+/// </summary>
+public sealed record Evidence(
+    EvidenceKind Kind,
+    string Description,
+    DateTime TimestampUtc,
+    string? Subject = null,
+    string? ToolName = null,
+    string? StepId = null)
 {
     /// <summary>
     /// True when this evidence kind actually VERIFIES something (a build/test/preview result,
-    /// a captured screenshot, a satisfied requirement, a successful command). Weak
-    /// inspection-only kinds (FileExists, FileChanged) and failure kinds do not verify.
+    /// a captured screenshot, a validated artifact, a satisfied requirement). Weak
+    /// inspection-only kinds (FileExists, FileChanged), mere creation (ArtifactCreated),
+    /// outcome-independent command success (CommandSucceeded) and failure kinds do not
+    /// verify. NOTE: CommandSucceeded is intentionally NOT in this set for steps with typed
+    /// criteria — "echo hello succeeded" must never satisfy "the application builds".
     /// </summary>
     public bool IsVerificationCapable => Kind is
         EvidenceKind.Unspecified or
@@ -44,6 +64,5 @@ public sealed record Evidence(EvidenceKind Kind, string Description, DateTime Ti
         EvidenceKind.PreviewLoaded or
         EvidenceKind.ScreenshotCaptured or
         EvidenceKind.RequirementSatisfied or
-        EvidenceKind.CommandSucceeded or
-        EvidenceKind.ArtifactCreated;
+        EvidenceKind.ArtifactValidated;
 }

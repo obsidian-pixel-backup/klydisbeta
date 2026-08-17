@@ -103,6 +103,43 @@ public static class StepClassifier
     };
 
     /// <summary>
+    /// The verification PREDICATE for a step (P1.10/P1.14): the evidence kinds that actually
+    /// satisfy the step's verification obligation, derived from the same text the classifier
+    /// owns. The supervisor compares recorded evidence against this set — "some command
+    /// succeeded" (CommandSucceeded) never satisfies a step that requires a build/test/
+    /// preview result. When no specific kind can be derived, the empty set means "any
+    /// verification-capable evidence" (the caller's fallback), never "no evidence needed".
+    /// Only meaningful for Verification steps.
+    /// </summary>
+    public static IReadOnlyList<EvidenceKind> ClassifyEvidenceKinds(string? stepText)
+    {
+        if (string.IsNullOrWhiteSpace(stepText)) return Array.Empty<EvidenceKind>();
+        string t = stepText.ToLowerInvariant();
+
+        if (t.Contains("build") || t.Contains("compile"))
+        {
+            // "run the build and tests" requires BOTH kinds to be producible.
+            return t.Contains("test")
+                ? new[] { EvidenceKind.BuildPassed, EvidenceKind.TestPassed }
+                : new[] { EvidenceKind.BuildPassed };
+        }
+        if (t.Contains("test"))
+        {
+            return new[] { EvidenceKind.TestPassed };
+        }
+        if (t.Contains("preview") || t.Contains("renders") || t.Contains("render"))
+        {
+            return new[] { EvidenceKind.PreviewLoaded };
+        }
+        if (t.Contains("verify"))
+        {
+            return new[] { EvidenceKind.BuildPassed, EvidenceKind.TestPassed,
+                           EvidenceKind.PreviewLoaded, EvidenceKind.ScreenshotCaptured };
+        }
+        return Array.Empty<EvidenceKind>();
+    }
+
+    /// <summary>
     /// Classifies a step's text into its execution contract. Deterministic and conservative:
     /// explicit markers select the kind and restrict the tool set; everything else stays
     /// existence-gated (AllowedTools = null) with Kind=None so the model keeps its full

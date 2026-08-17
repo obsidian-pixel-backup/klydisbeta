@@ -1388,14 +1388,22 @@ public class ChatEngine(
 
             // P1.8 — expose ONLY the current step's allowed tools in the model schema. The model
             // sees a small, deterministic obligation surface instead of the full tool universe,
-            // so a weaker model never has to hold "40 tools exist but only 3 are allowed right
+            // so a weaker model never has to hear "40 tools exist but only 3 are allowed right
             // now" in its head. The Action Gate remains the runtime second line of defense
             // against the full registered surface. When the step declares no restriction
             // (StepClassification.Default), the full schema stays visible.
+            //
+            // P1.10 (review §19) — task_complete is NOT exposed while plan items remain
+            // open: completion is runtime-eligible, and the best validation is the one that
+            // happens BEFORE generation. The gate still backstops a premature claim (the
+            // model can literally not call what it never saw).
             string toolsSchema = fullToolsSchema;
             if (!toolsDisabled && currentStepForTurn?.AllowedTools != null && tools.Count > 0)
             {
-                var allowedForStep = currentStepForTurn.AllowedTools;
+                // A non-null current step means open plan items remain — completion is not
+                // yet eligible, so hide task_complete from the model surface.
+                var allowedForStep = currentStepForTurn.AllowedTools
+                    .Where(n => !n.Equals("task_complete", StringComparison.OrdinalIgnoreCase));
                 var sliced = new List<ToolDefinition>(tools.Count);
                 foreach (var t in tools)
                 {
@@ -1703,11 +1711,12 @@ public class ChatEngine(
                         MessageQueue?.GetPending(generatingSessionId, CurrentTaskId).Count ?? 0);
                     planHeader += "\n" + ContinuationContractBuilder.Format(contract);
 
-                    // P1.7a — CURRENT STEP ALLOWED TOOLS: when the step policy restricts the
-                    // tool surface (verification/summarization/inspection steps), surface the
-                    // same set the Action Gate enforces at runtime. The model sees a small,
-                    // deterministic obligation space instead of the full tool universe — and
-                    // anything not listed is rejected before execution regardless of this text.
+                    // P1-7a — the current step's allowed tools: surface the same set the Action
+                    // Gate enforces at runtime. The model sees a small, deterministic obligation
+                    // space instead of the full tool universe — and anything not listed is
+                    // rejected before execution regardless of this text. P1.10 (review §19):
+                    // task_complete is hidden while plan items remain open — completion is
+                    // runtime-owned and only becomes visible when eligible.
                     try
                     {
                         // P1.8: the current step's allowed tools come from its TaskStep record
@@ -1715,8 +1724,14 @@ public class ChatEngine(
                         var stepAllowedForPrompt = currentStepForTurn?.AllowedTools;
                         if (stepAllowedForPrompt != null)
                         {
+                            // A non-null current step means open plan items exist → completion
+                            // is not eligible yet → task_complete is not exposed (the gate still
+                            // backstops it).
+                            var exposedForStep = stepAllowedForPrompt
+                                .Where(n => !n.Equals("task_complete", StringComparison.OrdinalIgnoreCase))
+                                .OrderBy(n => n, StringComparer.Ordinal);
                             planHeader += "\nCURRENT STEP ALLOWED TOOLS (this step may ONLY call these tools):\n" +
-                                string.Join(", ", stepAllowedForPrompt.OrderBy(n => n, StringComparer.Ordinal)) +
+                                string.Join(", ", exposedForStep) +
                                 "\nAny tool not listed above is REJECTED by the runtime before execution — do not call it.\n";
                         }
                     }
@@ -2571,12 +2586,16 @@ public class ChatEngine(
                         // P1.10: on a Verification step, a successful tool execution records
                         // TYPED evidence — the kind tells the supervisor whether the result
                         // actually verifies (a build/test/preview result) or is weak
-                        // inspection (read_file/FileExists). "run_command succeeded" is not
-                        // automatically "the application builds".
+                        // inspection (read_file/FileExists). Evidence is scoped by subject
+                        // (the file path or command string), tool and step, so it cannot
+                        // satisfy the wrong step's predicate. "run_command succeeded" is not
+                        // automatically "the application builds" — the command text decides.
                         if (result.Success &&
                             currentTaskStep?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Verification)
                         {
-                            turnState.RecordEvidence(ClassifyEvidenceKind(req.Name), $"{req.Name} succeeded");
+                            var (evidenceKind, subject) = ClassifyEvidenceResult(req.Name, req.Arguments);
+                            turnState.RecordEvidence(evidenceKind, $"{req.Name} succeeded",
+                                subject, req.Name, currentTaskStep.StepId);
                         }
                         // P1.12: a SUCCESSFUL side-effect-bearing action is now part of this
                         // run's executed set — the gate will reject a replay of the same
@@ -3199,13 +3218,38 @@ public class ChatEngine(
     /// defaults to the tool-call demand.
     /// </summary>
     /// <summary>
-    /// Maps a successful tool execution on a Verification step to the typed evidence kind it
-    /// actually produced (P1.10). Build/test/preview/screenshot commands produce verifying
-    /// evidence; read-only inspection and file writes produce weak (non-verifying) kinds so
-    /// "run_command succeeded" is never mistaken for "the application builds".
+    /// Maps a successful tool execution on a Verification step to the typed evidence it
+    /// actually produced (P1.10). For commands the ARGUMENTS decide — the same tool name can
+    /// produce BuildPassed ("npm run build") or CommandSucceeded ("echo hello"); for file
+    /// tools the subject is the path. Build/test/preview/screenshot results are verifying
+    /// evidence; static inspection and plain command success are not — "a tool ran" is never
+    /// "the thing was verified".
     /// </summary>
-    private static Klydis.Core.Tasks.EvidenceKind ClassifyEvidenceKind(string toolName)
+    private static (Klydis.Core.Tasks.EvidenceKind Kind, string? Subject) ClassifyEvidenceResult(
+        string toolName, IDictionary<string, object>? args)
     {
+        string? subject = null;
+        string? command = null;
+        if (args != null)
+        {
+            foreach (var key in new[] { "path", "file", "target" })
+            {
+                if (args.TryGetValue(key, out var pathArg))
+                {
+                    subject = ToolExecutor.UnwrapJsonElement(pathArg)?.ToString();
+                    if (!string.IsNullOrWhiteSpace(subject)) break;
+                }
+            }
+            foreach (var key in new[] { "command", "arguments", "cmd", "name" })
+            {
+                if (args.TryGetValue(key, out var cmdArg))
+                {
+                    command = ToolExecutor.UnwrapJsonElement(cmdArg)?.ToString();
+                    if (!string.IsNullOrWhiteSpace(command)) break;
+                }
+            }
+        }
+
         switch (toolName.ToLowerInvariant())
         {
             case "read_file":
@@ -3214,32 +3258,33 @@ public class ChatEngine(
             case "list_dir":
             case "search_files":
             case "grep_search":
-                return Klydis.Core.Tasks.EvidenceKind.FileExists;
+                return (Klydis.Core.Tasks.EvidenceKind.FileExists, subject);
             case "write_file":
             case "edit_file":
             case "create_file":
             case "delete_file":
-                return Klydis.Core.Tasks.EvidenceKind.FileChanged;
+                return (Klydis.Core.Tasks.EvidenceKind.FileChanged, subject);
             case "screenshot":
             case "capture_screenshot":
-                return Klydis.Core.Tasks.EvidenceKind.ScreenshotCaptured;
-            default:
-                if (toolName.Contains("build", StringComparison.OrdinalIgnoreCase))
-                {
-                    return Klydis.Core.Tasks.EvidenceKind.BuildPassed;
-                }
-                if (toolName.Contains("test", StringComparison.OrdinalIgnoreCase) ||
-                    toolName.Contains("pytest", StringComparison.OrdinalIgnoreCase) ||
-                    toolName.Contains("mocha", StringComparison.OrdinalIgnoreCase))
-                {
-                    return Klydis.Core.Tasks.EvidenceKind.TestPassed;
-                }
-                if (toolName.Contains("preview", StringComparison.OrdinalIgnoreCase))
-                {
-                    return Klydis.Core.Tasks.EvidenceKind.PreviewLoaded;
-                }
-                return Klydis.Core.Tasks.EvidenceKind.CommandSucceeded;
+                return (Klydis.Core.Tasks.EvidenceKind.ScreenshotCaptured, subject);
         }
+
+        // Command tools: the COMMAND TEXT decides the evidence kind. If arguments were
+        // unreadable, fall back to the tool name.
+        string probe = (command ?? toolName).ToLowerInvariant();
+        if (probe.Contains("build") || probe.Contains("compile"))
+        {
+            return (Klydis.Core.Tasks.EvidenceKind.BuildPassed, command ?? subject);
+        }
+        if (probe.Contains("test") || probe.Contains("pytest") || probe.Contains("mocha"))
+        {
+            return (Klydis.Core.Tasks.EvidenceKind.TestPassed, command ?? subject);
+        }
+        if (probe.Contains("preview") || probe.Contains("dev") || probe.Contains("serve"))
+        {
+            return (Klydis.Core.Tasks.EvidenceKind.PreviewLoaded, command ?? subject);
+        }
+        return (Klydis.Core.Tasks.EvidenceKind.CommandSucceeded, command ?? subject);
     }
 
     private static string BuildAutonomousDirective(string? currentStep)
