@@ -35,28 +35,14 @@ public sealed class QwenProtocolAdapter : IModelProtocol
 
     public IReadOnlyList<CanonicalAction> ParseOutput(string rawOutput)
     {
-        // P1.6: the adapter delegates to the shared tolerant dialect parser (the same pipeline
-        // the legacy fallback uses — parity by construction). Every extracted call becomes a
-        // canonical ToolCall carrying its arguments; an empty parse (plain text or unparseable)
-        // yields an empty list so the runtime treats it exactly as the legacy path did.
-        var parsed = ActionDialectParser.ParseAll(rawOutput);
-        if (parsed.Count == 0)
-        {
-            return Array.Empty<CanonicalAction>();
-        }
-        var actions = new CanonicalAction[parsed.Count];
-        for (int i = 0; i < parsed.Count; i++)
-        {
-            actions[i] = new CanonicalAction(
-                CanonicalActionType.ToolCall,
-                parsed[i].Name,
-                null,
-                null,
-                null,
-                "qwen-native",
-                parsed[i].Arguments);
-        }
-        return actions;
+        // P1.6b: the adapter delegates to the shared canonical parser — the same pipeline the
+        // legacy fallback uses (parity by construction). Every extracted call becomes a
+        // CanonicalAction carrying its TRUE type (ToolCall / CompletionClaim / Replan — never
+        // flattened to ToolCall and re-inferred from tool names) and the DETECTED dialect as
+        // SourceProtocol, independent of the model family: a Qwen model that emits an antml
+        // or JSON-envelope call is reported as such, so diagnostics reflect what actually
+        // happened rather than the model's configured protocol.
+        return ActionDialectParser.ParseCanonical(rawOutput);
     }
 
     public string FormatToolResult(ChatMessage toolResult)

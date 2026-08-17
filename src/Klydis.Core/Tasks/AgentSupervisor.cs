@@ -19,8 +19,21 @@ public static class AgentSupervisor
     /// completion while items remain open is rejected. (Owned here; GoalOrchestrator's copy
     /// delegates to this so the live loop and the legacy orchestrator agree.)
     /// </summary>
-    public static GoalCompletionVerdict EvaluateCompletion(IReadOnlyList<string> openPlanItems)
+    public static GoalCompletionVerdict EvaluateCompletion(IReadOnlyList<string>? openPlanItems)
     {
+        // FAIL CLOSED (P0.6): a completion claim is accepted only when the authoritative
+        // plan state was actually READ and shows zero open items. If the plan could not be
+        // read at all, verification is UNAVAILABLE — the claim is rejected, never accepted.
+        // The old behavior degraded a read failure to "no open items" (claim accepted),
+        // which let a database fault complete a task that still had open work.
+        if (openPlanItems == null)
+        {
+            return new GoalCompletionVerdict(false,
+                "Completion verification unavailable: the authoritative plan state could not be " +
+                "read, so this completion claim cannot be verified and is REJECTED. The goal is " +
+                "not verified complete.");
+        }
+
         if (openPlanItems.Count == 0)
         {
             return new GoalCompletionVerdict(true, null);

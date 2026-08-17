@@ -15,10 +15,12 @@ namespace Klydis.Core.Chat;
 public interface IGoalCompletionVerifier
 {
     /// <summary>
-    /// Returns the text of plan items still open (not checked off) for the session, or an
-    /// empty collection when there is no plan or every item is complete.
+    /// Open (not-done) plan items, or NULL when the plan state could not be read. Null is
+    /// the fail-closed signal: completion verification is UNAVAILABLE, so a completion
+    /// claim must be REJECTED (the old empty-list-on-failure behavior accepted claims on
+    /// a read fault — a database failure could "complete" a task with open work).
     /// </summary>
-    IReadOnlyList<string> GetOpenPlanItems(string sessionId);
+    IReadOnlyList<string>? GetOpenPlanItems(string sessionId);
 
     /// <summary>
     /// Deterministic progress signal for the session's plan: (Total, Completed) item counts.
@@ -98,7 +100,7 @@ public class GoalOrchestrator(
     /// Owned by <see cref="Klydis.Core.Tasks.AgentSupervisor"/>; this delegates so the
     /// legacy orchestrator and the live loop always agree on the verdict.
     /// </summary>
-    public static GoalCompletionVerdict EvaluateCompletion(IReadOnlyList<string> openPlanItems)
+    public static GoalCompletionVerdict EvaluateCompletion(IReadOnlyList<string>? openPlanItems)
         => Klydis.Core.Tasks.AgentSupervisor.EvaluateCompletion(openPlanItems);
 
     /// <summary>
@@ -204,9 +206,11 @@ public class GoalOrchestrator(
                                 // Deterministic verification gate: "done" only when every gating
                                 // check exits 0. The persisted plan is the authoritative checklist;
                                 // a claim of completion while items remain open is rejected and the
-                                // run continues (bounded by MaxCompletionRejections).
-                                var openItems = _completionVerifier?.GetOpenPlanItems(_chatEngine.CurrentSessionId)
-                                    ?? Array.Empty<string>();
+                                // run continues (bounded by MaxCompletionRejections). A NULL result
+                                // means the plan could not be read — verification is UNAVAILABLE,
+                                // which must also reject the claim (fail closed, never accept on a
+                                // read failure).
+                                var openItems = _completionVerifier?.GetOpenPlanItems(_chatEngine.CurrentSessionId);
                                 var verdict = EvaluateCompletion(openItems);
 
                                 if (verdict.Accepted)
@@ -339,7 +343,8 @@ public class GoalOrchestrator(
     {
         var planEntries = _completionVerifier?.GetPlanEntries(_chatEngine.CurrentSessionId)
             ?? Array.Empty<ToolExecutor.PlanEntry>();
-        int pendingQueue = _chatEngine.MessageQueue?.GetPending(_chatEngine.CurrentSessionId).Count ?? 0;
+        // Task-scoped (P0.7): the contract counts only the current task's queued messages.
+        int pendingQueue = _chatEngine.MessageQueue?.GetPending(_chatEngine.CurrentSessionId, _chatEngine.CurrentTaskId).Count ?? 0;
         return ContinuationContractBuilder.Build(state.OriginalGoal, planEntries, pendingQueue);
     }
 

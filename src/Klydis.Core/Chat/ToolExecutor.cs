@@ -2049,7 +2049,9 @@ public class ToolExecutor(
             return Task.FromResult(new ToolResult("check_message_queue", true, "Message queue service is not available.", null));
         }
 
-        var pending = MessageQueue.GetPending(sessionId);
+        // Task-scoped (P0.7): the queue diagnostic reports only the current task's pending
+        // messages — other-task items are invisible, consistent with incorporate_queued_message.
+        var pending = MessageQueue.GetPending(sessionId, CurrentTaskId);
         if (pending.Count == 0)
         {
             return Task.FromResult(new ToolResult("check_message_queue", true, "No pending messages in the queue.", null));

@@ -75,7 +75,11 @@ public class AgentRuntime(
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning(ex, "Failed to persist run continuation for task {TaskId}.", taskId);
+                // P0.8: run persistence failures surface. The task-resolution caller fails
+                // closed (no task scoping, no tools this turn) rather than proceeding as if
+                // the run were durably recorded.
+                _logger?.LogError(ex, "Failed to persist run continuation for task {TaskId}; the run is NOT durably recorded.", taskId);
+                throw;
             }
             _logger?.LogDebug("Run {RunId} continues for task {TaskId} (turn {Turn}).", bumped.RunId, taskId, bumped.TurnCount);
             return bumped;
@@ -95,7 +99,9 @@ public class AgentRuntime(
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to persist run start for task {TaskId}.", taskId);
+            // P0.8: see run-continuation branch above — surface, never swallow.
+            _logger?.LogError(ex, "Failed to persist run start for task {TaskId}; the run is NOT durably recorded.", taskId);
+            throw;
         }
         _logger?.LogInformation("Run {RunId} started for task {TaskId}.", run.RunId, taskId);
         return run;
@@ -104,6 +110,13 @@ public class AgentRuntime(
     /// <summary>
     /// Closes the task's active run with the given terminal status.
     /// </summary>
+    /// <summary>
+    /// The id of the task's active run, or null when the task has no open run. Used for
+    /// diagnostics so every action rejection carries TaskId + RunId + StepId context.
+    /// </summary>
+    public string? GetActiveRunId(string taskId)
+        => _activeRuns.TryGetValue(taskId, out var run) ? run.RunId : null;
+
     public async Task EndRunAsync(string taskId, RunStatus status)
     {
         if (!_activeRuns.TryRemove(taskId, out var run)) return;
@@ -114,7 +127,10 @@ public class AgentRuntime(
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to persist run end for task {TaskId}.", taskId);
+            // P0.8: surface, never swallow. Callers that must not crash on a telemetry write
+            // (e.g. the turn-ending finally in ChatEngine) guard the call explicitly.
+            _logger?.LogError(ex, "Failed to persist run end for task {TaskId}; the run termination was NOT durable.", taskId);
+            throw;
         }
         _logger?.LogInformation("Run {RunId} ended for task {TaskId} with status {Status}.", run.RunId, taskId, status);
     }

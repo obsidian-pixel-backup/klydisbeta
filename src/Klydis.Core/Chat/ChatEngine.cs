@@ -448,7 +448,7 @@ public class ChatEngine(
     /// plan is the authoritative checklist, so "done" requires every item to be checked off.
     /// See <see cref="IGoalCompletionVerifier"/>.
     /// </summary>
-    public IReadOnlyList<string> GetOpenPlanItems(string sessionId)
+    public IReadOnlyList<string>? GetOpenPlanItems(string sessionId)
     {
         try
         {
@@ -459,10 +459,12 @@ public class ChatEngine(
         }
         catch (Exception ex)
         {
-            // A verifier failure must never crash the goal loop; degrade to "no evidence of
-            // open work" (claim accepted) rather than blocking completion on an error.
-            logger.LogDebug(ex, "Failed to read open plan items for completion verification.");
-            return Array.Empty<string>();
+            // FAIL CLOSED (P0.6): a verifier read failure must NEVER degrade to "no open
+            // items" — that would accept a task_complete claim on a database fault. Return
+            // null (verification unavailable) so the deterministic gate REJECTS the claim;
+            // the loop continues and retries verification instead of completing falsely.
+            logger.LogWarning(ex, "Failed to read open plan items for completion verification; verification is UNAVAILABLE and any completion claim will be rejected.");
+            return null;
         }
     }
 
@@ -1054,11 +1056,28 @@ public class ChatEngine(
                 // task remained active.
                 if (_goalCompletedThisTurn)
                 {
-                    await _runtime.EndRunAsync(CurrentTaskId, Klydis.Core.Tasks.RunStatus.Completed);
+                    try
+                    {
+                        await _runtime.EndRunAsync(CurrentTaskId, Klydis.Core.Tasks.RunStatus.Completed);
+                    }
+                    catch (Exception ex)
+                    {
+                        // P0.8: a run-termination write failure must never crash the turn-
+                        // ending path (this runs in the stream's finally). Log it loudly —
+                        // the failure is surfaced in diagnostics, not silently swallowed.
+                        logger.LogError(ex, "Failed to persist run termination (Completed) for task {TaskId}.", CurrentTaskId);
+                    }
                 }
                 else if (ct.IsCancellationRequested)
                 {
-                    await _runtime.EndRunAsync(CurrentTaskId, Klydis.Core.Tasks.RunStatus.Interrupted);
+                    try
+                    {
+                        await _runtime.EndRunAsync(CurrentTaskId, Klydis.Core.Tasks.RunStatus.Interrupted);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Failed to persist run termination (Interrupted) for task {TaskId}.", CurrentTaskId);
+                    }
                 }
             }
             toolExecutor.CurrentTaskUserMessage = null;
@@ -1595,8 +1614,32 @@ public class ChatEngine(
                     var contract = ContinuationContractBuilder.Build(
                         string.Empty,
                         toolExecutor.GetSessionPlanEntries(generatingSessionId),
-                        MessageQueue?.GetPending(generatingSessionId).Count ?? 0);
+                        // Task-scoped (P0.7): the execution-state contract must never count
+                        // queued messages from other tasks in the same session.
+                        MessageQueue?.GetPending(generatingSessionId, CurrentTaskId).Count ?? 0);
                     planHeader += "\n" + ContinuationContractBuilder.Format(contract);
+
+                    // P1.7a — CURRENT STEP ALLOWED TOOLS: when the step policy restricts the
+                    // tool surface (verification/summarization/inspection steps), surface the
+                    // same set the Action Gate enforces at runtime. The model sees a small,
+                    // deterministic obligation space instead of the full tool universe — and
+                    // anything not listed is rejected before execution regardless of this text.
+                    try
+                    {
+                        var stepForPolicy = toolExecutor.GetSessionPlanEntries(generatingSessionId)
+                            .FirstOrDefault(e => !e.Done)?.Text;
+                        var stepAllowedForPrompt = Klydis.Core.Tasks.StepToolPolicy.ResolveAllowedTools(stepForPolicy);
+                        if (stepAllowedForPrompt != null)
+                        {
+                            planHeader += "\nCURRENT STEP ALLOWED TOOLS (this step may ONLY call these tools):\n" +
+                                string.Join(", ", stepAllowedForPrompt.OrderBy(n => n, StringComparer.Ordinal)) +
+                                "\nAny tool not listed above is REJECTED by the runtime before execution — do not call it.\n";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogDebug(ex, "Failed to resolve step allowed-tools for prompt.");
+                    }
 
                     sysPrompt = sysPrompt.TrimEnd() + planHeader;
                 }
@@ -2246,8 +2289,30 @@ public class ChatEngine(
                 bool validationEscalated = false;
                 int completionRejectionsThisTurn = 0;
 
+                // P1.7a — ACTION GATE setup: deterministic pre-execution validation. The
+                // registered surface, the current open step and its allowed-tool policy are
+                // resolved ONCE per turn; every request is validated against them before
+                // execution. Rejection is a RUNTIME decision — prompt text never is.
+                var registeredToolDefs = await toolExecutor.GetToolDefinitionsAsync();
+                string? currentStepText = null;
+                try
+                {
+                    currentStepText = toolExecutor.GetSessionPlanEntries(generatingSessionId)
+                        .FirstOrDefault(e => !e.Done)?.Text;
+                }
+                catch (Exception ex)
+                {
+                    // No plan state is fine — the existence gate still applies.
+                    logger.LogDebug(ex, "Failed to read current step for action gate.");
+                }
+                var stepAllowedTools = Klydis.Core.Tasks.StepToolPolicy.ResolveAllowedTools(currentStepText);
+                int actionGateRejectionsThisTurn = 0;
+                int turnActionOrdinal = 0;
+                string? activeRunId = _runtime?.GetActiveRunId(CurrentTaskId ?? string.Empty);
+
                 foreach (var req in toolCallRequests)
                 {
+                    turnActionOrdinal++;
                     var argsHash = GetCanonicalArgsHash(req.Arguments);
                     var matches = _recentTools.Where(x => x.ToolName == req.Name && x.ArgsHash == argsHash).ToList();
                     var matchCount = matches.Count;
@@ -2312,6 +2377,40 @@ public class ChatEngine(
                     // Reset consecutive blocked counter on genuine non-duplicate execution
                     _consecutiveBlockedToolCalls = 0;
                     consecutiveToolParseFailures = 0;
+
+                    // P1.7a — ACTION GATE: deterministic pre-execution validation. A rejected
+                    // action is NEVER executed and never creates tool state: the model cannot
+                    // invent tools (design_website_designer, ...), cannot call tools the step
+                    // forbids, cannot omit required arguments, and cannot invoke another tool
+                    // through run_command. The rejection is injected as the tool result so the
+                    // next generation sees exactly why and what it MAY call.
+                    var gateVerdict = Klydis.Core.Tasks.ActionGate.Validate(
+                        req, registeredToolDefs, stepAllowedTools, currentStepText);
+                    if (!gateVerdict.Allowed)
+                    {
+                        actionGateRejectionsThisTurn++;
+                        string actionId = Klydis.Core.Tasks.ActionGate.ComputeActionId(
+                            req, CurrentTaskId, activeRunId, turnActionOrdinal);
+                        string gateErrorCode = Klydis.Core.Tasks.ActionGate.ErrorCode(gateVerdict.Error!.Value);
+                        string rejection = BuildActionGateRejection(actionId, req, gateVerdict);
+                        logger.LogWarning(
+                            "ACTION_GATE_REJECTED actionId={ActionId} task={TaskId} run={RunId} step={Step} " +
+                            "tool={Tool} code={Code} reason={Reason} allowed={Allowed}",
+                            actionId, CurrentTaskId ?? "—", activeRunId ?? "—", currentStepText ?? "—",
+                            req.Name, gateErrorCode, gateVerdict.Reason, gateVerdict.AllowedToolsSummary ?? "—");
+                        NoteLesson("action_gate", $"Action rejected by the deterministic gate: tool={req.Name} code={gateErrorCode}");
+                        var gateRejObj = new ChatMessage(ChatRole.Tool, rejection, req.Name);
+                        AddToSessionHistory(activeHistory, gateRejObj, generatingSessionId);
+                        await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, rejection, 0, null);
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, rejection);
+                        if (actionGateRejectionsThisTurn >= 4)
+                        {
+                            logger.LogWarning("Action gate rejected {Count} actions this turn; forcing turn termination.", actionGateRejectionsThisTurn);
+                            forceTurnTermination = true;
+                            break;
+                        }
+                        continue;
+                    }
 
                     // req.Arguments is a non-nullable IDictionary by declaration; the null-
                     // forgiving operator silences the analyzer's over-flag of the interface-
@@ -2401,7 +2500,11 @@ public class ChatEngine(
 
                     var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
                     
-                    var currentPendingQueue = MessageQueue?.GetPending(generatingSessionId);
+                    // P0.7 queue isolation: after a tool call, only messages belonging to the
+                    // CURRENT task may be surfaced to the model. The session-wide read here
+                    // silently reintroduced cross-task contamination — queued messages from an
+                    // earlier task were offered as obligations of this task's turn.
+                    var currentPendingQueue = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId);
                     if (currentPendingQueue != null && currentPendingQueue.Count > 0)
                     {
                         var queueSummaries = string.Join("; ", currentPendingQueue.Select(m => $"[ID: {m.Id}, Mode: {m.Mode}]: \"{m.Content}\""));
@@ -3073,6 +3176,34 @@ public class ChatEngine(
         return JsonSerializer.Serialize(sortedDict);
     }
 
+    /// <summary>
+    /// The P1.7a action-gate rejection injected as the tool result. Structured and concrete:
+    /// the action identity, the machine-searchable error code, the step, the tools that WERE
+    /// allowed, and the reason — so the model's next action is a corrected call, not another
+    /// guess.
+    /// </summary>
+    private static string BuildActionGateRejection(string actionId, ToolCallRequest req, Klydis.Core.Tasks.ActionGateVerdict verdict)
+    {
+        var code = Klydis.Core.Tasks.ActionGate.ErrorCode(verdict.Error!.Value);
+        var sb = new StringBuilder();
+        sb.AppendLine("[SYSTEM — ACTION REJECTED BY ACTION GATE]");
+        sb.AppendLine("Your action was NOT executed and produced no tool result.");
+        sb.AppendLine($"  ActionId: {actionId}");
+        sb.AppendLine($"  Tool: {req.Name}");
+        sb.AppendLine($"  Error: {code}");
+        if (!string.IsNullOrWhiteSpace(verdict.CurrentStep))
+        {
+            sb.AppendLine($"  Current step: {verdict.CurrentStep}");
+        }
+        if (!string.IsNullOrWhiteSpace(verdict.AllowedToolsSummary))
+        {
+            sb.AppendLine($"  Allowed tools: [{verdict.AllowedToolsSummary}]");
+        }
+        sb.AppendLine($"  Reason: {verdict.Reason}");
+        sb.AppendLine("Emit ONE corrected action: a tool that exists, is permitted for the current step, has all required arguments, and advances the step. Tool results exist only when a tool actually executes.");
+        return sb.ToString();
+    }
+
     private List<ToolCallRequest> ParseToolCalls(string response)
     {
         // P1.6: the registered protocol adapter is now the FIRST parser. When an adapter
@@ -3109,11 +3240,13 @@ public class ChatEngine(
                             results.Add(new ToolCallRequest("task_complete", completeArgs));
                             break;
                         case Klydis.Core.Protocol.CanonicalActionType.Replan:
-                            // replan requests execute the plan tool (action=create).
-                            var planArgs = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                            {
-                                ["action"] = "create"
-                            };
+                            // replan requests execute the plan tool (action=create). Merge the
+                            // canonical args (e.g. envelope items) so the adapter path produces
+                            // the identical request the legacy envelope parser did.
+                            var planArgs = action.Arguments == null
+                                ? new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                : new Dictionary<string, object>(action.Arguments);
+                            planArgs["action"] = "create";
                             results.Add(new ToolCallRequest("plan", planArgs));
                             break;
                         default:

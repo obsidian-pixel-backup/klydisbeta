@@ -219,7 +219,12 @@ public class TaskManager(
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to persist plan for task {TaskId}.", taskId);
+            // P0.8: persistence failure is SURFACED, never swallowed. A plan mutation that
+            // the store rejected must not look persisted: the completion gate reads the
+            // persisted plan, so a silently-dropped write would make "done" diverge from
+            // what the harness can verify.
+            _logger?.LogError(ex, "Failed to persist plan for task {TaskId}; the plan write was NOT durable.", taskId);
+            throw;
         }
     }
 
@@ -254,7 +259,12 @@ public class TaskManager(
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to persist task {TaskId}.", task.TaskId);
+            // P0.8: a task state transition that the store rejected must NOT look persisted.
+            // The caller decides the policy (fail-closed task resolution, completion sealing)
+            // from the exception — swallowing it here would let the runtime believe a task
+            // was Completed while the database still says Running.
+            _logger?.LogError(ex, "Failed to persist task {TaskId}; the task state transition was NOT durable.", task.TaskId);
+            throw;
         }
     }
 

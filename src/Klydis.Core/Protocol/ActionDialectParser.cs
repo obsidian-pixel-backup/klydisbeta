@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -33,13 +34,46 @@ namespace Klydis.Core.Protocol;
 internal static class ActionDialectParser
 {
     /// <summary>
+    /// A parsed call with its TRUE canonical type and the DIALECT that actually produced it
+    /// (independent of the model family — a Qwen model may emit antml, a generic model may
+    /// emit a JSON envelope). P1.6b: this is the semantic core; the ToolCallRequest shape
+    /// (which erases the ToolCall/CompletionClaim/Replan distinction) is only a projection.
+    /// </summary>
+    private readonly record struct ParsedCall(ToolCallRequest Request, CanonicalActionType Type, string Dialect);
+
+    /// <summary>
     /// Parses think-stripped model output into executable tool-call requests. Never throws.
     /// Returns an empty list for plain text or unparseable output (the caller decides whether
     /// that is a message or an escalation).
     /// </summary>
     public static List<ToolCallRequest> ParseAll(string? response, ILogger? logger = null)
+        => ParseCalls(response, logger).Select(c => c.Request).ToList();
+
+    /// <summary>
+    /// P1.6b: the canonical parse. Every dialect normalizes to a <see cref="CanonicalAction"/>
+    /// carrying its TRUE type — ToolCall / CompletionClaim / Replan, never re-inferred from
+    /// tool names — and the detected dialect as SourceProtocol (qwen-native / antml /
+    /// json-envelope / tool-json). Text-only or unparseable output yields an empty list.
+    /// </summary>
+    public static List<CanonicalAction> ParseCanonical(string? response, ILogger? logger = null)
     {
-        var results = new List<ToolCallRequest>();
+        var parsed = ParseCalls(response, logger);
+        var actions = new List<CanonicalAction>(parsed.Count);
+        foreach (var call in parsed)
+        {
+            actions.Add(new CanonicalAction(
+                call.Type,
+                call.Request.Name,
+                null, null, null,
+                call.Dialect,
+                call.Request.Arguments));
+        }
+        return actions;
+    }
+
+    private static List<ParsedCall> ParseCalls(string? response, ILogger? logger = null)
+    {
+        var results = new List<ParsedCall>();
         if (string.IsNullOrWhiteSpace(response)) return results;
 
         // Self-protecting: strip thinking blocks up front (thinking tags only — antml/qwen
@@ -62,7 +96,7 @@ internal static class ActionDialectParser
         var envelopeCall = TryParseJsonActionEnvelope(response);
         if (envelopeCall != null)
         {
-            results.Add(envelopeCall);
+            results.Add(envelopeCall.Value);
             return results;
         }
 
@@ -159,7 +193,7 @@ internal static class ActionDialectParser
                 // — the model was told to fix a call that was already well-formed.
                 if (!string.IsNullOrEmpty(name))
                 {
-                    results.Add(new ToolCallRequest(name, args));
+                    results.Add(new ParsedCall(new ToolCallRequest(name, args), CanonicalActionType.ToolCall, "qwen-native"));
                 }
             }
             if (results.Count > 0) return results;
@@ -192,7 +226,7 @@ internal static class ActionDialectParser
                     args[key] = TryParseQwenNativeJsonValue(rawVal) ?? rawVal;
                 }
 
-                results.Add(new ToolCallRequest(name, args));
+                results.Add(new ParsedCall(new ToolCallRequest(name, args), CanonicalActionType.ToolCall, "antml"));
             }
             if (results.Count > 0) return results;
         }
@@ -311,13 +345,13 @@ internal static class ActionDialectParser
                         foreach (var element in doc.RootElement.EnumerateArray())
                         {
                             var req = ProcessToolCallJsonElement(element);
-                            if (req != null) results.Add(req);
+                            if (req != null) results.Add(new ParsedCall(req, CanonicalActionType.ToolCall, "tool-json"));
                         }
                     }
                     else if (doc.RootElement.ValueKind == JsonValueKind.Object)
                     {
                         var req = ProcessToolCallJsonElement(doc.RootElement);
-                        if (req != null) results.Add(req);
+                        if (req != null) results.Add(new ParsedCall(req, CanonicalActionType.ToolCall, "tool-json"));
                     }
                 }
                 catch (JsonException jsonEx)
@@ -349,7 +383,7 @@ internal static class ActionDialectParser
 
                         if (!string.IsNullOrEmpty(fallbackName))
                         {
-                            results.Add(new ToolCallRequest(fallbackName, fallbackArgs));
+                            results.Add(new ParsedCall(new ToolCallRequest(fallbackName, fallbackArgs), CanonicalActionType.ToolCall, "tool-json"));
                         }
                     }
                 }
@@ -372,11 +406,14 @@ internal static class ActionDialectParser
     ///   {"action":"plan","items":["..."]}   (legacy variant, normalized to the plan tool)
     /// Returns null when the response is not a valid envelope so callers fall through to the
     /// legacy format parsers. "message" actions are plain text and never become tool calls.
+    /// P1.6b: the canonical TYPE is preserved (CompletionClaim / Replan) instead of being
+    /// flattened into a generic tool call — the runtime must never re-infer semantics from
+    /// tool names.
     /// </summary>
-    private static ToolCallRequest? TryParseJsonActionEnvelope(string response)
+    private static ParsedCall? TryParseJsonActionEnvelope(string response)
     {
         var match = Regex.Match(response,
-            @"\{\s*""action""\s*:\s*""(tool_call|completion_claim|replan|plan|message)""[\s\S]*?\}",
+            @"\{\s*""action""\s*:\s*""(tool_call|completion_claim|replan|plan|message)""",
             RegexOptions.IgnoreCase);
         if (!match.Success) return null;
 
@@ -385,7 +422,14 @@ internal static class ActionDialectParser
 
         try
         {
-            string raw = SanitizeJsonControlCharacters(match.Value);
+            // Extract the EXACT JSON object with a balanced-brace scan. The old regex matched
+            // to the FIRST '}' — an envelope whose arguments contain nested objects
+            // ({"action":"tool_call","arguments":{"path":"a.txt"}}) lost its closing brace,
+            // failed to parse, and fell through to the loose JSON heuristics, which misread
+            // the "action" key as the tool name (a phantom "tool_call" tool call).
+            string? raw = ExtractBalancedJsonObject(response, match.Index);
+            if (raw == null) return null;
+            raw = SanitizeJsonControlCharacters(raw);
             using var doc = JsonDocument.Parse(raw, new JsonDocumentOptions
             {
                 AllowTrailingCommas = true,
@@ -396,13 +440,14 @@ internal static class ActionDialectParser
             if (action == "tool_call")
             {
                 // Reuses the shared JSON mapping (name/tool + arguments).
-                return ProcessToolCallJsonElement(doc.RootElement);
+                var req = ProcessToolCallJsonElement(doc.RootElement);
+                return req == null ? null : new ParsedCall(req, CanonicalActionType.ToolCall, "json-envelope");
             }
 
-            // completion_claim → task_complete; replan AND its legacy "plan" variant → the
-            // plan tool (action=create), so {"action":"plan","items":[...]} executes instead
-            // of falling through every format parser and dying as a no-action repair.
-            string name = action == "completion_claim" ? "task_complete" : "plan";
+            // completion_claim → CompletionClaim (task_complete); replan AND its legacy
+            // "plan" variant → Replan (plan tool, action=create), so
+            // {"action":"plan","items":[...]} executes instead of falling through every
+            // format parser and dying as a no-action repair.
             var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             if (doc.RootElement.TryGetProperty("summary", out var summary) && summary.ValueKind == JsonValueKind.String)
             {
@@ -421,12 +466,51 @@ internal static class ActionDialectParser
                     if (list.Count > 0) args["items"] = string.Join("\n", list);
                 }
             }
-            return new ToolCallRequest(name, args);
+
+            string toolName = action == "completion_claim" ? "task_complete" : "plan";
+            var type = action == "completion_claim" ? CanonicalActionType.CompletionClaim : CanonicalActionType.Replan;
+            return new ParsedCall(new ToolCallRequest(toolName, args), type, "json-envelope");
         }
         catch (JsonException)
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Returns the exact JSON object that starts at <paramref name="startIndex"/> (the index
+    /// of the opening '{'), tracking string literals and brace depth until the matching close.
+    /// Null when the object is unterminated. Used by the envelope parser so nested objects in
+    /// arguments never truncate the capture.
+    /// </summary>
+    private static string? ExtractBalancedJsonObject(string text, int startIndex)
+    {
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (int i = startIndex; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+            }
+            else
+            {
+                switch (c)
+                {
+                    case '"': inString = true; break;
+                    case '{': depth++; break;
+                    case '}':
+                        depth--;
+                        if (depth == 0) return text.Substring(startIndex, i - startIndex + 1);
+                        break;
+                }
+            }
+        }
+        return null;
     }
 
     private static ToolCallRequest? ProcessToolCallJsonElement(JsonElement element)
