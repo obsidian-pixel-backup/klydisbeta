@@ -99,6 +99,31 @@ public sealed record ModelProfile
     /// <summary>True when the model reliably continues after a tool result (multi-call turns).</summary>
     public bool SupportsToolContinuation { get; init; }
 
+    /// <summary>
+    /// Supported tool-call dialects for this model (from template/metadata).
+    /// </summary>
+    public IReadOnlyList<ToolProtocol> SupportedProtocols { get; init; } = new[] { ToolProtocol.GenericJson };
+
+    /// <summary>
+    /// The dialect the runtime should PREFER for this model (the one known to be most
+    /// reliable), used by the ProtocolRegistry to pick the adapter.
+    /// </summary>
+    public ToolProtocol PreferredProtocol { get; init; } = ToolProtocol.GenericJson;
+
+    /// <summary>
+    /// Dialects to try when the preferred protocol fails (ordered fallbacks).
+    /// </summary>
+    public IReadOnlyList<ToolProtocol> FallbackProtocols { get; init; } = Array.Empty<ToolProtocol>();
+
+    /// <summary>
+    /// How confident the runtime is that this profile's protocol is empirically reliable for
+    /// THIS model (0..1). Distinct from capability: "supports JSON" is metadata; "Klydis has
+    /// verified this model reliably produces valid Klydis actions" is measured. Starts at a
+    /// conservative default; the capability probe raises it with evidence. Below 0.5 the
+    /// runtime uses a more conservative execution policy (one tool per turn, more repair).
+    /// </summary>
+    public double ProtocolConfidence { get; init; } = 0.4;
+
     /// <summary>Measured (or probed, or defaulted) reliability of tool-call emission.</summary>
     public CapabilityLevel ToolCalling { get; init; } = CapabilityLevel.Experimental;
 

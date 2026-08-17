@@ -33,8 +33,31 @@ public sealed class QwenProtocolAdapter : IModelProtocol
         => _promptEngine.ApplyTemplate(messages as IList<ChatMessage> ?? messages.ToList(), ChatTemplate.Qwen,
             qwenThinking: Profile.Reasoning == ReasoningProtocol.NativeThinkBlock);
 
-    public CanonicalAction ParseOutput(string rawOutput)
-        => CanonicalActionNormalizer.Normalize(rawOutput, sourceProtocol: "qwen-native");
+    public IReadOnlyList<CanonicalAction> ParseOutput(string rawOutput)
+    {
+        // P1.6: the adapter delegates to the shared tolerant dialect parser (the same pipeline
+        // the legacy fallback uses — parity by construction). Every extracted call becomes a
+        // canonical ToolCall carrying its arguments; an empty parse (plain text or unparseable)
+        // yields an empty list so the runtime treats it exactly as the legacy path did.
+        var parsed = ActionDialectParser.ParseAll(rawOutput);
+        if (parsed.Count == 0)
+        {
+            return Array.Empty<CanonicalAction>();
+        }
+        var actions = new CanonicalAction[parsed.Count];
+        for (int i = 0; i < parsed.Count; i++)
+        {
+            actions[i] = new CanonicalAction(
+                CanonicalActionType.ToolCall,
+                parsed[i].Name,
+                null,
+                null,
+                null,
+                "qwen-native",
+                parsed[i].Arguments);
+        }
+        return actions;
+    }
 
     public string FormatToolResult(ChatMessage toolResult)
         => toolResult.Name == null

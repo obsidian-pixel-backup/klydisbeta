@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Klydis.Core.Chat;
 
 namespace Klydis.Core.Protocol;
@@ -35,7 +36,8 @@ public sealed record CanonicalAction(
     string? ArgumentsJson,
     string? Text,
     string? Reason,
-    string SourceProtocol)
+    string SourceProtocol,
+    IDictionary<string, object>? Arguments = null)
 {
     /// <summary>
     /// True when the action is a tool invocation of the given tool — including completion

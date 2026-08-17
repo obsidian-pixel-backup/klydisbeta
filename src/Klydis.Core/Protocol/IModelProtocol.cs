@@ -41,10 +41,12 @@ public interface IModelProtocol
     string BuildPrompt(IReadOnlyList<ChatMessage> messages);
 
     /// <summary>
-    /// Normalizes raw model output into a <see cref="CanonicalAction"/> using this model's
-    /// dialect. Must never throw — malformed output maps to Message or Blocked.
+    /// Normalizes raw model output into canonical actions using this model's dialect. A single
+    /// turn may contain several actions (e.g. parallel tool calls), hence the list. Must never
+    /// throw — unparseable output yields an empty list (the runtime treats that as a message
+    /// or an escalation, exactly as the legacy parser did).
     /// </summary>
-    CanonicalAction ParseOutput(string rawOutput);
+    IReadOnlyList<CanonicalAction> ParseOutput(string rawOutput);
 
     /// <summary>
     /// Formats a tool result back into the model's dialect for the next generation.

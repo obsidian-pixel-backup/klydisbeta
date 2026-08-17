@@ -42,6 +42,12 @@ public static class ModelProfileFactory
         bool isThinking = reasoning == ReasoningProtocol.NativeThinkBlock;
         bool nativeTools = toolProtocol == ToolProtocol.QwenNative;
 
+        // Supported/preferred/fallback dialects: a qwen-family model supports both the native
+        // format and generic JSON, preferring native; everything else prefers generic JSON.
+        ToolProtocol[] supported = nativeTools
+            ? new[] { ToolProtocol.QwenNative, ToolProtocol.GenericJson }
+            : new[] { ToolProtocol.GenericJson };
+
         return new ModelProfile
         {
             ModelId = modelId,
@@ -50,6 +56,9 @@ public static class ModelProfileFactory
             Template = template,
             Reasoning = reasoning,
             ToolProtocol = toolProtocol,
+            SupportedProtocols = supported,
+            PreferredProtocol = nativeTools ? ToolProtocol.QwenNative : ToolProtocol.GenericJson,
+            FallbackProtocols = nativeTools ? new[] { ToolProtocol.GenericJson } : Array.Empty<ToolProtocol>(),
             SupportsNativeTools = nativeTools,
             SupportsStructuredOutput = toolProtocol == ToolProtocol.GenericJson || nativeTools,
             SupportsGrammar = nativeTools, // grammar-constrained qwen-native tool calls

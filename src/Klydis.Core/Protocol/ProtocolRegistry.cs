@@ -10,6 +10,7 @@ namespace Klydis.Core.Protocol;
 public static class ProtocolRegistry
 {
     private static readonly Dictionary<string, Func<ModelProfile, IModelProtocol>> _factories = new(StringComparer.Ordinal);
+    private static bool _defaultsRegistered;
 
     /// <summary>Registers a protocol factory keyed by protocol kind.</summary>
     public static void Register(string protocolKey, Func<ModelProfile, IModelProtocol> factory)
@@ -17,10 +18,24 @@ public static class ProtocolRegistry
         _factories[protocolKey] = factory ?? throw new ArgumentNullException(nameof(factory));
     }
 
+    /// <summary>
+    /// Registers the built-in adapters — currently qwen-native; generic-json and the other
+    /// families land with their own adapters. Idempotent; called lazily by the runtime and
+    /// available to tests. Reset() clears everything (including the default flag) so tests
+    /// can simulate a fresh registry.
+    /// </summary>
+    public static void RegisterDefaultAdapters()
+    {
+        if (_defaultsRegistered) return;
+        _defaultsRegistered = true;
+        Register("qwen-native", static profile => new QwenProtocolAdapter(profile));
+    }
+
     /// <summary>Clears all registrations (used by tests).</summary>
     public static void Reset()
     {
         _factories.Clear();
+        _defaultsRegistered = false;
     }
 
     /// <summary>
