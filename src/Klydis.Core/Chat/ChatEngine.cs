@@ -265,6 +265,15 @@ public class ChatEngine(
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _pendingConsolidations = new();
     private int _consecutiveBlockedToolCalls = 0;
 
+    // P1.12: run-scoped action replay ledger. Side-effect-bearing actions that SUCCESSFULLY
+    // executed are recorded by replay key (tool + canonicalized args) and the gate rejects a
+    // re-execution — a recovery loop must never duplicate a command or destructive call. The
+    // ledger persists ACROSS TURNS within a run (the old per-iteration HashSet reset every
+    // generation, so turn 2 could replay turn 1's action); it is cleared only when the active
+    // run id changes (a fresh run / new task).
+    private readonly HashSet<string> _runExecutedActions = new(StringComparer.Ordinal);
+    private string? _runExecutedActionsRunId;
+
     public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
 
     private readonly Klydis.Core.Tasks.TaskManager? _taskManager = taskManager;
@@ -1244,6 +1253,13 @@ public class ChatEngine(
         int noActionRepairsThisTurn = 0;
         const int MaxNoActionRepairs = 3;
 
+        // A Reason step's deliverable is a DESIGN DIRECTION — it must be substantive. A
+        // one-line commitment ("I'll get started on that right away") is filler, not a
+        // deliverable; only real content satisfies the step. This is NOT "length = progress"
+        // (which the supervisor rejects for execution steps) — it is the only signal a
+        // text-deliverable step has, since its deliverable IS text.
+        const int MinTextDeliverableLength = 80;
+
         // Rescue mode: after escalating corrections are exhausted and the model is STILL
         // degenerate, one final generation strips the tools and the pre-opened think block and
         // demands a plain direct answer — so the user gets a coherent response instead of an
@@ -1752,9 +1768,24 @@ public class ChatEngine(
             // would force the model into a tool call the gate then rejects (the Qwen export's
             // failure: it invented web-research tools for a requirements step). The required
             // output follows the step's expected action kind instead of assuming tool_call.
-            string requiredOutput = currentObligationForTurn?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Reason
-                ? "REQUIRED OUTPUT THIS TURN: produce the design direction / reasoning this step requires as TEXT. No workspace tool is permitted for this step — the runtime will reject any tool call.\n"
+            // Summary/UserInput steps are text-deliverable too; every other kind demands ONE
+            // executable action.
+            bool contractProducesText = currentObligationForTurn != null &&
+                currentObligationForTurn.ExpectedActionKind is
+                    Klydis.Core.Tasks.StepActionKind.Reason or
+                    Klydis.Core.Tasks.StepActionKind.Summary or
+                    Klydis.Core.Tasks.StepActionKind.UserInput;
+            string requiredOutput = contractProducesText
+                ? "REQUIRED OUTPUT THIS TURN: produce the required design direction / reasoning / summary as TEXT. No workspace tool is permitted for this step — the runtime will reject any workspace tool call.\n" +
+                  "OUTPUT CHANNEL: the deliverable MUST appear as VISIBLE reply text — reasoning produced only inside a think block does not count and is not delivered to the user.\n"
                 : "REQUIRED OUTPUT THIS TURN: perform exactly ONE tool action from the current step's allowed set — inspect, modify, or verify. Text alone is NOT accepted as task progress.\n";
+            // The DELIVERABLES line must not contradict the required output: telling a
+            // text-deliverable step to "write designs to a file with write_file" while the
+            // gate forbids write_file on that step is a second contradiction that stalls the
+            // model (observed qwen 3.6 loop).
+            string deliverablesLine = contractProducesText
+                ? "DELIVERABLES: this step's deliverable is TEXT (a design direction / requirements / summary) — produce it in the reply. Code and pages come later, in steps that allow 'write_file'.\n"
+                : "DELIVERABLES: code, pages, reports, and designs belong in FILES — write them with 'write_file' and let the user view them in the PREVIEW tab. Do NOT dump large code blocks or markup into the chat reply.\n";
             string creativeLeadLine = IsCreativeLeadRequest(currentUserMessage)
                 ? "CREATIVE LEAD: the user asked you to take a creative lead — propose a working direction (name, copy, palette, layout) clearly labeled PROPOSED instead of asking for details. Unknowns never block execution.\n"
                 : "";
@@ -1765,7 +1796,7 @@ public class ChatEngine(
                 "RUNTIME OWNS: the plan, step transitions, tool execution, verification and completion. You do NOT plan the steps, create a todo list, advance steps yourself, or narrate the runtime — you produce ONE valid action for the current step.\n" +
                 creativeLeadLine +
                 "DO NOT: greet the user, ask permission, ask what to do next, or describe what you would do. Execute the next action.\n" +
-                "DELIVERABLES: code, pages, reports, and designs belong in FILES — write them with 'write_file' and let the user view them in the PREVIEW tab. Do NOT dump large code blocks or markup into the chat reply.\n" +
+                deliverablesLine +
                 "FACTS: only what the user stated or a tool verified is KNOWN. Never present assumptions or creative suggestions as user-provided facts — company name, products, audience, and existing assets are UNKNOWN until stated or verified.\n" +
                 "If the goal is finished and verified, call 'task_complete'. If the plan is wrong, revise it with 'plan' (action=create).";
         }
@@ -2391,12 +2422,14 @@ public class ChatEngine(
                 int actionGateRejectionsThisTurn = 0;
                 int turnActionOrdinal = 0;
                 string? activeRunId = _runtime?.GetActiveRunId(CurrentTaskId ?? string.Empty);
-                // Run-scoped idempotency set (P1.12): actions that SUCCESSFULLY executed in
-                // this run are recorded by replay key (tool + canonicalized args). The gate
-                // rejects a re-execution of a side-effect-bearing action — a recovery loop
-                // must never duplicate a command or destructive call. Read-only tools are
-                // exempt (re-reading is safe).
-                var executedThisRun = new HashSet<string>(StringComparer.Ordinal);
+                // P1.12: the replay ledger is RUN-scoped, not generation-scoped — reset only
+                // when the active run changes so a replay across turns (context reset, model
+                // retry, replan, user reconnect) is still caught.
+                if (!string.Equals(activeRunId, _runExecutedActionsRunId, StringComparison.Ordinal))
+                {
+                    _runExecutedActionsRunId = activeRunId;
+                    _runExecutedActions.Clear();
+                }
 
                 foreach (var req in toolCallRequests)
                 {
@@ -2475,7 +2508,7 @@ public class ChatEngine(
                     var gateVerdict = Klydis.Core.Tasks.ActionGate.Validate(
                         req, registeredToolDefs, stepAllowedTools, currentStepText,
                         workspaceRoot: null, // no task workspace root yet — boundary enforcement activates with the TaskStep workspace milestone
-                        alreadyExecuted: executedThisRun);
+                        alreadyExecuted: _runExecutedActions);
                     if (!gateVerdict.Allowed)
                     {
                         actionGateRejectionsThisTurn++;
@@ -2535,13 +2568,15 @@ public class ChatEngine(
                             turnState.RecordFileChanged(changedPath ?? req.Name);
                         }
 
-                        // P1.8: on a Verification step, a successful tool execution IS evidence —
-                        // recorded so the supervisor can distinguish a step that produced
-                        // verification evidence from one that merely ran tools without verifying.
+                        // P1.10: on a Verification step, a successful tool execution records
+                        // TYPED evidence — the kind tells the supervisor whether the result
+                        // actually verifies (a build/test/preview result) or is weak
+                        // inspection (read_file/FileExists). "run_command succeeded" is not
+                        // automatically "the application builds".
                         if (result.Success &&
                             currentTaskStep?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Verification)
                         {
-                            turnState.RecordEvidence($"{req.Name} succeeded");
+                            turnState.RecordEvidence(ClassifyEvidenceKind(req.Name), $"{req.Name} succeeded");
                         }
                         // P1.12: a SUCCESSFUL side-effect-bearing action is now part of this
                         // run's executed set — the gate will reject a replay of the same
@@ -2551,7 +2586,7 @@ public class ChatEngine(
                             Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(req.Name) !=
                                 Klydis.Core.Tasks.ToolSideEffectLevel.ReadOnly)
                         {
-                            executedThisRun.Add(Klydis.Core.Tasks.ActionGate.ComputeReplayKey(req));
+                            _runExecutedActions.Add(Klydis.Core.Tasks.ActionGate.ComputeReplayKey(req));
                         }
                     }
                     finally
@@ -2765,8 +2800,29 @@ public class ChatEngine(
                 {
                     openStepsRemain = false;
                 }
+                // STEP-AWARE NO-ACTION DETECTION (P1.8): a text-only response is a protocol
+                // failure ONLY on steps whose contract demands an executable action. Steps whose
+                // deliverable IS text (Reason — "capture the requirements and creative
+                // direction", Summary, UserInput) explicitly demand text from the model; the
+                // CURRENT ACTION CONTRACT even forbids workspace tools on them. Repairing that
+                // text as "no action" is a contradiction that traps the model: it produces the
+                // required deliverable, gets repaired with a tool-call demand it cannot legally
+                // satisfy (no workspace tools allowed), and stalls into empty/thinking-only
+                // output — the observed qwen 3.6 loop of "replied without performing an action"
+                // followed by "empty response". A refusal/filler is still repaired on every
+                // step kind.
+                bool stepProducesText = currentStepForTurn != null &&
+                    currentStepForTurn.ExpectedActionKind is
+                        Klydis.Core.Tasks.StepActionKind.Reason or
+                        Klydis.Core.Tasks.StepActionKind.Summary or
+                        Klydis.Core.Tasks.StepActionKind.UserInput;
+                // A Reason step's text must be SUBSTANTIVE to count as the deliverable — a
+                // short commitment is repaired exactly like the refusal case. Summary/UserInput
+                // text is the deliverable regardless of length.
+                bool substantiveDeliverable = currentStepForTurn?.ExpectedActionKind != Klydis.Core.Tasks.StepActionKind.Reason ||
+                    visibleResponse.Trim().Length >= MinTextDeliverableLength;
                 bool noActionProducedThisTurn = isGoalMode && !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
-                    (refusalLike || openStepsRemain);
+                    (refusalLike || (openStepsRemain && (!stepProducesText || !substantiveDeliverable)));
 
                 // Supervisor: classify the generation outcome and record the runtime's decision
                 // against the durable task state. The branch mechanics below implement the
@@ -2943,7 +2999,20 @@ public class ChatEngine(
                     NoteLesson("empty_response", $"Model produced an empty visible response; empty-response self-correction injected (correction {selfCorrectionsThisTurn}).");
                     logger.LogWarning("Model produced an empty visible response. Injecting empty-response self-correction (correction {Count} of {Max} this turn).",
                         selfCorrectionsThisTurn, MaxSelfCorrectionsPerTurn);
-                    var emptyCorrection = "[System Self-Correction: Your previous response was EMPTY — you produced no actual content. Re-read the user's message carefully and respond DIRECTLY with a real answer. Do not just close tags or emit whitespace.]";
+                    // Step-aware correction (P1.8): an empty generation (typically a qwen
+                    // thinking model that only reasoned and never closed its think block) needs
+                    // to know WHAT to produce, not just that it produced nothing — otherwise it
+                    // re-enters the same reasoning-only stall. The directive re-states the
+                    // current step's obligation (text deliverable or allowed tools).
+                    string emptyStepDirective = currentStepForTurn?.Title != null
+                        ? " The current step is: '" + currentStepForTurn.Title + "'. " + BuildAutonomousDirective(currentStepForTurn.Title)
+                        : string.Empty;
+                    // The channel warning matters for qwen thinking models: they reason inside
+                    // the open think block and can emit ZERO visible text while having actually
+                    // produced the deliverable internally. The correction must tell them to
+                    // REPEAT the deliverable as visible text — visible text is the only thing
+                    // that reaches the user.
+                    var emptyCorrection = "[System Self-Correction: Your previous response was EMPTY — you produced no actual visible content (reasoning alone does not count). Close your reasoning and produce the required output now." + emptyStepDirective + " If you produced the deliverable only inside your thinking, WRITE IT OUT as visible reply text now — visible text is the only thing that reaches the user. Do not just close tags or emit whitespace.]";
                     var emptyMsgObj = new ChatMessage(ChatRole.Runtime, emptyCorrection);
                     AddToSessionHistory(activeHistory, emptyMsgObj, generatingSessionId);
                     // Engine-internal correction: in-memory only (see IsEngineInjectedMessage).
@@ -2983,24 +3052,30 @@ public class ChatEngine(
                             noActionRepairsThisTurn, MaxNoActionRepairs);
                         NoteLesson("no_action_produced", $"Autonomous turn produced no tool action; action-required repair injected (repair {noActionRepairsThisTurn}).");
 
-                        string repairStepText;
-                        try
+                        string? repairStepText = currentStepForTurn?.Title;
+                        if (string.IsNullOrWhiteSpace(repairStepText))
                         {
-                            repairStepText = toolExecutor.GetSessionPlanEntries(generatingSessionId).FirstOrDefault(e => !e.Done)?.Text
-                                ?? "finish and verify the remaining work";
+                            try
+                            {
+                                repairStepText = toolExecutor.GetSessionPlanEntries(generatingSessionId).FirstOrDefault(e => !e.Done)?.Text
+                                    ?? "finish and verify the remaining work";
+                            }
+                            catch (Exception)
+                            {
+                                repairStepText = "finish and verify the remaining work";
+                            }
                         }
-                        catch (Exception)
-                        {
-                            repairStepText = "finish and verify the remaining work";
-                        }
+                        // The repair directive is STEP-AWARE (P1.8): it re-states the current
+                        // step's obligation — the allowed tools or the required text deliverable
+                        // — instead of demanding a generic tool call the step's gate would
+                        // reject. The old hardcoded message told every step "write files with
+                        // 'write_file'" and "produce exactly ONE of tool_call/plan/task_complete"
+                        // — on a Reason step (no workspace tools) that demand is unsatisfiable
+                        // and stalls the model into empty output (the observed qwen 3.6 loop).
                         var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response produced only text — no tool action, no file change, no state change. In autonomous task mode, text is not progress; only executed actions and changed task state count.\n" +
                             "CURRENT STEP: " + repairStepText + "\n" +
-                            "Produce exactly ONE of:\n" +
-                            "1. A <tool_call> invoking the next needed tool (or the JSON form {\"action\":\"tool_call\",\"name\":\"TOOL\",\"arguments\":{...}}).\n" +
-                            "2. A 'plan' call (action=create) if the plan no longer reflects reality.\n" +
-                            "3. A 'task_complete' call if and only if the goal is genuinely finished AND verified.\n" +
-                            "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — do it.\n" +
-                            "Do NOT paste code, markup, or design content into chat: write files with 'write_file' and summarize them — the user views the files in the PREVIEW tab.]";
+                            BuildAutonomousDirective(repairStepText) + "\n" +
+                            "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — do it.]";
                         var noActionMsgObj = new ChatMessage(ChatRole.Runtime, noActionMsg);
                         AddToSessionHistory(activeHistory, noActionMsgObj, generatingSessionId);
                         // Engine-internal repair notice: in-memory only (see IsEngineInjectedMessage).
@@ -3123,6 +3198,50 @@ public class ChatEngine(
     /// explicit verification/summarization markers switch the directive, everything else
     /// defaults to the tool-call demand.
     /// </summary>
+    /// <summary>
+    /// Maps a successful tool execution on a Verification step to the typed evidence kind it
+    /// actually produced (P1.10). Build/test/preview/screenshot commands produce verifying
+    /// evidence; read-only inspection and file writes produce weak (non-verifying) kinds so
+    /// "run_command succeeded" is never mistaken for "the application builds".
+    /// </summary>
+    private static Klydis.Core.Tasks.EvidenceKind ClassifyEvidenceKind(string toolName)
+    {
+        switch (toolName.ToLowerInvariant())
+        {
+            case "read_file":
+            case "view_file":
+            case "list_directory":
+            case "list_dir":
+            case "search_files":
+            case "grep_search":
+                return Klydis.Core.Tasks.EvidenceKind.FileExists;
+            case "write_file":
+            case "edit_file":
+            case "create_file":
+            case "delete_file":
+                return Klydis.Core.Tasks.EvidenceKind.FileChanged;
+            case "screenshot":
+            case "capture_screenshot":
+                return Klydis.Core.Tasks.EvidenceKind.ScreenshotCaptured;
+            default:
+                if (toolName.Contains("build", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Klydis.Core.Tasks.EvidenceKind.BuildPassed;
+                }
+                if (toolName.Contains("test", StringComparison.OrdinalIgnoreCase) ||
+                    toolName.Contains("pytest", StringComparison.OrdinalIgnoreCase) ||
+                    toolName.Contains("mocha", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Klydis.Core.Tasks.EvidenceKind.TestPassed;
+                }
+                if (toolName.Contains("preview", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Klydis.Core.Tasks.EvidenceKind.PreviewLoaded;
+                }
+                return Klydis.Core.Tasks.EvidenceKind.CommandSucceeded;
+        }
+    }
+
     private static string BuildAutonomousDirective(string? currentStep)
     {
         if (string.IsNullOrWhiteSpace(currentStep))
@@ -3146,8 +3265,14 @@ public class ChatEngine(
                 $"The current step '{currentStep}' requires the final deliverable. Produce it NOW — write it to a file if it is code or a document ('write_file'), then present the result. Allowed tools for this step: [{tools}]. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — deliver.",
             Klydis.Core.Tasks.StepActionKind.Verification =>
                 $"The current step '{currentStep}' requires verification EVIDENCE. Execute the verification now — run the build/tests or inspect the files and report the factual result. Allowed tools for this step: [{tools}]. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — verify.",
+            // Reason/UserInput steps deliver TEXT — no workspace tool exists for them, so the
+            // directive must demand the text deliverable, never a tool call (demanding one
+            // traps the model: the gate rejects every workspace tool, and it stalls into
+            // empty/thinking-only output — the observed qwen 3.6 loop).
+            Klydis.Core.Tasks.StepActionKind.Reason or Klydis.Core.Tasks.StepActionKind.UserInput =>
+                $"The current step '{currentStep}' requires a TEXT deliverable (design direction / requirements / reasoning) — produce it now as text, clearly labeled PROPOSED where you are proposing. No workspace tool is permitted for this step, so do NOT call a tool. Do NOT plan, do NOT narrate — deliver the content.",
             _ =>
-                $"Execute exactly ONE tool call that advances the current step '{currentStep}'. Allowed tools for this step: [{tools}]. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute."
+                $"Execute exactly ONE tool call that advances the current step '{currentStep}'. Allowed tools for this step: [{tools}] — any tool not listed is REJECTED by the runtime before execution. Do NOT plan, do NOT narrate, do NOT re-enter reasoning — execute."
         };
     }
 

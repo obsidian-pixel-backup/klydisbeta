@@ -210,8 +210,12 @@ public static class AgentSupervisor
         }
 
         // 5. Autonomous-mode protocol failure: the model produced text but NO action (no tool
-        //    call, no completion claim, no replan) while work remains open.
-        if (snapshot.Outcome == GenerationOutcome.NoActionProduced && openWork)
+        //    call, no completion claim, no replan) while work remains open. Steps whose
+        //    deliverable IS text (Reason/Summary/UserInput) are exempt — their contract demands
+        //    text, so a text-only generation is the deliverable, not a protocol failure. The
+        //    live loop's no-action guard applies the same exemption.
+        if (snapshot.Outcome == GenerationOutcome.NoActionProduced && openWork &&
+            (currentStep == null || RequiresExecution(currentStep.ExpectedActionKind)))
         {
             return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced, nextStepId);
         }
@@ -240,11 +244,14 @@ public static class AgentSupervisor
             return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced, currentStep.StepId);
         }
 
-        // 8. A verification step whose turn produced NO evidence is not verified: "done" is
-        //    rejected — the step stays open and the model must produce evidence (build, tests,
-        //    inspection) rather than narrating success.
+        // 8. A verification step whose turn produced NO VERIFICATION-CAPABLE evidence is not
+        //    verified: "done" is rejected — the step stays open and the model must produce
+        //    evidence of a kind that actually verifies (P1.10: a successful build/test/preview,
+        //    a screenshot, a satisfied requirement, a successful command). Weak inspection-only
+        //    evidence (FileExists from read_file, FileChanged from write_file) and failure
+        //    kinds do NOT verify — "a tool ran" is not "the thing was verified".
         if (openWork && currentStep?.ExpectedActionKind == StepActionKind.Verification &&
-            !delta.Contains(StateDeltaKind.EvidenceAdded))
+            !delta.HasVerificationEvidence())
         {
             return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.VerificationFailed, nextStepId);
         }
@@ -281,8 +288,11 @@ public static class AgentSupervisor
     /// <summary>
     /// True when the step's contract requires an executable action (a tool call), as opposed
     /// to a step whose deliverable is text (reasoning/requirements, summaries, user input).
+    /// Shared by the supervisor decision AND the live loop's no-action guard, so both agree
+    /// on which steps treat a text-only response as a deliverable rather than a protocol
+    /// failure.
     /// </summary>
-    private static bool RequiresExecution(StepActionKind kind)
+    public static bool RequiresExecution(StepActionKind kind)
         => kind is StepActionKind.Inspect or StepActionKind.Research or
             StepActionKind.FileMutation or StepActionKind.CommandExecution or
             StepActionKind.TerminalInteraction or StepActionKind.Verification;

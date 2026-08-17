@@ -31,8 +31,10 @@ public enum StateDeltaKind
     EvidenceAdded
 }
 
-/// <summary>A single factual change entry.</summary>
-public readonly record struct StateDeltaEntry(StateDeltaKind Kind, string Detail, DateTime TimestampUtc);
+/// <summary>A single factual change entry. Evidence entries carry their typed
+/// <see cref="Evidence"/> payload so the supervisor can reason about verification quality
+/// (P1.10) instead of a boolean "a tool ran".</summary>
+public readonly record struct StateDeltaEntry(StateDeltaKind Kind, string Detail, DateTime TimestampUtc, Evidence? Evidence = null);
 
 /// <summary>
 /// The factual state change produced by a generation/turn: tool executions, plan/step
@@ -57,6 +59,34 @@ public sealed record StateDelta(IReadOnlyList<StateDeltaEntry> Entries)
         foreach (var e in Entries)
         {
             if (e.Kind == kind) return true;
+        }
+        return false;
+    }
+
+    /// <summary>The typed evidence entries recorded this turn (P1.10).</summary>
+    public IReadOnlyList<Evidence> EvidenceEntries
+    {
+        get
+        {
+            var list = new List<Evidence>();
+            foreach (var e in Entries)
+            {
+                if (e.Evidence != null) list.Add(e.Evidence);
+            }
+            return list;
+        }
+    }
+
+    /// <summary>
+    /// True when at least one VERIFICATION-CAPABLE piece of evidence was recorded. A
+    /// Verification step whose only evidence is weak inspection (FileExists/FileChanged) or a
+    /// failure kind is NOT verified — "a tool ran" is not "the thing was verified".
+    /// </summary>
+    public bool HasVerificationEvidence()
+    {
+        foreach (var e in Entries)
+        {
+            if (e.Evidence != null && e.Evidence.IsVerificationCapable) return true;
         }
         return false;
     }
@@ -112,10 +142,16 @@ public sealed class TurnStateCollector
     }
 
     public void RecordEvidence(string description)
+        => RecordEvidence(EvidenceKind.Unspecified, description);
+
+    /// <summary>Records typed verification evidence (P1.10) — the kind lets the supervisor
+    /// distinguish "a build passed" from "a file was read".</summary>
+    public void RecordEvidence(EvidenceKind kind, string description)
     {
         lock (_lock)
         {
-            _entries.Add(new StateDeltaEntry(StateDeltaKind.EvidenceAdded, description, DateTime.UtcNow));
+            _entries.Add(new StateDeltaEntry(StateDeltaKind.EvidenceAdded, description, DateTime.UtcNow,
+                new Evidence(kind, description, DateTime.UtcNow)));
         }
     }
 

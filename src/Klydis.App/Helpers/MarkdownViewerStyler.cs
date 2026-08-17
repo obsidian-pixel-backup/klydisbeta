@@ -268,9 +268,33 @@ public static class MarkdownViewerStyler
                     }
                     break;
                 case List list:
+                    // MdXaml maps the markdown bullet character to a WPF marker style:
+                    // "-" → Circle (hollow ○), "*" → Disc (filled ●), "+" → Box, "=" → Square.
+                    // Normalize every unordered marker to ONE consistent filled-dot bullet so
+                    // lists look identical regardless of the character the model used — and the
+                    // hollow-circle look that "- " bullets produced is replaced with the same
+                    // clean bullet the rest of the app uses.
+                    if (list.MarkerStyle is TextMarkerStyle.Circle or TextMarkerStyle.Box or TextMarkerStyle.Square)
+                    {
+                        list.MarkerStyle = TextMarkerStyle.Disc;
+                    }
                     foreach (var item in list.ListItems)
                     {
                         FixupBlocks(item.Blocks, viewer);
+                    }
+                    break;
+                case Paragraph paragraph:
+                    // Tighter body line height: the default ~1.33× font-metric line spacing
+                    // reads loose and bulky for long model outputs. Apply a modest 1.2× height
+                    // to BODY paragraphs only (MdParagraphStyle) — headings, code blocks and
+                    // notes keep their natural spacing. Scaled from the viewer's effective font
+                    // size so the thinking bubble (12.5px) and artifact preview get a
+                    // proportional tightening instead of a fixed value. When the font size is
+                    // unset (inherited/NaN) the paragraph keeps its natural height.
+                    if (paragraph.Style == viewer.FindResource("MdParagraphStyle") &&
+                        TextElement.GetFontSize(viewer) is double fs && fs > 0)
+                    {
+                        paragraph.LineHeight = Math.Ceiling(fs * 1.2);
                     }
                     break;
             }

@@ -1054,11 +1054,11 @@
                                     </TextBlock>
                                 </StackPanel>
 
-                                <!-- Assistant Message -->
-                                <Border Padding="14,8" HorizontalAlignment="Left" Margin="0,2,100,2"
-                                        Background="{DynamicResource AssistantBubbleBackgroundBrush}"
-                                        BorderBrush="{DynamicResource AssistantBubbleBorderBrush}"
-                                        BorderThickness="1" CornerRadius="12"
+                                <!-- Assistant Message — bubble-less model output: no background,
+                                     no border, minimal padding, so the reply reads as plain text
+                                     directly on the chat surface (cleaner, more minimal). -->
+                                <Border Padding="2,0" HorizontalAlignment="Left" Margin="0,2,100,2"
+                                        Background="Transparent" BorderThickness="0"
                                         TextElement.Foreground="{DynamicResource TextPrimaryBrush}"
                                         TextElement.FontSize="15"
                                         Visibility="{Binding Role, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=assistant}">
