@@ -28,7 +28,68 @@ public enum StateDeltaKind
     QueueConsumed,
 
     /// <summary>Verification evidence was recorded (Detail = evidence description).</summary>
-    EvidenceAdded
+    EvidenceAdded,
+
+    // ---- Event-stream kinds (P1.12 Phase D scaffold): these become the execution event
+    // stream the Workbench projections subscribe to. Producers land with the projection
+    // milestone; the kinds are declared now so the event vocabulary is stable. ----
+
+    /// <summary>An artifact was created (Detail = artifact path/name).</summary>
+    ArtifactCreated,
+
+    /// <summary>An artifact was validated (rendered/opened/verified; Detail = artifact).</summary>
+    ArtifactValidated,
+
+    /// <summary>A file was newly created (Detail = path).</summary>
+    FileCreated,
+
+    /// <summary>An existing file was modified (Detail = path).</summary>
+    FileModified,
+
+    /// <summary>A file was deleted (Detail = path).</summary>
+    FileDeleted,
+
+    /// <summary>A unified diff was produced (Detail = diff id).</summary>
+    DiffCreated,
+
+    /// <summary>A preview session started (Detail = url/port).</summary>
+    PreviewStarted,
+
+    /// <summary>A preview completed loading (Detail = url).</summary>
+    PreviewLoaded,
+
+    /// <summary>A preview failed (Detail = url/reason).</summary>
+    PreviewFailed,
+
+    /// <summary>A preview session stopped (Detail = url/port).</summary>
+    PreviewStopped,
+
+    /// <summary>A terminal session started (Detail = command).</summary>
+    TerminalStarted,
+
+    /// <summary>A terminal produced output (Detail = output snippet).</summary>
+    TerminalOutput,
+
+    /// <summary>A terminal session exited (Detail = exit code).</summary>
+    TerminalExited,
+
+    /// <summary>A verification predicate passed (Detail = criterion).</summary>
+    VerificationPassed,
+
+    /// <summary>A verification predicate failed (Detail = criterion/reason).</summary>
+    VerificationFailed,
+
+    /// <summary>A skill was activated for the task (Detail = skill id).</summary>
+    SkillActivated,
+
+    /// <summary>The execution protocol changed (Detail = protocol name).</summary>
+    ProtocolChanged,
+
+    /// <summary>The user steered the task (Detail = steer kind).</summary>
+    TaskSteered,
+
+    /// <summary>A new plan version replaced the prior one (Detail = version).</summary>
+    PlanVersionChanged
 }
 
 /// <summary>A single factual change entry. Evidence entries carry their typed

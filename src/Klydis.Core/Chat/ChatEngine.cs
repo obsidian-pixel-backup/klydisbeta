@@ -2514,16 +2514,46 @@ public class ChatEngine(
                     _consecutiveBlockedToolCalls = 0;
                     consecutiveToolParseFailures = 0;
 
-                    // P1.7a — ACTION GATE: deterministic pre-execution validation. A rejected
-                    // action is NEVER executed and never creates tool state: the model cannot
-                    // invent tools (design_website_designer, ...), cannot call tools the step
-                    // forbids, cannot omit required arguments, and cannot invoke another tool
-                    // through run_command. The rejection is injected as the tool result so the
-                    // next generation sees exactly why and what it MAY call.
-                    var gateVerdict = Klydis.Core.Tasks.ActionGate.Validate(
-                        req, registeredToolDefs, stepAllowedTools, currentStepText,
-                        workspaceRoot: null, // no task workspace root yet — boundary enforcement activates with the TaskStep workspace milestone
-                        alreadyExecuted: _runExecutedActions);
+                    // P1.7a — the deterministic validation gate: a rejected action is NEVER
+                    // executed and never creates tool state — the model cannot invent tools,
+                    // cannot call tools the step forbids, cannot omit required arguments, and
+                    // cannot invoke another tool through run_command. The rejection is
+                    // injected as the tool result so the next generation sees exactly what it
+                    // MAY call.
+                    // P1.14 — the ActionValidator adds SEMANTIC validation: a task_complete
+                    // claim is rejected BEFORE execution while completion eligibility is
+                    // false (open items / unsatisfied verification / stale evidence /
+                    // unresolved failures). Eligibility is the gate's evidence dimension —
+                    // the model is never allowed to "finish" a task the evidence says is
+                    // unfinished.
+                    bool isCompletionRequest = req.Name.Equals("task_complete", StringComparison.OrdinalIgnoreCase);
+                    bool completionEligibleNow = !isCompletionRequest;
+                    string? completionIneligibilityReason = null;
+                    if (isCompletionRequest && _runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+                    {
+                        try
+                        {
+                            var planForElig = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                            var eligibility = _runtime.BuildCompletionEligibility(CurrentTaskId, planForElig);
+                            var eligVerdict = Klydis.Core.Tasks.AgentSupervisor.EvaluateCompletion(
+                                planForElig.Where(e => !e.Done).Select(e => e.Text).ToList(), eligibility);
+                            completionEligibleNow = eligVerdict.Accepted;
+                            completionIneligibilityReason = eligVerdict.Reason;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Eligibility unreadable — let the claim gate decide (it fails closed).
+                            logger.LogDebug(ex, "Completion eligibility could not be evaluated pre-execution; the claim gate will decide.");
+                            completionEligibleNow = true;
+                        }
+                    }
+                    var gateVerdict = Klydis.Core.Tasks.ActionValidator.ValidateForStep(
+                        req, registeredToolDefs,
+                        currentTaskStep == null ? null : Klydis.Core.Tasks.ActionObligation.FromStep(currentTaskStep),
+                        new Klydis.Core.Tasks.ActionValidationContext(
+                            CompletionIsEligible: completionEligibleNow,
+                            CompletionIneligibilityReason: completionIneligibilityReason,
+                            RunAlreadyExecuted: _runExecutedActions));
                     if (!gateVerdict.Allowed)
                     {
                         actionGateRejectionsThisTurn++;
@@ -2581,21 +2611,37 @@ public class ChatEngine(
                                 changedPath = ToolExecutor.UnwrapJsonElement(pathArg)?.ToString();
                             }
                             turnState.RecordFileChanged(changedPath ?? req.Name);
+                            // P1.12: a file change bumps the run's workspace version — every
+                            // earlier build/preview evidence entry is now STALE (evidence
+                            // verifies a specific file state, so it must not survive edits).
+                            _runtime?.NoteRunFileChanged(CurrentTaskId ?? string.Empty);
                         }
 
-                        // P1.10: on a Verification step, a successful tool execution records
-                        // TYPED evidence — the kind tells the supervisor whether the result
-                        // actually verifies (a build/test/preview result) or is weak
-                        // inspection (read_file/FileExists). Evidence is scoped by subject
-                        // (the file path or command string), tool and step, so it cannot
-                        // satisfy the wrong step's predicate. "run_command succeeded" is not
-                        // automatically "the application builds" — the command text decides.
-                        if (result.Success &&
-                            currentTaskStep?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Verification)
+                        // P1.10/P1.12: typed evidence. The kind tells the runtime whether the
+                        // result actually verifies (a build/test/preview result) or is weak
+                        // inspection (read_file/FileExists); the command TEXT decides, so
+                        // "run_command succeeded" is never automatically "the application
+                        // builds". The turn delta records evidence on Verification steps (the
+                        // supervisor's rule 8); the RUN LEDGER records verification-relevant
+                        // executions on ANY step (success or failure) so the completion gate
+                        // sees the run's full verification history.
+                        if (currentTaskStep?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Verification ||
+                            IsRunVerificationRelevant(req.Name))
                         {
                             var (evidenceKind, subject) = ClassifyEvidenceResult(req.Name, req.Arguments);
-                            turnState.RecordEvidence(evidenceKind, $"{req.Name} succeeded",
-                                subject, req.Name, currentTaskStep.StepId);
+                            var recordedKind = result.Success ? evidenceKind : ToFailureEvidenceKind(evidenceKind);
+                            string description = $"{req.Name} {(result.Success ? "succeeded" : "failed")}";
+                            if (currentTaskStep?.ExpectedActionKind == Klydis.Core.Tasks.StepActionKind.Verification)
+                            {
+                                turnState.RecordEvidence(recordedKind, description,
+                                    subject, req.Name, currentTaskStep.StepId);
+                            }
+                            if (_runtime != null)
+                            {
+                                _runtime.RecordRunEvidence(CurrentTaskId ?? string.Empty,
+                                    new Klydis.Core.Tasks.Evidence(recordedKind, description,
+                                        DateTime.UtcNow, subject, req.Name, currentTaskStep?.StepId));
+                            }
                         }
                         // P1.12: a SUCCESSFUL side-effect-bearing action is now part of this
                         // run's executed set — the gate will reject a replay of the same
@@ -2852,6 +2898,10 @@ public class ChatEngine(
                 // loop extraction.)
                 if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
                 {
+                    // Hoisted so the P1.15 decision DISPATCH below (which contains yield
+                    // expressions) can run OUTSIDE the try-with-catch — iterators cannot
+                    // yield inside one.
+                    Klydis.Core.Tasks.SupervisorDecision? supervisorDecision = null;
                     try
                     {
                         var outcome = _runtime.ClassifyGeneration(
@@ -2898,6 +2948,12 @@ public class ChatEngine(
                         // _runtime is a captured field; the enclosing null guard cannot be
                         // narrowed across awaits, so suppress explicitly (the guard holds).
                         var decision = await _runtime!.DecideAfterTurnAsync(snapshot, maxCompletionRejections: 3);
+                        supervisorDecision = decision;
+                        // P1.12: every supervisor decision is recorded against the run — a
+                        // process death mid-dispatch is diagnosable and the decision history
+                        // is inspectable (this makes the decision itself durable state, not
+                        // a log line).
+                        _runtime.RecordRunDecision(CurrentTaskId!, decision);
                         logger.LogInformation(
                             "Supervisor: outcome={Outcome} decision={Decision} reason={Reason} nextStep={NextStep}",
                             outcome, decision.Decision, decision.Reason, decision.NextStepId ?? "—");
@@ -2905,6 +2961,64 @@ public class ChatEngine(
                     catch (Exception ex)
                     {
                         logger.LogDebug(ex, "Supervisor decision logging failed.");
+                    }
+
+                    // P1.15 (Phase A) — the decision is DISPATCHED, not merely logged. The
+                    // generation/streaming mechanics below stay put; WHAT happens next is
+                    // decided here: ContinueStep / RepairProtocol / CompleteTask are executed
+                    // by the loop's own machinery further below, while Pause / Replan /
+                    // FailTask were DEAD decisions until now — this dispatch makes them live.
+                    // (Yield expressions must live OUTSIDE the try-with-catch above: iterators
+                    // cannot yield inside one.)
+                    if (supervisorDecision is { } sd)
+                    {
+                        string? dispatchNotice = null;
+                        string? replanDirective = null;
+                        switch (sd.Decision)
+                        {
+                            case Klydis.Core.Tasks.ExecutionDecision.Pause:
+                                // A decision that was exhausted (completion claims,
+                                // stagnation) — end the turn with a structured notice instead
+                                // of letting the loop churn.
+                                dispatchNotice =
+                                    sd.Reason == Klydis.Core.Chat.ContinuationReason.VerificationFailed
+                                        ? "⏸ The supervisor paused this turn: completion was claimed too many times without satisfying verification. The task stays open — resume to continue the real verification work."
+                                        : "⏸ The supervisor paused this turn: the execution budget was exhausted. The task stays open — resume to continue.";
+                                break;
+
+                            case Klydis.Core.Tasks.ExecutionDecision.Replan:
+                                // Stagnation: the approach is not making progress — revise
+                                // the plan instead of repeating the failing steps.
+                                replanDirective =
+                                    "[System Prompt: The supervisor has determined the current approach is not producing progress. REVISE the plan now with 'plan' (action=create): replace the steps that are not working with a fresh, concrete approach, then execute the revised plan. Do NOT repeat the previous failing actions.]";
+                                break;
+
+                            case Klydis.Core.Tasks.ExecutionDecision.FailTask:
+                                dispatchNotice =
+                                    "✖ The supervisor failed the task: a runtime generation error stopped execution. The task is left open and recoverable.";
+                                break;
+
+                            default:
+                                // ContinueStep / RepairProtocol / CompleteTask / Verify /
+                                // AwaitUser / BudgetExhausted: implemented by the loop's own
+                                // machinery below (repair injections, cancellation handling,
+                                // the completion claim seal).
+                                break;
+                        }
+
+                        if (replanDirective != null)
+                        {
+                            AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, replanDirective), generatingSessionId);
+                            await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Runtime, replanDirective, 0, null);
+                            NoteLesson("supervisor_replan", "Supervisor decided Replan; replan directive injected.");
+                            yield return new ChatStreamEvent(ChatStreamEventType.Error, "↻ The supervisor ordered a replan (no progress) — plan revision injected.");
+                            continue;
+                        }
+                        if (dispatchNotice != null)
+                        {
+                            yield return new ChatStreamEvent(ChatStreamEventType.Error, dispatchNotice);
+                            break;
+                        }
                     }
                 }
 
@@ -3286,6 +3400,35 @@ public class ChatEngine(
         }
         return (Klydis.Core.Tasks.EvidenceKind.CommandSucceeded, command ?? subject);
     }
+
+    /// <summary>
+    /// True when a tool execution can produce verification-relevant evidence for the RUN
+    /// ledger (P1.12) regardless of the step it ran on — commands, builds, tests, previews,
+    /// screenshots. A build run during an implementation step still counts for the
+    /// completion gate; weak inspection (read_file) does not flood the ledger.
+    /// </summary>
+    private static bool IsRunVerificationRelevant(string toolName)
+    {
+        string t = toolName.ToLowerInvariant();
+        if (t is "run_command" or "run_command_nowait" or "screenshot" or "capture_screenshot")
+        {
+            return true;
+        }
+        return t.Contains("build") || t.Contains("test") || t.Contains("preview") ||
+               t.Contains("pytest") || t.Contains("mocha") || t.Contains("compile");
+    }
+
+    /// <summary>The failure counterpart of a success evidence kind (P1.10) — a failed build
+    /// records BuildFailed, never BuildPassed, so unresolved failures block completion.</summary>
+    private static Klydis.Core.Tasks.EvidenceKind ToFailureEvidenceKind(Klydis.Core.Tasks.EvidenceKind kind)
+        => kind switch
+        {
+            Klydis.Core.Tasks.EvidenceKind.BuildPassed => Klydis.Core.Tasks.EvidenceKind.BuildFailed,
+            Klydis.Core.Tasks.EvidenceKind.TestPassed => Klydis.Core.Tasks.EvidenceKind.TestFailed,
+            Klydis.Core.Tasks.EvidenceKind.PreviewLoaded or Klydis.Core.Tasks.EvidenceKind.PreviewStarted =>
+                Klydis.Core.Tasks.EvidenceKind.PreviewFailed,
+            _ => Klydis.Core.Tasks.EvidenceKind.CommandFailed
+        };
 
     private static string BuildAutonomousDirective(string? currentStep)
     {

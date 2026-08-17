@@ -27,6 +27,11 @@ public class AgentRuntime(
     private readonly ILogger<AgentRuntime>? _logger = logger;
     private readonly ConcurrentDictionary<string, TaskRun> _activeRuns = new();
 
+    // P1.12: the run-scoped evidence ledger (workspace-versioned invalidation + decision
+    // records). Keyed by task; reset when a FRESH run starts, kept while a run continues so
+    // evidence survives user turns within the run.
+    private readonly ExecutionEvidenceLedger _evidenceLedger = new();
+
     /// <summary>
     /// Maps the inference engine's raw end-of-generation flags to a <see cref="GenerationOutcome"/>.
     /// The outcome is a fact about the generation; the supervisor turns it into a decision.
@@ -114,11 +119,20 @@ public class AgentRuntime(
         }
         catch (Exception ex)
         {
-            // A failed recovery scan must not block execution: the fresh run below is still
-            // created and persisted. The old run remains stale in the store (observable),
-            // which is safer than not creating the new run at all.
-            _logger?.LogDebug(ex, "Run recovery scan failed for task {TaskId}; continuing with a fresh run.", taskId);
+            // FAIL CLOSED (review §10): a recovery scan failure means we do NOT know whether
+            // another execution history is Running for this task. Continuing would create a
+            // COMPETING run (database shows Running, memory adds another Running) — two
+            // histories can then both execute the same task. Persistence/recovery
+            // unavailable ⇒ surface the error and let the caller pause the task; never
+            // create a competing run.
+            _logger?.LogError(ex, "Run recovery scan FAILED for task {TaskId}: the durable run " +
+                "state could not be read. Refusing to start a possibly-competing run.", taskId);
+            throw;
         }
+
+        // A fresh run starts a fresh execution ledger — evidence and decisions are scoped to
+        // the run, never leaked across attempts.
+        _evidenceLedger.Reset(taskId);
 
         var run = new TaskRun(
             RunId: "R-" + Guid.NewGuid().ToString("N")[..12],
@@ -171,16 +185,70 @@ public class AgentRuntime(
     }
 
     /// <summary>
+    /// Records typed evidence into the run ledger (P1.12), stamped with the workspace version
+    /// it was produced against. A later file change invalidates it.
+    /// </summary>
+    public void RecordRunEvidence(string taskId, Evidence evidence)
+        => _evidenceLedger.RecordEvidence(taskId, evidence);
+
+    /// <summary>Bumps the run's workspace version — every prior build/preview evidence entry
+    /// is now STALE (file changes invalidate verification).</summary>
+    public void NoteRunFileChanged(string taskId)
+        => _evidenceLedger.NoteFileChanged(taskId);
+
+    /// <summary>The run's current workspace version (0 = no files changed yet).</summary>
+    public int GetRunWorkspaceVersion(string taskId)
+        => _evidenceLedger.GetWorkspaceVersion(taskId);
+
+    /// <summary>The run's CURRENT (non-stale) evidence.</summary>
+    public IReadOnlyList<EvidenceLedgerEntry> GetRunEvidence(string taskId)
+        => _evidenceLedger.GetCurrentEvidence(taskId);
+
+    /// <summary>
+    /// Builds the completion eligibility for the task RIGHT NOW (P0 — the checklist gate's
+    /// second dimension): every step complete, every verification step's predicate satisfied
+    /// by CURRENT run evidence, and no unresolved verification failures.
+    /// </summary>
+    public CompletionEligibility BuildCompletionEligibility(
+        string taskId,
+        IReadOnlyList<ToolExecutor.PlanEntry> plan)
+        => AgentSupervisor.EvaluateEligibility(plan, taskId, _evidenceLedger.GetCurrentEvidence(taskId));
+
+    /// <summary>
+    /// Records the supervisor's decision against the run (decision ledger; P1.12 Phase A).
+    /// In-memory + logged for now; the durable store write lands with the persistence
+    /// milestone.
+    /// </summary>
+    public void RecordRunDecision(string taskId, SupervisorDecision decision)
+    {
+        var record = new ExecutionDecisionRecord(
+            DecisionId: "D-" + Guid.NewGuid().ToString("N")[..12],
+            TaskId: taskId,
+            RunId: GetActiveRunId(taskId),
+            StepId: decision.NextStepId,
+            Decision: decision.Decision,
+            Reason: decision.Reason,
+            TimestampUtc: DateTime.UtcNow);
+        _evidenceLedger.RecordDecision(taskId, record);
+        _logger?.LogInformation("ExecutionDecision recorded: task={TaskId} decision={Decision} reason={Reason} step={Step}",
+            taskId, decision.Decision, decision.Reason, decision.NextStepId ?? "—");
+    }
+
+    /// <summary>
     /// Runs the deterministic completion gate on a task_complete claim. The model's claim is
-    /// merely an input; the gate decides. Accepted ⇒ the task is marked Completed (through the
-    /// state machine), rejected ⇒ the reason is returned and the loop continues.
+    /// merely an input; the gate decides against the checklist AND the evidence (P0): an
+    /// empty checklist with missing/stale/failed verification is rejected. Accepted ⇒ the
+    /// task is marked Completed (through the state machine), rejected ⇒ the reason is
+    /// returned and the loop continues.
     /// </summary>
     public async Task<(bool Accepted, string? Reason)> EvaluateCompletionClaimAsync(
         string taskId,
         IReadOnlyList<ToolExecutor.PlanEntry> plan,
         string? summary)
     {
-        var verdict = AgentSupervisor.EvaluateCompletion(plan.Where(e => !e.Done).Select(e => e.Text).ToList());
+        var eligibility = BuildCompletionEligibility(taskId, plan);
+        var verdict = AgentSupervisor.EvaluateCompletion(
+            plan.Where(e => !e.Done).Select(e => e.Text).ToList(), eligibility);
         if (verdict.Accepted)
         {
             await CompleteTaskAsync(taskId, summary);
@@ -219,31 +287,4 @@ public class AgentRuntime(
         int maxStalledTurns = 6)
         => Task.FromResult(AgentSupervisor.DecideAfterTurn(snapshot, maxCompletionRejections, maxStalledTurns));
 
-    /// <summary>
-    /// LEGACY plan-checklist overload — no live callers remain (ChatEngine uses the snapshot
-    /// path). It cannot see the state delta, typed evidence, or the current step, so it
-    /// silently reintroduces the old checklist-only semantics. Will be removed with the
-    /// legacy supervisor overload.
-    /// </summary>
-    [Obsolete("Use DecideAfterTurnAsync(TaskExecutionSnapshot, ...) — the snapshot path is " +
-        "authoritative; this plan-checklist overload ignores StateDelta/Evidence/CurrentStep.")]
-    public Task<SupervisorDecision> DecideAfterTurnAsync(
-        string taskId,
-        GenerationOutcome outcome,
-        bool claimAccepted,
-        IReadOnlyList<ToolExecutor.PlanEntry> plan,
-        int pendingQueueItems,
-        int completionRejections,
-        int maxCompletionRejections = 3,
-        int consecutiveStalledTurns = 0,
-        int maxStalledTurns = 6)
-    {
-        // The task's durable state (plan/queue) is passed in by the caller; the task id is
-        // kept on the signature for the checkpoint phase, when the runtime will read step and
-        // run state itself rather than receiving snapshots.
-        return Task.FromResult(AgentSupervisor.DecideAfterTurn(
-            claimAccepted, outcome, plan, pendingQueueItems,
-            completionRejections, maxCompletionRejections,
-            consecutiveStalledTurns, maxStalledTurns));
-    }
 }

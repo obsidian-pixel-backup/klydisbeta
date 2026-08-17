@@ -34,7 +34,11 @@ public enum ActionGateError
 
     /// <summary>The same non-read-only action already executed in this run — a replay after
     /// recovery would duplicate its side effects.</summary>
-    ReplayDetected
+    ReplayDetected,
+
+    /// <summary>task_complete was claimed while the run's completion eligibility is false
+    /// (open plan items, unsatisfied verification, unresolved failures).</summary>
+    PrematureCompletion
 }
 
 /// <summary>
@@ -75,6 +79,7 @@ public static class ActionGate
     public const string CommandDisguisedAsToolCode = "MODEL_INVENTED_TOOL";
     public const string WorkspaceBoundaryViolationCode = "ACTION_OUTSIDE_WORKSPACE";
     public const string ReplayDetectedCode = "REPLAY_DETECTED";
+    public const string PrematureCompletionCode = "COMPLETION_NOT_ELIGIBLE";
 
     /// <summary>The machine-searchable error code for a gate error.</summary>
     public static string ErrorCode(ActionGateError error) => error switch
@@ -86,6 +91,7 @@ public static class ActionGate
         ActionGateError.CommandDisguisedAsTool => CommandDisguisedAsToolCode,
         ActionGateError.WorkspaceBoundaryViolation => WorkspaceBoundaryViolationCode,
         ActionGateError.ReplayDetected => ReplayDetectedCode,
+        ActionGateError.PrematureCompletion => PrematureCompletionCode,
         _ => "ACTION_GATE_UNKNOWN"
     };
 

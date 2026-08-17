@@ -5,6 +5,17 @@ using Klydis.Core.Chat;
 namespace Klydis.Core.Tasks;
 
 /// <summary>
+/// The completion gate's second dimension (P0): an empty plan checklist is necessary but not
+/// sufficient — the run's evidence must back it. Produced by the runtime from the plan and
+/// the run evidence ledger; consumed by <see cref="AgentSupervisor.EvaluateCompletion"/>.
+/// </summary>
+public sealed record CompletionEligibility(
+    bool AllRequiredStepsComplete,
+    bool AllVerificationPredicatesSatisfied,
+    bool NoUnresolvedFailures,
+    IReadOnlyList<string> UnsatisfiedVerification);
+
+/// <summary>
 /// The harness's decision layer — pure and deterministic (no I/O). The model produces a
 /// generation; the supervisor evaluates it against durable task state and decides what
 /// happens next. Completion claims, generation outcomes, and stagnation signals are all
@@ -15,11 +26,15 @@ namespace Klydis.Core.Tasks;
 public static class AgentSupervisor
 {
     /// <summary>
-    /// The completion gate: "done" requires the plan checklist to be empty. A claim of
-    /// completion while items remain open is rejected. (Owned here; GoalOrchestrator's copy
-    /// delegates to this so the live loop and the legacy orchestrator agree.)
+    /// The completion gate: "done" requires the plan checklist to be empty AND the run's
+    /// completion eligibility to hold (all verification predicates satisfied, no unresolved
+    /// verification failures). A claim while items remain open — or while the evidence does
+    /// not back the checklist — is rejected. (Owned here; GoalOrchestrator's copy delegates
+    /// to this so the live loop and the legacy orchestrator agree.)
     /// </summary>
-    public static GoalCompletionVerdict EvaluateCompletion(IReadOnlyList<string>? openPlanItems)
+    public static GoalCompletionVerdict EvaluateCompletion(
+        IReadOnlyList<string>? openPlanItems,
+        CompletionEligibility? eligibility = null)
     {
         // FAIL CLOSED (P0.6): a completion claim is accepted only when the authoritative
         // plan state was actually READ and shows zero open items. If the plan could not be
@@ -34,17 +49,79 @@ public static class AgentSupervisor
                 "not verified complete.");
         }
 
-        if (openPlanItems.Count == 0)
+        if (openPlanItems.Count > 0)
         {
-            return new GoalCompletionVerdict(true, null);
+            var listed = openPlanItems.Count <= 3
+                ? string.Join("; ", openPlanItems)
+                : string.Join("; ", openPlanItems.Take(3)) + $"; (+{openPlanItems.Count - 3} more)";
+
+            return new GoalCompletionVerdict(false,
+                $"{openPlanItems.Count} plan item(s) still open: {listed}");
         }
 
-        var listed = openPlanItems.Count <= 3
-            ? string.Join("; ", openPlanItems)
-            : string.Join("; ", openPlanItems.Take(3)) + $"; (+{openPlanItems.Count - 3} more)";
+        // P0 (review §4/§36): an EMPTY checklist is necessary but not sufficient. The
+        // evidence must back it — a task where every box is checked but the build never ran,
+        // or whose verification evidence was invalidated by later edits, is NOT complete.
+        if (eligibility != null)
+        {
+            if (!eligibility.AllRequiredStepsComplete)
+            {
+                return new GoalCompletionVerdict(false,
+                    "Completion rejected: not all required steps are complete.");
+            }
+            if (!eligibility.AllVerificationPredicatesSatisfied)
+            {
+                var missing = eligibility.UnsatisfiedVerification.Count <= 3
+                    ? string.Join("; ", eligibility.UnsatisfiedVerification)
+                    : string.Join("; ", eligibility.UnsatisfiedVerification.Take(3)) +
+                      $"; (+{eligibility.UnsatisfiedVerification.Count - 3} more)";
+                return new GoalCompletionVerdict(false,
+                    $"Completion rejected: {eligibility.UnsatisfiedVerification.Count} " +
+                    $"verification predicate(s) unsatisfied. Required but missing/stale: {missing}. " +
+                    "Re-run the verification (build/tests/preview) against the CURRENT files " +
+                    "and only then claim completion.");
+            }
+            if (!eligibility.NoUnresolvedFailures)
+            {
+                return new GoalCompletionVerdict(false,
+                    "Completion rejected: the run has unresolved verification FAILURES " +
+                    "(failed build/test/preview/command) against the current files. Fix them " +
+                    "and re-verify before claiming completion.");
+            }
+        }
 
-        return new GoalCompletionVerdict(false,
-            $"{openPlanItems.Count} plan item(s) still open: {listed}");
+        return new GoalCompletionVerdict(true, null);
+    }
+
+    /// <summary>
+    /// Computes the completion eligibility from the plan and the run's CURRENT (non-stale)
+    /// evidence (P0): every step complete, every verification step's predicate satisfied,
+    /// no unresolved verification failures. Pure and deterministic — the runtime feeds it
+    /// ledger evidence and the completion gate consumes its result. A verification step
+    /// with no derivable predicate falls back to any verification-capable evidence.
+    /// </summary>
+    public static CompletionEligibility EvaluateEligibility(
+        IReadOnlyList<ToolExecutor.PlanEntry> plan,
+        string? taskId,
+        IReadOnlyList<EvidenceLedgerEntry> currentLedgerEvidence)
+    {
+        var steps = TaskStepBuilder.Build(plan, taskId);
+        bool allComplete = steps.All(s => !s.IsOpen);
+
+        var evidence = currentLedgerEvidence.Select(e => e.Evidence).ToList();
+        var unsatisfied = new List<string>();
+
+        foreach (var step in steps.Where(s => s.ExpectedActionKind == StepActionKind.Verification))
+        {
+            var criteria = StepClassifier.ClassifyCriteria(step.Title);
+            bool satisfied = criteria.Count > 0
+                ? evidence.Any(ev => criteria.Any(c => c.Satisfies(ev)))
+                : evidence.Any(ev => ev.IsVerificationCapable);
+            if (!satisfied) unsatisfied.Add(step.Title);
+        }
+
+        bool noFailures = !currentLedgerEvidence.Any(e => e.IsUnresolvedFailure);
+        return new CompletionEligibility(allComplete, unsatisfied.Count == 0, noFailures, unsatisfied);
     }
 
     /// <summary>
@@ -54,111 +131,10 @@ public static class AgentSupervisor
         => steps.FirstOrDefault(s => s.IsOpen)?.StepId;
 
     /// <summary>
-    /// Legacy projection: the first open plan item's text. Kept for callers that still work
-    /// on raw plan entries; new code goes through TaskStep records.
-    /// </summary>
-    public static string? SelectNextStepText(IReadOnlyList<ToolExecutor.PlanEntry> plan)
-        => plan.FirstOrDefault(e => !e.Done)?.Text;
-
-    /// <summary>
-    /// LEGACY plan-checklist overload — kept only for pre-snapshot callers, NOT part of the
-    /// live decision path. The snapshot overload below is authoritative and the only one the
-    /// runtime uses; this one cannot see the state delta, typed evidence, or the actual
-    /// current step, so it silently reintroduces the old checklist-only semantics if used.
-    /// Callers migrate to <see cref="DecideAfterTurn(TaskExecutionSnapshot,int,int)"/>.
-    /// </summary>
-    [Obsolete("Use DecideAfterTurn(TaskExecutionSnapshot, ...) — the snapshot path is " +
-        "authoritative and the only one the live loop uses. This plan-checklist overload " +
-        "will be removed; it ignores StateDelta/Evidence/CurrentStep.")]
-    public static SupervisorDecision DecideAfterTurn(
-        bool claimAccepted,
-        GenerationOutcome outcome,
-        IReadOnlyList<ToolExecutor.PlanEntry> plan,
-        int pendingQueueItems,
-        int completionRejections,
-        int maxCompletionRejections,
-        int consecutiveStalledTurns,
-        int maxStalledTurns)
-    {
-        int openCount = plan.Count(e => !e.Done);
-        int total = plan.Count;
-
-        // A harness-accepted completion claim seals the task — the ONLY path to CompleteTask.
-        if (claimAccepted)
-        {
-            return new SupervisorDecision(ExecutionDecision.CompleteTask, ContinuationReason.CompletionAccepted);
-        }
-
-        // Hard interrupts: the user cancelled, or the generation failed.
-        if (outcome == GenerationOutcome.Cancelled)
-        {
-            return new SupervisorDecision(ExecutionDecision.AwaitUser, ContinuationReason.UserCancelled);
-        }
-        if (outcome == GenerationOutcome.Error)
-        {
-            return new SupervisorDecision(ExecutionDecision.FailTask, ContinuationReason.Error);
-        }
-
-        // Autonomous-mode protocol failure: the model produced text but NO action (no tool
-        // call, no completion claim, no replan). This is the dominant failure from the live
-        // export — the model understood the request but answered with a greeting/permission
-        // ask instead of entering the tool protocol. Repair the protocol with a compact
-        // action-required instruction rather than accepting the text as a completed turn.
-        if (outcome == GenerationOutcome.NoActionProduced && openCount > 0)
-        {
-            return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced,
-                SelectNextStepText(plan));
-        }
-
-        // A model that keeps claiming completion while work stays open is the "same action
-        // without progress" failure — halt before cycling forever.
-        if (completionRejections >= maxCompletionRejections)
-        {
-            return new SupervisorDecision(ExecutionDecision.Pause, ContinuationReason.VerificationFailed,
-                SelectNextStepText(plan));
-        }
-
-        // Repeated tool turns with no plan progress = silent failure; reassess the approach.
-        if (consecutiveStalledTurns >= maxStalledTurns && openCount > 0)
-        {
-            return new SupervisorDecision(ExecutionDecision.Replan, ContinuationReason.StagnationDetected,
-                SelectNextStepText(plan));
-        }
-
-        string? nextStep = SelectNextStepText(plan);
-
-        if (openCount > 0)
-        {
-            var reason = outcome switch
-            {
-                GenerationOutcome.OutputBudgetExhausted or GenerationOutcome.GenerationCutShort => ContinuationReason.GenerationTruncated,
-                GenerationOutcome.ModelEndedEarly => ContinuationReason.ModelEndedEarly,
-                GenerationOutcome.ContextExhausted => ContinuationReason.ContextCompacted,
-                GenerationOutcome.DegenerateLoop => ContinuationReason.ModelEndedEarly,
-                _ => ContinuationReason.StepIncomplete
-            };
-            return new SupervisorDecision(ExecutionDecision.ContinueStep, reason, nextStep);
-        }
-
-        if (pendingQueueItems > 0)
-        {
-            return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.StepIncomplete, nextStep);
-        }
-
-        if (total > 0)
-        {
-            // All items are checked off but the model didn't seal completion — direct it to.
-            return new SupervisorDecision(ExecutionDecision.Verify, ContinuationReason.StepIncomplete, nextStep);
-        }
-
-        return new SupervisorDecision(ExecutionDecision.ContinueStep, ContinuationReason.StepIncomplete, nextStep);
-    }
-
-    /// <summary>
     /// P1.8: the snapshot-based decision. The <see cref="TaskExecutionSnapshot"/> is the ONLY
     /// input — the supervisor derives the plan, current step, queue, outcome and state delta
-    /// from it and decides directly. This is the authoritative decision path; the legacy
-    /// plan-checklist overload above is kept only for pre-snapshot callers.
+    /// from it and decides directly. This is the ONLY decision path; the legacy plan-
+    /// checklist overload was deleted — every caller goes through the snapshot.
     ///
     /// STATE DELTA IS THE PRIMARY PROGRESS SIGNAL (text ≠ progress):
     ///   - NoAction + no state delta        → protocol repair
@@ -249,18 +225,19 @@ public static class AgentSupervisor
             return new SupervisorDecision(ExecutionDecision.RepairProtocol, ContinuationReason.NoActionProduced, currentStep.StepId);
         }
 
-        // 8. A verification step is satisfied only by evidence matching its PREDICATE
-        //    (P1.10/P1.14): the kinds the step actually requires (BuildPassed for "run the
-        //    build", PreviewLoaded for "run a local preview", ...). Evidence of a kind the
-        //    step does not require — incl. CommandSucceeded ("echo hello ran") and weak
-        //    inspection (FileExists/FileChanged) — does NOT verify. "A tool ran" is not
-        //    "the thing was verified". When the step derives no specific predicate, any
+        // 8. A verification step is satisfied only by evidence MATCHING ITS PREDICATE
+        //    (P1.10/P1.14): the criteria the step actually requires (BuildPassed for "run the
+        //    build", PreviewLoaded for "run a local preview"). Evidence of a kind the step
+        //    does not require — incl. CommandSucceeded ("echo hello ran") and weak inspection
+        //    (FileExists/FileChanged) — does NOT verify. Criteria may also carry a subject
+        //    pattern, so kind matches against the wrong subject fail too. "Build a tool ran"
+        //    is not "the thing was verified". When the step derives no predicate, any
         //    verification-capable evidence qualifies (legacy fallback).
         if (openWork && currentStep?.ExpectedActionKind == StepActionKind.Verification)
         {
-            var expectedKinds = StepClassifier.ClassifyEvidenceKinds(currentStep.Title);
-            bool satisfied = expectedKinds.Count > 0
-                ? delta.EvidenceEntries.Any(e => expectedKinds.Contains(e.Kind))
+            var criteria = StepClassifier.ClassifyCriteria(currentStep.Title);
+            bool satisfied = criteria.Count > 0
+                ? delta.EvidenceEntries.Any(ev => criteria.Any(c => c.Satisfies(ev)))
                 : delta.HasVerificationEvidence();
             if (!satisfied)
             {

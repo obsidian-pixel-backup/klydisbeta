@@ -140,6 +140,25 @@ public static class StepClassifier
     }
 
     /// <summary>
+    /// The verification predicate as <see cref="VerificationCriterion"/> records (P1.14):
+    /// same kinds as <see cref="ClassifyEvidenceKinds"/>, each mapped to a criterion the
+    /// supervisor and the completion gate evaluate recorded evidence against. Criteria
+    /// support subject-scoped matching, so callers can tighten a kind to a specific file,
+    /// project or url.
+    /// </summary>
+    public static IReadOnlyList<VerificationCriterion> ClassifyCriteria(string? stepText)
+    {
+        var kinds = ClassifyEvidenceKinds(stepText);
+        if (kinds.Count == 0) return Array.Empty<VerificationCriterion>();
+        var criteria = new VerificationCriterion[kinds.Count];
+        for (int i = 0; i < kinds.Count; i++)
+        {
+            criteria[i] = new VerificationCriterion(kinds[i]);
+        }
+        return criteria;
+    }
+
+    /// <summary>
     /// Classifies a step's text into its execution contract. Deterministic and conservative:
     /// explicit markers select the kind and restrict the tool set; everything else stays
     /// existence-gated (AllowedTools = null) with Kind=None so the model keeps its full
