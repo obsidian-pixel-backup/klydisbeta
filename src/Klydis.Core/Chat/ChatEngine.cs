@@ -932,6 +932,7 @@ public class ChatEngine(
             CurrentTaskId = null;
             CurrentTaskObjective = null;
             toolExecutor.CurrentTaskId = null;
+            toolExecutor.CurrentRunId = null;
         }
         else if (_taskManager != null)
         {
@@ -966,6 +967,9 @@ public class ChatEngine(
                 if (_runtime != null)
                 {
                     await _runtime.EnsureRunAsync(task.TaskId);
+                    // P0: stamp the executor with the ACTIVE RUN id so durable tool-activity and
+                    // execution-event rows are (task, run)-attributable instead of RunId: null.
+                    toolExecutor.CurrentRunId = _runtime.GetActiveRunId(task.TaskId);
                 }
             }
             catch (Exception ex)
@@ -979,6 +983,7 @@ public class ChatEngine(
                 CurrentTaskId = null;
                 CurrentTaskObjective = null;
                 toolExecutor.CurrentTaskId = null;
+                toolExecutor.CurrentRunId = null;
                 taskLayerFailed = true;
             }
         }
@@ -1107,6 +1112,7 @@ public class ChatEngine(
             }
             toolExecutor.CurrentTaskUserMessage = null;
             toolExecutor.CurrentTaskId = null;
+            toolExecutor.CurrentRunId = null;
             IsGenerating = false;
         }
     }
