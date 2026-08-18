@@ -49,10 +49,30 @@ public class GoalBudget
     public int MaxStalledTurns { get; set; } = 6;
 
     /// <summary>
+    /// Hard safety ceiling for consecutive non-advancing (empty) turns. Unlike
+    /// <see cref="MaxConsecutiveEmptyTurns"/>, this applies EVEN in Infinite Mode —
+    /// "unlimited" means no soft completion target, never no safety ceiling.
+    /// Default 20.
+    /// </summary>
+    public int MaxHardConsecutiveEmptyTurns { get; set; } = 20;
+
+    /// <summary>
+    /// Hard safety ceiling for rejected completion claims. Applies even in Infinite Mode.
+    /// Default 5 (above the soft <see cref="MaxCompletionRejections"/> of 3).
+    /// </summary>
+    public int MaxHardCompletionRejections { get; set; } = 5;
+
+    /// <summary>
     /// Checks whether current execution state is within budget bounds.
     /// </summary>
     public bool IsWithinLimits(GoalExecutionState state)
     {
+        // P1.17: hard circuit breakers always apply. AllowInfinite only lifts the SOFT
+        // completion targets (turn/token/wall-time budgets) — it must never disable the
+        // breakers that stop pathological loops (endless empty turns, endless rejected
+        // completion claims).
+        if (state.ConsecutiveEmptyTurns >= MaxHardConsecutiveEmptyTurns) return false;
+        if (state.CompletionRejections >= MaxHardCompletionRejections) return false;
         if (AllowInfinite) return true;
 
         if (state.TurnCount >= MaxTurns) return false;
@@ -69,6 +89,10 @@ public class GoalBudget
     /// </summary>
     public string GetExhaustionReason(GoalExecutionState state)
     {
+        if (state.ConsecutiveEmptyTurns >= MaxHardConsecutiveEmptyTurns)
+            return $"Agent reached the hard ceiling of {MaxHardConsecutiveEmptyTurns} consecutive non-advancing turns. Execution halted to prevent infinite loop stall (this ceiling applies even in Infinite Mode).";
+        if (state.CompletionRejections >= MaxHardCompletionRejections)
+            return $"Task completion claim was rejected {MaxHardCompletionRejections} times by the deterministic verifier (hard ceiling, applies even in Infinite Mode). Execution halted because 'done' could not be verified.";
         if (state.ConsecutiveEmptyTurns >= MaxConsecutiveEmptyTurns)
             return $"Agent reached max consecutive non-advancing turns ({MaxConsecutiveEmptyTurns}). Execution paused to prevent infinite loop stall.";
         if (state.CompletionRejections >= MaxCompletionRejections)

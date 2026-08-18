@@ -150,9 +150,13 @@ public class GoalOrchestrator(
             int turnTokenCount = 0;
             int toolCallCountInTurn = 0;
             string? lastToolCalled = null;
+            bool innerTurnFailed = false;
 
-            // 3. Invoke ChatEngine inner loop
-            var enumerator = _chatEngine.StreamResponseAsync(turnPrompt, ct, skillContext).GetAsyncEnumerator(ct);
+            // 3. Invoke ChatEngine inner loop. P0: the goal loop must drive the engine's
+            // goal-mode path EXPLICITLY — previously isGoalMode was left null, so the
+            // interaction-mode classifier decided, which could silently run this autonomous
+            // loop in non-goal mode (different prompt contract, different completion gate).
+            var enumerator = _chatEngine.StreamResponseAsync(turnPrompt, ct, skillContext, isGoalMode: true).GetAsyncEnumerator(ct);
             try
             {
                 while (true)
@@ -173,6 +177,12 @@ public class GoalOrchestrator(
                     {
                         _logger?.LogError(turnException, "Error in GoalOrchestrator turn {Turn}", state.TurnCount);
                         yield return GoalStreamEvent.FromInnerEvent(new ChatStreamEvent(ChatStreamEventType.Error, turnException.Message));
+                        // P0: an inner-turn failure means runtime state is UNKNOWN — never
+                        // continue the outer loop and start another generation on top of it.
+                        // The previous code only broke the inner enumeration and then went
+                        // through post-turn accounting and the next outer turn, which could
+                        // keep executing tools after a persistence/dispatch failure.
+                        innerTurnFailed = true;
                         break;
                     }
 
@@ -261,6 +271,16 @@ public class GoalOrchestrator(
             finally
             {
                 await enumerator.DisposeAsync();
+            }
+
+            if (innerTurnFailed)
+            {
+                // Stop the goal loop immediately: the turn ended with an exception, so
+                // post-turn accounting (stagnation, budget, continuation) has no reliable
+                // basis and another turn must not start. The caller decides how to recover.
+                yield return GoalStreamEvent.FromInnerEvent(new ChatStreamEvent(ChatStreamEventType.Error,
+                    "Autonomous goal loop halted after an inner-turn failure (runtime state unknown)."));
+                break;
             }
 
             state.ElapsedTime = DateTime.UtcNow - state.StartTime;
@@ -390,6 +410,6 @@ public class GoalOrchestrator(
                $"2. If your requested goal is 100% complete AND every completion criterion is checked off, call tool 'task_complete' with argument {{\"summary\": \"<summary>\"}}.\n" +
                $"3. If further work or tool calls are required, proceed immediately with the next step using <tool_call>.\n" +
                $"4. Progress is tracked automatically by the harness from your plan checklist; do not report it yourself.\n" +
-               $"5. Do NOT give up or ask the user for confirmation — work autonomously until the goal is fully accomplished.";
+               $"5. Work autonomously toward the goal, but if the task is genuinely blocked — it requires user input, approval, an external event, or the plan cannot be satisfied — surface that state instead of fabricating completion or repeating failing steps.";
     }
 }

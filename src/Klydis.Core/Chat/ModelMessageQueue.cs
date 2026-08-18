@@ -117,6 +117,11 @@ public class ModelMessageQueue
                         _queue.Add(msg);
                     }
                 }
+                // NOTE: a Processing row surviving a restart is a stale lease (the claimer
+                // died mid-delivery). Reclaiming it requires a claim timestamp + lease
+                // duration so a fresh in-flight claim is not double-delivered — deferred to
+                // the lease-expiry work (schema migration); delivery-failure release already
+                // flows through MarkStatus Processing -> Queued.
                 if (persisted.Count > 0)
                 {
                     _logger?.LogInformation("Hydrated {Count} queued message(s) from durable store.", persisted.Count);
@@ -320,9 +325,13 @@ public class ModelMessageQueue
             {
                 // Idempotency guard: only valid forward transitions are allowed. A message
                 // already Incorporated (ACKed) can never be claimed or re-incorporated.
+                // Processing → Queued is the lease-expiry/retry path: a claim whose delivery
+                // failed is released back to the queue (AttemptCount already incremented, so
+                // redelivery is observable).
                 bool valid = status switch
                 {
                     QueuedMessageStatus.Processing => msg.Status == QueuedMessageStatus.Queued,
+                    QueuedMessageStatus.Queued => msg.Status == QueuedMessageStatus.Processing,
                     QueuedMessageStatus.Incorporated => msg.Status == QueuedMessageStatus.Processing || msg.Status == QueuedMessageStatus.Queued,
                     QueuedMessageStatus.Cancelled => msg.Status == QueuedMessageStatus.Queued || msg.Status == QueuedMessageStatus.Processing,
                     _ => false

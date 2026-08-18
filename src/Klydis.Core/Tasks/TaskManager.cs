@@ -258,8 +258,12 @@ public class TaskManager(
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to read plan for task {TaskId}.", taskId);
-            return null;
+            // P0: a storage failure must NOT look like "the task has no plan". null means
+            // KNOWN-EMPTY; an exception means UNAVAILABLE. The caller decides the fail-closed
+            // policy (e.g. refuse task tools / clear task state) instead of silently
+            // substituting an empty plan that recovery would later undo.
+            _logger?.LogError(ex, "Failed to read plan for task {TaskId}; plan state is UNAVAILABLE (not empty).", taskId);
+            throw;
         }
     }
 
@@ -289,36 +293,48 @@ public class TaskManager(
         lock (_hydrated)
         {
             if (_hydrated.Contains(sessionId)) return;
-            _hydrated.Add(sessionId);
         }
 
+        // P0: hydration is marked complete ONLY after the entire read/migration succeeded.
+        // The previous code added the session to _hydrated BEFORE the storage work, so a
+        // failed hydration permanently skipped all later hydration for the process — and the
+        // catch "continued without task scoping", i.e. task state silently became
+        // unavailable while the runtime kept executing. Now a failure rethrows: the caller
+        // (task resolution) fails closed, and the next turn retries hydration.
         try
         {
             var latest = await _store.GetLatestTaskAsync(sessionId);
             if (latest != null)
             {
                 _currentBySession[sessionId] = latest;
-                return;
             }
-
-            // Legacy migration: a session with a plan but no task yet. Carry the plan into a
-            // freshly created task so existing chats keep their checklists under the new
-            // task-scoped model without any user-visible migration.
-            var session = await _store.GetSessionAsync(sessionId);
-            if (session?.PlanJson != null)
+            else
             {
-                var legacy = AgentTask.Create(sessionId, session.Title ?? "Conversation task");
-                legacy = legacy with { PlanJson = session.PlanJson };
-                await SaveTaskAsync(legacy);
-                _currentBySession[sessionId] = legacy;
-                _logger?.LogInformation(
-                    "Migrated legacy session {SessionId} to task {TaskId} carrying its existing plan.",
-                    sessionId, legacy.TaskId);
+                // Legacy migration: a session with a plan but no task yet. Carry the plan into
+                // a freshly created task so existing chats keep their checklists under the new
+                // task-scoped model without any user-visible migration.
+                var session = await _store.GetSessionAsync(sessionId);
+                if (session?.PlanJson != null)
+                {
+                    var legacy = AgentTask.Create(sessionId, session.Title ?? "Conversation task");
+                    legacy = legacy with { PlanJson = session.PlanJson };
+                    await SaveTaskAsync(legacy);
+                    _currentBySession[sessionId] = legacy;
+                    _logger?.LogInformation(
+                        "Migrated legacy session {SessionId} to task {TaskId} carrying its existing plan.",
+                        sessionId, legacy.TaskId);
+                }
             }
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning(ex, "Failed to hydrate task state for session {SessionId}; continuing without task scoping.", sessionId);
+            _logger?.LogError(ex, "Failed to hydrate task state for session {SessionId}; task state is UNAVAILABLE.", sessionId);
+            throw;
+        }
+
+        lock (_hydrated)
+        {
+            _hydrated.Add(sessionId);
         }
     }
 

@@ -414,7 +414,12 @@ public class AgentRuntime(
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "Failed to persist typed steps for task {TaskId}.", taskId);
+            // P0: the runtime must not execute under newly derived step semantics while the
+            // durable typed-step mirror is stale or absent. Rethrow so the supervisor path
+            // fails the turn (dispatch fail-closed) instead of silently diverging from the
+            // durable record that recovery would read after a restart.
+            _logger?.LogError(ex, "Failed to persist typed steps for task {TaskId}; the step mirror was NOT durable.", taskId);
+            throw;
         }
     }
 

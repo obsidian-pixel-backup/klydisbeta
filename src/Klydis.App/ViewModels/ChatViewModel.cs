@@ -1679,14 +1679,30 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             _isProcessingQueue = true;
             IsGenerating = true;
+            // P0: claim the durable lease (Processing) but do NOT delete the item yet.
+            // Previously the item was removed BEFORE the turn ran, so a crash, model-load
+            // failure, or cancelled turn silently lost the queued message. The item is now
+            // ACKed (Incorporated → durable delete) only after the turn completes below;
+            // a crash mid-turn leaves it Processing in the durable store (lease-expiry
+            // reclaim on restart is tracked separately).
             _messageQueue?.MarkStatus(nextItem.Id, QueuedMessageStatus.Processing);
-            _messageQueue?.Remove(nextItem.Id);
             Action action = async () =>
             {
                 try
                 {
                     await Task.Delay(100);
                     await SendMessageForTextAsync(nextItem.Content);
+                    // Turn completed — the message was durably stored and processed (this
+                    // includes user-cancelled turns: the message was already delivered to the
+                    // transcript). ACK now.
+                    _messageQueue?.MarkStatus(nextItem.Id, QueuedMessageStatus.Incorporated);
+                }
+                catch (Exception ex)
+                {
+                    // Delivery failed before the turn completed — release the lease back to
+                    // Queued so the message remains retryable instead of being lost.
+                    System.Diagnostics.Debug.WriteLine($"Queued message delivery failed, releasing lease: {ex.Message}");
+                    _messageQueue?.MarkStatus(nextItem.Id, QueuedMessageStatus.Queued);
                 }
                 finally
                 {

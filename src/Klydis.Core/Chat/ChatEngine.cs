@@ -353,7 +353,9 @@ public class ChatEngine(
 
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public string SelectedPersonality { get; set; } = "Default";
-    public bool IsGoalMode { get; set; } = true;
+    // (IsGoalMode was removed: it defaulted to true and nothing ever drove it, so every
+    // message got the AUTONOMOUS GOAL EXECUTION MODE section — the active mode is decided
+    // per-turn by the explicit isGoalMode argument or the interaction-mode classifier.)
     public string CurrentSessionId { get; private set; } = Guid.NewGuid().ToString();
 
     private Klydis.Core.Protocol.ModelProfile? _currentModelProfile;
@@ -985,16 +987,14 @@ public class ChatEngine(
                     {
                         await _runtime.EndRunAsync(previousTaskId, Klydis.Core.Tasks.RunStatus.Suspended);
                     }
-                    try
-                    {
-                        string? newTaskPlan = await _taskManager.GetPlanAsync(task.TaskId);
-                        await messageStore.SaveSessionPlanAsync(generatingSessionId, newTaskPlan);
-                        toolExecutor.ResetSessionPlanState(generatingSessionId);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogDebug(ex, "Failed to swap plan state on task switch for session {SessionId}.", generatingSessionId);
-                    }
+                    // P0: a plan-read/write failure on task switch must propagate to the
+                    // fail-closed handler below — the OLD task's session plan must never stay
+                    // in place while the executor claims the NEW task (that would let task B
+                    // execute under task A's plan). Previously this was swallowed at Debug and
+                    // the turn continued with mismatched plan/task state.
+                    string? newTaskPlan = await _taskManager.GetPlanAsync(task.TaskId);
+                    await messageStore.SaveSessionPlanAsync(generatingSessionId, newTaskPlan);
+                    toolExecutor.ResetSessionPlanState(generatingSessionId);
                 }
                 CurrentTaskId = task.TaskId;
                 CurrentTaskObjective = task.Objective;
@@ -3130,6 +3130,10 @@ public class ChatEngine(
                 // truncation continuation when the directive asks for it), so it must be
                 // visible there too.
                 Klydis.Core.Tasks.DispatchDirective? dispatchDirective = null;
+                // P0: if the supervisor could not durably record/apply its decision, the loop
+                // must NOT continue executing tools on unverified runtime state. Flips the
+                // turn into a structured stop below (outside the try-with-catch).
+                bool supervisorDispatchFailed = false;
                 if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
                 {
                     try
@@ -3214,7 +3218,24 @@ public class ChatEngine(
                     }
                     catch (Exception ex)
                     {
-                        logger.LogDebug(ex, "Supervisor decision/dispatch failed.");
+                        // P0: dispatch is where the runtime records or applies authoritative
+                        // state transitions (decision ledger, task-state changes, completion
+                        // seal, run pause). If it failed we do not know whether the decision
+                        // was persisted — continuing the loop would execute the next tool on
+                        // state whose durability is unknown. Stop the turn; the task is left
+                        // for reconciliation rather than blindly continued.
+                        logger.LogError(ex, "Supervisor decision/dispatch failed; stopping the turn to avoid executing tools on unverified runtime state.");
+                        supervisorDispatchFailed = true;
+                    }
+
+                    // Stop the turn on supervisor dispatch failure BEFORE any further
+                    // generation/tool iteration: a structured, user-visible termination is
+                    // safer than continuing on an unknown state transition.
+                    if (supervisorDispatchFailed)
+                    {
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                            "⚠ The supervisor could not durably record its decision (runtime state unavailable). This turn stopped before any further tool execution — no tools ran after the failure. Retry after state reconciliation.");
+                        yield break;
                     }
 
                     // Execute the directive: inject repair/replan/verification instructions

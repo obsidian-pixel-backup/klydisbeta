@@ -848,18 +848,34 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         bool isIsolated = false,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        // P0: foreground/background cancellation isolation. The shared _activeGenerationCts
+        // is the FOREGROUND slot — the UI's Stop button cancels it and a new foreground
+        // generation replaces it. Isolated/background requests (title generation, context
+        // compression, summaries, benchmarks) must NEVER cancel or be registered as that
+        // slot: a title generation firing mid-turn could previously cancel the user's active
+        // generation — the observed alternating empty/cancelled pattern. They now get a
+        // private linked token that only their own caller token can cancel, and they wait on
+        // the model lock behind any in-flight foreground generation instead of stealing the
+        // context slot mid-turn.
         CancellationTokenSource linkedCts;
         lock (_generationCtsLock)
         {
-            try
+            if (isIsolated)
             {
-                _activeGenerationCts?.Cancel();
-                _activeGenerationCts?.Dispose();
+                linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             }
-            catch (ObjectDisposedException) { }
+            else
+            {
+                try
+                {
+                    _activeGenerationCts?.Cancel();
+                    _activeGenerationCts?.Dispose();
+                }
+                catch (ObjectDisposedException) { }
 
-            _activeGenerationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            linkedCts = _activeGenerationCts;
+                _activeGenerationCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                linkedCts = _activeGenerationCts;
+            }
         }
         CancellationToken generationToken = linkedCts.Token;
 

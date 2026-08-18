@@ -3227,7 +3227,13 @@ public class ToolExecutor(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to persist session plan for {SessionId}.", sessionId);
+            // P0: the tool result must NOT report success when the durable plan write failed.
+            // "Model believes plan changed; memory believes plan changed; database still holds
+            // the old plan" is a divergence recovery would silently undo. Rethrow — the
+            // executor converts this into a FAILED tool result, so the model sees the write
+            // did not commit and the durable state machine stays authoritative.
+            logger.LogError(ex, "Failed to persist session plan for {SessionId}; the plan change was NOT durable — the plan tool call is failed.", sessionId);
+            throw;
         }
 
         var formatted = GetSessionPlan(key);
