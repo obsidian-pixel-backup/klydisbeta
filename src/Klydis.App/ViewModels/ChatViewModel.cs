@@ -68,6 +68,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     // previous turn's FULL completion (finally included) as a lifecycle barrier before
     // starting — replacing the old 200 ms sleep, which was not a synchronization barrier.
     private Task? _generationTask;
+    // P0: serializes turn STARTS. Two racing ForceSend calls can both observe IsGenerating,
+    // both capture the same previous _generationTask, and both start replacement turns — the
+    // second would then begin without waiting for the first replacement. Every send entry
+    // (Send, ForceSend, queue advancement, session/import paths) funnels through
+    // SendMessageForTextAsync, so one gate serializes them all.
+    private readonly System.Threading.SemaphoreSlim _sendGate = new(1, 1);
     private CancellationTokenSource? _modelLoadCts;
     private string? _generatingSessionId;
     private long _modelLoadSequenceId = 0;
@@ -1000,11 +1006,22 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (string.IsNullOrWhiteSpace(userMessage) && (attachments == null || attachments.Count == 0))
             return;
 
-        // P0: capture the running turn task so ForceSendMessageAsync can await the FULL turn
-        // (finally included) before replacing it. Shared generation state changes hands only
-        // after the previous turn has fully unwound.
-        _generationTask = SendMessageForTextCoreAsync(userMessage, attachments);
-        await _generationTask;
+        // P0: one turn start at a time. The gate is held for the FULL turn (its finally
+        // included), so a queued send or a racing ForceSend cannot begin until the previous
+        // turn has completely unwound — the same barrier ForceSend awaits explicitly.
+        await _sendGate.WaitAsync();
+        try
+        {
+            // P0: capture the running turn task so ForceSendMessageAsync can await the FULL
+            // turn (finally included) before replacing it. Shared generation state changes
+            // hands only after the previous turn has fully unwound.
+            _generationTask = SendMessageForTextCoreAsync(userMessage, attachments);
+            await _generationTask;
+        }
+        finally
+        {
+            _sendGate.Release();
+        }
     }
 
     private async Task SendMessageForTextCoreAsync(string userMessage, List<AttachmentItemViewModel>? attachments = null)
@@ -1117,11 +1134,21 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         void OnUi(Action action)
         {
+            // Fast-path check before scheduling. The AUTHORITATIVE check is re-run inside the
+            // dispatcher callback: the user can switch sessions between scheduling and
+            // execution, and a stale callback must never mutate the replacement session's
+            // transcript, typing indicator, or bubbles.
             if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
                 if (System.Windows.Application.Current?.Dispatcher != null)
                 {
-                    System.Windows.Application.Current.Dispatcher.InvokeAsync(action, System.Windows.Threading.DispatcherPriority.Normal);
+                    System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        if (SelectedSession?.Id == localGeneratingSessionId)
+                        {
+                            action();
+                        }
+                    }, System.Windows.Threading.DispatcherPriority.Normal);
                 }
                 else
                 {

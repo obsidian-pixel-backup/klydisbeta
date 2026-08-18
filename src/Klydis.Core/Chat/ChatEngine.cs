@@ -262,6 +262,11 @@ public class ChatEngine(
     private long _cachedHistoryTokens = -1;
     private int _cachedHistoryCount = -1;
     private readonly List<(string ToolName, string ArgsHash, string PriorResult)> _recentTools = new();
+    // P0 turn isolation: serializes the COMPLETE StreamResponseAsync lifecycle. See the
+    // gate in StreamResponseAsync — without it, concurrent callers (UI, GoalOrchestrator,
+    // queue processing) interleave on the shared CurrentTaskId / toolExecutor.Current* /
+    // inference-engine state.
+    private readonly System.Threading.SemaphoreSlim _turnGate = new(1, 1);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _pendingConsolidations = new();
     private int _consecutiveBlockedToolCalls = 0;
 
@@ -695,7 +700,8 @@ public class ChatEngine(
                // They are persisted as ChatRole.Tool rows (legacy path) and must never re-enter
                // history as ordinary tool results on a later load.
                content.StartsWith("[SYSTEM — ACTION REJECTED BY ACTION GATE]", StringComparison.Ordinal) ||
-               content.StartsWith("[SYSTEM — COMPLETION CLAIM REJECTED BY DETERMINISTIC VERIFIER]", StringComparison.Ordinal);
+               content.StartsWith("[SYSTEM — COMPLETION CLAIM REJECTED BY DETERMINISTIC VERIFIER]", StringComparison.Ordinal) ||
+               content.StartsWith("[SYSTEM — ACTION LEDGER UNAVAILABLE]", StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -874,8 +880,37 @@ public class ChatEngine(
         string? skillContext = null,
         bool? isGoalMode = null)
     {
-        IsGenerating = true;
-        _recentTools.Clear();
+        await _turnGate.WaitAsync(ct);
+        try
+        {
+            await foreach (var evt in StreamResponseCoreAsync(userMessage, ct, skillContext, isGoalMode))
+            {
+                yield return evt;
+            }
+        }
+        finally
+        {
+            _turnGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The gated turn body — the full setup/generation/tool/cleanup lifecycle. Exceptions
+    /// during setup (task resolution, plan seeding, message persistence) unwind through the
+    /// finally below, so the shared turn state is always cleared and IsGenerating is never
+    /// left stuck true with an open run.
+    /// </summary>
+    private async IAsyncEnumerable<ChatStreamEvent> StreamResponseCoreAsync(
+        string userMessage,
+        [EnumeratorCancellation] CancellationToken ct,
+        string? skillContext = null,
+        bool? isGoalMode = null)
+    {
+        IAsyncEnumerator<ChatStreamEvent>? enumerator = null;
+        try
+        {
+            IsGenerating = true;
+            _recentTools.Clear();
 
         // ===== INTERACTION-MODE BOUNDARY =====
         // Decide BEFORE task resolution whether this message is ordinary conversation or
@@ -1036,9 +1071,7 @@ public class ChatEngine(
 
         await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
         
-        var enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, userMessage, ct, skillContext, activeGoalMode, mode, taskLayerFailed).GetAsyncEnumerator(ct);
-        try
-        {
+            enumerator = StreamResponseInternalAsync(generatingSessionId, activeHistory, userMessage, ct, skillContext, activeGoalMode, mode, taskLayerFailed).GetAsyncEnumerator(ct);
             while (true)
             {
                 ChatStreamEvent? currentEvent = null;
@@ -1074,7 +1107,10 @@ public class ChatEngine(
         }
         finally
         {
-            await enumerator.DisposeAsync();
+            if (enumerator != null)
+            {
+                await enumerator.DisposeAsync();
+            }
             if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
             {
                 // A Run is one CONTINUOUS execution attempt spanning many turns: it is closed
@@ -2467,6 +2503,7 @@ public class ChatEngine(
             if (toolCallRequests.Count > 0)
             {
                 bool forceTurnTermination = false;
+                bool replayLedgerUnavailable = false;
                 bool validationEscalated = false;
                 int completionRejectionsThisTurn = 0;
 
@@ -2503,13 +2540,16 @@ public class ChatEngine(
                 // memory reset.
                 if (!string.Equals(activeRunId, _runExecutedActionsRunId, StringComparison.Ordinal))
                 {
-                    _runExecutedActionsRunId = activeRunId;
                     _runExecutedActions.Clear();
                     if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
                     {
                         try
                         {
                             var durableKeys = await _runtime.GetExecutedReplayKeysAsync(CurrentTaskId);
+                            // Only a SUCCESSFUL hydration marks the run as seeded — a failed
+                            // hydration must be retried by the next turn, never treated as
+                            // "no replay keys exist".
+                            _runExecutedActionsRunId = activeRunId;
                             foreach (var k in durableKeys)
                             {
                                 _runExecutedActions.Add(k);
@@ -2522,9 +2562,28 @@ public class ChatEngine(
                         }
                         catch (Exception ex)
                         {
-                            logger.LogDebug(ex, "Failed to hydrate replay protection from the durable action ledger for task {TaskId}.", CurrentTaskId);
+                            // P0 FAIL-CLOSED: a replay-ledger read failure must never mean
+                            // "nothing executed" — that would let a side-effecting action run
+                            // a second time after a storage failure. Refuse all tool
+                            // execution this turn and surface a runtime notice; the run
+                            // stays open and the next user turn retries hydration.
+                            logger.LogError(ex, "Replay-ledger hydration FAILED for task {TaskId}; refusing tool execution this turn (fail-closed).", CurrentTaskId);
+                            replayLedgerUnavailable = true;
                         }
                     }
+                    else
+                    {
+                        _runExecutedActionsRunId = activeRunId;
+                    }
+                }
+
+                if (replayLedgerUnavailable)
+                {
+                    string notice = "[SYSTEM — ACTION LEDGER UNAVAILABLE] The durable action ledger could not be read. Tool execution is disabled for this turn because an earlier action may have executed and must not run twice. Try again in a new message.";
+                    var noticeObj = new ChatMessage(ChatRole.Tool, notice, "system");
+                    AddToSessionHistory(activeHistory, noticeObj, generatingSessionId);
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, notice);
+                    break;
                 }
 
                 foreach (var req in toolCallRequests)

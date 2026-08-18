@@ -451,17 +451,6 @@ public class ToolExecutor(
         {
             try { argsJson = System.Text.Json.JsonSerializer.Serialize(request.Arguments); } catch { /* best effort */ }
         }
-        string callKey = $"{request.Name}|{argsJson}";
-
-        // Refuse an identical-failed-call retry loop BEFORE it wastes another turn: once a
-        // call has failed 3+ consecutive times with the same arguments, block it outright.
-        if (CheckIdenticalRetry(sessionId, callKey, out string blockMessage))
-        {
-            TrackIdenticalCallOutcome(sessionId, callKey, succeeded: false);
-            return await FinishToolCallAsync(request, sessionId, argsJson,
-                new ToolResult(request.Name, false, string.Empty, blockMessage));
-        }
-
         var tools = await GetToolDefinitionsAsync();
         // P1: the gate compares tool names case-insensitively; the executor must resolve the
         // same way. A case-sensitive lookup let calls like READ_FILE pass the gate and then
@@ -484,6 +473,23 @@ public class ToolExecutor(
                            $"Available valid tools are: [{validToolNames}].\n" +
                            $"Guidance: Use 'run_command' for system commands, 'read_file'/'write_file' for file operations, or 'search_web'/'search_rag' for retrieval.";
             return new ToolResult(request.Name, false, string.Empty, guidance);
+        }
+
+        // P1: normalize the tool name ONCE, immediately after resolution. The gate validates
+        // case-insensitively (READ_FILE passes), so the identical-retry key, the dispatch
+        // switch, the activity/durable rows, and the tool result must all use ONE canonical
+        // name — otherwise a mixed-case call falls through the switch into custom-tool
+        // dispatch and fails as an unknown custom tool.
+        string canonicalName = toolDef.Name;
+        string callKey = $"{canonicalName}|{argsJson}";
+
+        // Refuse an identical-failed-call retry loop BEFORE it wastes another turn: once a
+        // call has failed 3+ consecutive times with the same arguments, block it outright.
+        if (CheckIdenticalRetry(sessionId, callKey, out string blockMessage))
+        {
+            TrackIdenticalCallOutcome(sessionId, callKey, succeeded: false);
+            return await FinishToolCallAsync(request, sessionId, argsJson,
+                new ToolResult(canonicalName, false, string.Empty, blockMessage), canonicalName);
         }
 
         bool isRisky = IsRiskyRequest(request);
@@ -538,7 +544,7 @@ public class ToolExecutor(
         ToolResult result;
         try
         {
-            result = request.Name switch
+            result = canonicalName switch
             {
                 "read_file" => await ReadFileAsync(request, toolCt),
                 "write_file" => await WriteFileAsync(request, sessionId, toolCt),
@@ -601,10 +607,13 @@ public class ToolExecutor(
             };
         }
 
-        return await FinishToolCallAsync(request, sessionId, argsJson, result);
+        // Canonicalize the result's tool name so every consumer (activity rows, durable
+        // store, execution events, and the model's next prompt) sees the registered name.
+        result = result with { ToolName = canonicalName };
+        return await FinishToolCallAsync(request, sessionId, argsJson, result, canonicalName);
     }
 
-    private async Task<ToolResult> FinishToolCallAsync(ToolCallRequest request, string sessionId, string argsJson, ToolResult result)
+    private async Task<ToolResult> FinishToolCallAsync(ToolCallRequest request, string sessionId, string argsJson, ToolResult result, string canonicalName)
     {
         // Hydrate first so the in-memory cache is the DB contents before this invocation is
         // appended — otherwise a tool call that lands before the UI's first read would be
@@ -623,12 +632,17 @@ public class ToolExecutor(
                 outputPreview = result.Output.Length > 6000 ? result.Output.Substring(0, 6000) : result.Output;
             }
             var activityList = _sessionToolActivity.GetOrAdd(sessionId ?? string.Empty, _ => new List<ToolActivityRecord>());
-            activityList.Add(new ToolActivityRecord(request.Name, argsJson, result.Success, outputPreview, DateTime.Now));
-            // Bound the per-session activity history so long autonomous runs cannot grow it
-            // without limit (the panel only renders the most recent commands anyway).
-            if (activityList.Count > 500)
+            // P1: the per-session activity list is mutated from tool-completion threads while
+            // the UI polls it every 2s — guard the mutation so a torn read can never surface.
+            lock (_toolActivityLock)
             {
-                activityList.RemoveRange(0, activityList.Count - 500);
+                activityList.Add(new ToolActivityRecord(canonicalName, argsJson, result.Success, outputPreview, DateTime.Now));
+                // Bound the per-session activity history so long autonomous runs cannot grow it
+                // without limit (the panel only renders the most recent commands anyway).
+                if (activityList.Count > 500)
+                {
+                    activityList.RemoveRange(0, activityList.Count - 500);
+                }
             }
         }
         catch { /* recording must never break tool execution */ }
@@ -642,7 +656,7 @@ public class ToolExecutor(
                 SessionId: sessionId ?? string.Empty,
                 TaskId: CurrentTaskId,
                 RunId: CurrentRunId,
-                ToolName: request.Name,
+                ToolName: canonicalName,
                 ArgsJson: argsJson,
                 Success: result.Success,
                 OutputPreview: outputPreview,
@@ -650,17 +664,17 @@ public class ToolExecutor(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to persist tool activity for {ToolName}.", request.Name);
+            logger.LogWarning(ex, "Failed to persist tool activity for {ToolName}.", canonicalName);
         }
 
         // Durable execution event for the tool lifecycle.
         try
         {
-            await EmitExecutionEventAsync(sessionId, result.Success ? "ToolCompleted" : "ToolFailed", CurrentTaskId, request.Name, null);
+            await EmitExecutionEventAsync(sessionId, result.Success ? "ToolCompleted" : "ToolFailed", CurrentTaskId, canonicalName, null);
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to emit tool event for {ToolName}.", request.Name);
+            logger.LogWarning(ex, "Failed to emit tool event for {ToolName}.", canonicalName);
         }
 
         result = ProcessToolOutputOffload(result);
@@ -840,7 +854,11 @@ public class ToolExecutor(
     private bool IsRiskyRequest(ToolCallRequest request)
     {
         // Only tools that spawn processes or persist executable scripts can be risky.
-        if (request.Name is not ("run_command" or "create_custom_tool" or "delete_custom_tool"))
+        // Compared case-insensitively: the gate normalizes names, so RUN_COMMAND must be
+        // treated exactly like run_command here or the approval policy silently diverges.
+        if (!request.Name.Equals("run_command", StringComparison.OrdinalIgnoreCase) &&
+            !request.Name.Equals("create_custom_tool", StringComparison.OrdinalIgnoreCase) &&
+            !request.Name.Equals("delete_custom_tool", StringComparison.OrdinalIgnoreCase))
             return false;
 
         var contentToCheck = "";
@@ -2737,6 +2755,9 @@ public class ToolExecutor(
     private sealed record PlanSnapshot(List<PlanTask>? Items, int Progress, string? OwnerUserMessage = null);
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<PlanTask>> _sessionPlans = new();
+    // P1: plan lists are mutated by tool executions and read by the UI (every 2s) and by
+    // prompt builds — one lock guards every mutation and snapshot read.
+    private readonly object _sessionPlanLock = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _sessionPlanProgress = new();
     // Which user message the plan belongs to (its text, matching ChatEngine's convention for
     // identifying the current user message). The plan is scoped to the TASK in that message:
@@ -2790,12 +2811,16 @@ public class ToolExecutor(
         string key = sessionId ?? string.Empty;
         EnsureSessionPlanLoaded(key);
         var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
-        plan.Clear();
-        foreach (var item in items)
+        // P1: guard the mutation — the UI and prompt builds read this list concurrently.
+        lock (_sessionPlanLock)
         {
-            if (!string.IsNullOrWhiteSpace(item))
+            plan.Clear();
+            foreach (var item in items)
             {
-                plan.Add(new PlanTask(item.Trim(), false));
+                if (!string.IsNullOrWhiteSpace(item))
+                {
+                    plan.Add(new PlanTask(item.Trim(), false));
+                }
             }
         }
         _sessionPlanOwner[key] = CurrentTaskUserMessage ?? string.Empty;
@@ -2839,7 +2864,10 @@ public class ToolExecutor(
                 var snapshot = System.Text.Json.JsonSerializer.Deserialize<PlanSnapshot>(record.PlanJson);
                 if (snapshot != null && snapshot.Items != null)
                 {
-                    _sessionPlans[sessionId] = snapshot.Items;
+                    lock (_sessionPlanLock)
+                    {
+                        _sessionPlans[sessionId] = snapshot.Items;
+                    }
                     if (snapshot.Progress >= 0)
                     {
                         _sessionPlanProgress[sessionId] = Math.Clamp(snapshot.Progress, 0, 100);
@@ -2893,7 +2921,10 @@ public class ToolExecutor(
         {
             return Array.Empty<PlanEntry>();
         }
-        return plan.Select(t => new PlanEntry(t.Text, t.Done)).ToList();
+        lock (_sessionPlanLock)
+        {
+            return plan.Select(t => new PlanEntry(t.Text, t.Done)).ToList();
+        }
     }
 
     /// <summary>
@@ -2911,12 +2942,15 @@ public class ToolExecutor(
 
         var paths = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in list)
+        lock (_toolActivityLock)
         {
-            if (r.ToolName is not ("write_file" or "str_replace" or "edit_file")) continue;
-            string p = ExtractPathArg(r.ArgsJson);
-            if (string.IsNullOrEmpty(p) || !seen.Add(p)) continue;
-            paths.Add(p);
+            foreach (var r in list)
+            {
+                if (r.ToolName is not ("write_file" or "str_replace" or "edit_file")) continue;
+                string p = ExtractPathArg(r.ArgsJson);
+                if (string.IsNullOrEmpty(p) || !seen.Add(p)) continue;
+                paths.Add(p);
+            }
         }
         return paths;
     }
@@ -2951,9 +2985,12 @@ public class ToolExecutor(
         }
 
         var lines = new List<string>(plan.Count);
-        for (int i = 0; i < plan.Count; i++)
+        lock (_sessionPlanLock)
         {
-            lines.Add($"{i + 1}. {(plan[i].Done ? "[x]" : "[ ]")} {plan[i].Text}");
+            for (int i = 0; i < plan.Count; i++)
+            {
+                lines.Add($"{i + 1}. {(plan[i].Done ? "[x]" : "[ ]")} {plan[i].Text}");
+            }
         }
         return lines;
     }
@@ -2974,6 +3011,9 @@ public class ToolExecutor(
     // from the durable tool_activity table on first access and appended on every call, so it
     // is a CACHE of SQLite, not the source of truth — activity survives restarts/switches.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ToolActivityRecord>> _sessionToolActivity = new();
+    // P1: the per-session activity list is appended from tool-completion threads while the
+    // UI polls it every 2s — one lock guards every mutation and every snapshot read.
+    private readonly object _toolActivityLock = new();
     // Sessions already hydrated from the durable tool_activity table (the getters below are
     // called by the UI every 2s, so the lazy restore must hit the DB at most once per session).
     private readonly HashSet<string> _toolActivityLoadAttempted = new();
@@ -2996,9 +3036,12 @@ public class ToolExecutor(
             var rows = messageStore.GetToolActivityBySessionAsync(sessionId).GetAwaiter().GetResult();
             if (rows.Count == 0) return;
             var list = _sessionToolActivity.GetOrAdd(sessionId, _ => new List<ToolActivityRecord>());
-            foreach (var r in rows)
+            lock (_toolActivityLock)
             {
-                list.Add(new ToolActivityRecord(r.ToolName, r.ArgsJson, r.Success, r.OutputPreview, r.TimestampUtc.ToLocalTime()));
+                foreach (var r in rows)
+                {
+                    list.Add(new ToolActivityRecord(r.ToolName, r.ArgsJson, r.Success, r.OutputPreview, r.TimestampUtc.ToLocalTime()));
+                }
             }
         }
         catch (Exception ex)
@@ -3018,7 +3061,12 @@ public class ToolExecutor(
         {
             return Array.Empty<ToolActivityRecord>();
         }
-        return list;
+        // P1: never hand out the live list (a tool completing concurrently would mutate it
+        // while the UI renders) — return an immutable snapshot.
+        lock (_toolActivityLock)
+        {
+            return list.ToArray();
+        }
     }
 
     /// <summary>
@@ -3104,7 +3152,13 @@ public class ToolExecutor(
         string action = (GetStringArg(request.Arguments, "action") ?? "show").Trim().ToLowerInvariant();
         var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
 
+        // P1: the plan list is read concurrently by the UI and prompt builds; mutations and
+        // the persistence snapshot are taken under the lock. The SQLite await happens AFTER
+        // the lock is released.
         bool planMutated = false;
+        PlanSnapshot? snapshot = null;
+        lock (_sessionPlanLock)
+        {
         switch (action)
         {
             case "create":
@@ -3153,6 +3207,9 @@ public class ToolExecutor(
             }
         }
 
+        snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key), GetSessionPlanOwner(key));
+        }
+
         // Checkpoint: persist the plan + progress + owner so the todo list (and its task
         // boundary) survives restarts and model switches (long-horizon tasks keep their
         // step-level plan across sessions). Mirrored to the current task's record so the
@@ -3160,8 +3217,7 @@ public class ToolExecutor(
         // reopening a task restores its plan.
         try
         {
-            var snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key), GetSessionPlanOwner(key));
-            string json = System.Text.Json.JsonSerializer.Serialize(snapshot);
+            string json = System.Text.Json.JsonSerializer.Serialize(snapshot!);
             await messageStore.SaveSessionPlanAsync(key, json);
             if (TaskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
             {

@@ -373,27 +373,24 @@ public class AgentRuntime(
     {
         var keys = new HashSet<string>(StringComparer.Ordinal);
         if (string.IsNullOrEmpty(taskId)) return keys;
-        try
+        // P0 fail-closed: a hydration failure must PROPAGATE, never silently return an empty
+        // set. "We failed to read the ledger" must not mean "nothing executed" — the caller
+        // treats a thrown hydration as reason to refuse tool execution for the turn (see
+        // ChatEngine's replay-seeding block).
+        var runs = await _store.GetRunsAsync(taskId);
+        var nonCompletedRuns = runs
+            .Where(r => r.Status != RunStatus.Completed)
+            .Select(r => r.RunId)
+            .ToHashSet(StringComparer.Ordinal);
+        var actions = await _store.GetTaskActionsAsync(taskId, null);
+        foreach (var a in actions)
         {
-            var runs = await _store.GetRunsAsync(taskId);
-            var nonCompletedRuns = runs
-                .Where(r => r.Status != RunStatus.Completed)
-                .Select(r => r.RunId)
-                .ToHashSet(StringComparer.Ordinal);
-            var actions = await _store.GetTaskActionsAsync(taskId, null);
-            foreach (var a in actions)
+            if (a.RunId != null && !nonCompletedRuns.Contains(a.RunId)) continue;
+            if (a.ReplayKey != null &&
+                (a.Status == ActionExecutionStatus.Succeeded || a.Status == ActionExecutionStatus.Unknown))
             {
-                if (a.RunId != null && !nonCompletedRuns.Contains(a.RunId)) continue;
-                if (a.ReplayKey != null &&
-                    (a.Status == ActionExecutionStatus.Succeeded || a.Status == ActionExecutionStatus.Unknown))
-                {
-                    keys.Add(a.ReplayKey);
-                }
+                keys.Add(a.ReplayKey);
             }
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogDebug(ex, "Failed to hydrate durable replay protection for task {TaskId}.", taskId);
         }
         return keys;
     }
