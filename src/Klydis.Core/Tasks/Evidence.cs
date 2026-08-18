@@ -39,7 +39,10 @@ public enum EvidenceKind
 /// <summary>
 /// A single piece of typed verification evidence. The subject identifies WHAT was verified
 /// (a project file, a URL, a command) so evidence cannot accidentally satisfy the wrong
-/// step, and the step id ties it to the step that produced it (P1.10).
+/// step, and the step id ties it to the step that produced it (P1.10). The exit code (when
+/// the producing tool captured one) lets predicates demand ExitCode == 0, not merely a
+/// "command ran" kind — the runtime derives BuildPassed from ExitCode == 0 + expected
+/// subject, never from the model's interpretation of output (review §6–§7).
 /// </summary>
 public sealed record Evidence(
     EvidenceKind Kind,
@@ -47,7 +50,10 @@ public sealed record Evidence(
     DateTime TimestampUtc,
     string? Subject = null,
     string? ToolName = null,
-    string? StepId = null)
+    string? StepId = null,
+    int? ExitCode = null,
+    string? Payload = null,
+    int WorkspaceVersion = 0)
 {
     /// <summary>
     /// True when this evidence kind actually VERIFIES something (a build/test/preview result,

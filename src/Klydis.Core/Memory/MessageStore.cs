@@ -369,6 +369,96 @@ public class MessageStore
             CREATE INDEX IF NOT EXISTS idx_execution_events_session ON execution_events(session_id, timestamp_utc);
             CREATE INDEX IF NOT EXISTS idx_execution_events_task ON execution_events(task_id, timestamp_utc);
 
+            -- Durable action ledger (review §9): every executed tool action with its replay
+            -- identity, side-effect level and lifecycle status. The recovery-critical state
+            -- is UNKNOWN — a process death mid-command leaves the action Unknown, never
+            -- silently Succeeded/Failed, so recovery inspects instead of re-running blindly.
+            CREATE TABLE IF NOT EXISTS task_actions (
+                action_id TEXT PRIMARY KEY,
+                replay_key TEXT,
+                task_id TEXT,
+                run_id TEXT,
+                step_id TEXT,
+                turn_id TEXT,
+                tool_name TEXT NOT NULL,
+                arguments_json TEXT,
+                side_effect_level TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                result_preview TEXT,
+                error TEXT,
+                model_id TEXT,
+                protocol_key TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_actions_model ON task_actions(model_id, protocol_key, started_at);
+            CREATE INDEX IF NOT EXISTS idx_task_actions_run ON task_actions(run_id, started_at);
+            CREATE INDEX IF NOT EXISTS idx_task_actions_task ON task_actions(task_id, started_at);
+            CREATE INDEX IF NOT EXISTS idx_task_actions_replay ON task_actions(replay_key);
+
+            -- Durable execution evidence (review §2): verification facts (BuildPassed /
+            -- PreviewLoaded / TestPassed) persist with the workspace version they were
+            -- produced against, so a recovered run still knows the build was verified and a
+            -- later file change invalidates them durably (invalidated_at), never by losing
+            -- the row.
+            CREATE TABLE IF NOT EXISTS execution_evidence (
+                evidence_id TEXT PRIMARY KEY,
+                task_id TEXT,
+                run_id TEXT,
+                step_id TEXT,
+                action_id TEXT,
+                workspace_version INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                subject TEXT,
+                tool_name TEXT,
+                exit_code INTEGER,
+                payload_json TEXT,
+                timestamp_utc TEXT NOT NULL,
+                invalidated_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_evidence_run ON execution_evidence(run_id, workspace_version);
+            CREATE INDEX IF NOT EXISTS idx_execution_evidence_task ON execution_evidence(task_id, timestamp_utc);
+
+            -- Durable supervisor-decision ledger (review §15): the audit trail of what the
+            -- supervisor decided, why, and for which step — survives restarts so a
+            -- recovered loop is diagnosable.
+            CREATE TABLE IF NOT EXISTS execution_decisions (
+                decision_id TEXT PRIMARY KEY,
+                task_id TEXT,
+                run_id TEXT,
+                step_id TEXT,
+                decision TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                timestamp_utc TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_decisions_run ON execution_decisions(run_id, timestamp_utc);
+            CREATE INDEX IF NOT EXISTS idx_execution_decisions_task ON execution_decisions(task_id, timestamp_utc);
+
+            -- Durable typed TaskStep metadata (review §3): the derived execution semantics of
+            -- the plan checklist (kind, allowed tools, verification criteria, status,
+            -- attempt_count) persisted per task so step semantics survive restarts instead of
+            -- being re-derived from English text. The plan checklist remains the durable
+            -- source of truth; this is its typed mirror, rewritten whenever the plan changes.
+            CREATE TABLE IF NOT EXISTS task_steps (
+                step_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                order_index INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expected_action_kind TEXT NOT NULL,
+                allowed_tools_json TEXT,
+                required_skills_json TEXT,
+                expected_artifacts_json TEXT,
+                verification_criteria_json TEXT,
+                completion_condition TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_action_id TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id, order_index);
+
             -- FTS5 Virtual Table for full-text search
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
 
@@ -446,6 +536,42 @@ public class MessageStore
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
         {
             // Column already exists, ignore
+        }
+
+        // Per-model execution telemetry (agent-intelligence stage): actions are stamped with
+        // the model + protocol that produced them so the capability analyzer can aggregate
+        // per-(model, protocol) success/repair/verification rates from the durable ledger.
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE task_actions ADD COLUMN model_id TEXT;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
+
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE task_actions ADD COLUMN protocol_key TEXT;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
+
+        try
+        {
+            await using var indexCmd = connection.CreateCommand();
+            indexCmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_task_actions_model ON task_actions(model_id, protocol_key, started_at);";
+            await indexCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Index already exists, ignore
         }
 
         // GetMessagesAsync / GetMessageCountAsync filter by session_id and order by id: without
@@ -723,6 +849,468 @@ public class MessageStore
                 TurnCount: reader.GetInt32(5)));
         }
         return result;
+    }
+
+    /// <summary>Every run across ALL tasks, oldest first — cross-task capability telemetry
+    /// attributes run completion to the model that drove the run.</summary>
+    public async Task<List<TaskRun>> GetAllRunsAsync()
+    {
+        var result = new List<TaskRun>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT run_id, task_id, status, started_at, ended_at, turn_count FROM runs ORDER BY started_at ASC;";
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new TaskRun(
+                RunId: reader.GetString(0),
+                TaskId: reader.GetString(1),
+                Status: Enum.TryParse<RunStatus>(reader.GetString(2), out var status) ? status : RunStatus.Running,
+                StartedAtUtc: DateTime.Parse(reader.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                EndedAtUtc: reader.IsDBNull(4) ? null : DateTime.Parse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                TurnCount: reader.GetInt32(5)));
+        }
+        return result;
+    }
+
+    // ===== Durable action / evidence / decision ledger (review §2, §9, §15) ================
+
+    /// <summary>Persists one executed action (INSERT OR REPLACE by action id — a lifecycle
+    /// update rewrites the same row).</summary>
+    public async Task SaveTaskActionAsync(TaskActionRecord action)
+    {
+        if (action == null) throw new ArgumentNullException(nameof(action));
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO task_actions
+                (action_id, replay_key, task_id, run_id, step_id, turn_id, tool_name,
+                 arguments_json, side_effect_level, status, started_at, completed_at,
+                 result_preview, error, model_id, protocol_key)
+            VALUES
+                (@actionId, @replayKey, @taskId, @runId, @stepId, @turnId, @toolName,
+                 @argumentsJson, @sideEffectLevel, @status, @startedAt, @completedAt,
+                 @resultPreview, @error, @modelId, @protocolKey);";
+        command.Parameters.AddWithValue("@actionId", action.ActionId);
+        command.Parameters.AddWithValue("@replayKey", (object?)action.ReplayKey ?? DBNull.Value);
+        command.Parameters.AddWithValue("@taskId", (object?)action.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@runId", (object?)action.RunId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@stepId", (object?)action.StepId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@turnId", (object?)action.TurnId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@toolName", action.ToolName ?? "?");
+        command.Parameters.AddWithValue("@argumentsJson", (object?)action.ArgumentsJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("@sideEffectLevel", action.SideEffectLevel.ToString());
+        command.Parameters.AddWithValue("@status", action.Status.ToString());
+        command.Parameters.AddWithValue("@startedAt", action.StartedAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@completedAt", (object?)(action.CompletedAtUtc?.ToString("o")) ?? DBNull.Value);
+        command.Parameters.AddWithValue("@resultPreview", (object?)action.ResultPreview ?? DBNull.Value);
+        command.Parameters.AddWithValue("@error", (object?)action.Error ?? DBNull.Value);
+        command.Parameters.AddWithValue("@modelId", (object?)action.ModelId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@protocolKey", (object?)action.ProtocolKey ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>All recorded actions for a run (or a task when runId is null), oldest first.</summary>
+    public async Task<List<TaskActionRecord>> GetTaskActionsAsync(string? taskId, string? runId)
+    {
+        var result = new List<TaskActionRecord>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        if (!string.IsNullOrEmpty(runId))
+        {
+            command.CommandText = "SELECT * FROM task_actions WHERE run_id = @runId ORDER BY started_at ASC;";
+            command.Parameters.AddWithValue("@runId", runId);
+        }
+        else
+        {
+            command.CommandText = "SELECT * FROM task_actions WHERE task_id = @taskId ORDER BY started_at ASC;";
+            command.Parameters.AddWithValue("@taskId", (object?)taskId ?? DBNull.Value);
+        }
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new TaskActionRecord(
+                ActionId: reader.GetString(0),
+                ReplayKey: reader.IsDBNull(1) ? null : reader.GetString(1),
+                TaskId: reader.IsDBNull(2) ? null : reader.GetString(2),
+                RunId: reader.IsDBNull(3) ? null : reader.GetString(3),
+                StepId: reader.IsDBNull(4) ? null : reader.GetString(4),
+                TurnId: reader.IsDBNull(5) ? null : reader.GetString(5),
+                ToolName: reader.GetString(6),
+                ArgumentsJson: reader.IsDBNull(7) ? null : reader.GetString(7),
+                SideEffectLevel: Enum.TryParse<ToolSideEffectLevel>(reader.GetString(8), out var lvl) ? lvl : ToolSideEffectLevel.ExternalSideEffect,
+                Status: Enum.TryParse<ActionExecutionStatus>(reader.GetString(9), out var st) ? st : ActionExecutionStatus.Unknown,
+                StartedAtUtc: DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                CompletedAtUtc: reader.IsDBNull(11) ? null : DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                ResultPreview: reader.IsDBNull(12) ? null : reader.GetString(12),
+                Error: reader.IsDBNull(13) ? null : reader.GetString(13),
+                ModelId: reader.IsDBNull(14) ? null : reader.GetString(14),
+                ProtocolKey: reader.IsDBNull(15) ? null : reader.GetString(15)));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Every recorded action across ALL tasks, oldest first, for cross-task capability
+    /// analysis (agent-intelligence stage: per-(model, protocol) success/repair/verification
+    /// rates are aggregated from the durable ledger, not from process memory).
+    /// </summary>
+    public async Task<List<TaskActionRecord>> GetAllTaskActionsAsync()
+    {
+        var result = new List<TaskActionRecord>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM task_actions ORDER BY started_at ASC;";
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadTaskAction(reader));
+        }
+        return result;
+    }
+
+    /// <summary>Maps a task_actions row to a <see cref="TaskActionRecord"/>.</summary>
+    private static TaskActionRecord ReadTaskAction(System.Data.Common.DbDataReader reader)
+        => new(
+            ActionId: reader.GetString(0),
+            ReplayKey: reader.IsDBNull(1) ? null : reader.GetString(1),
+            TaskId: reader.IsDBNull(2) ? null : reader.GetString(2),
+            RunId: reader.IsDBNull(3) ? null : reader.GetString(3),
+            StepId: reader.IsDBNull(4) ? null : reader.GetString(4),
+            TurnId: reader.IsDBNull(5) ? null : reader.GetString(5),
+            ToolName: reader.GetString(6),
+            ArgumentsJson: reader.IsDBNull(7) ? null : reader.GetString(7),
+            SideEffectLevel: Enum.TryParse<ToolSideEffectLevel>(reader.GetString(8), out var lvl) ? lvl : ToolSideEffectLevel.ExternalSideEffect,
+            Status: Enum.TryParse<ActionExecutionStatus>(reader.GetString(9), out var st) ? st : ActionExecutionStatus.Unknown,
+            StartedAtUtc: DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            CompletedAtUtc: reader.IsDBNull(11) ? null : DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            ResultPreview: reader.IsDBNull(12) ? null : reader.GetString(12),
+            Error: reader.IsDBNull(13) ? null : reader.GetString(13),
+            ModelId: reader.IsDBNull(14) ? null : reader.GetString(14),
+            ProtocolKey: reader.IsDBNull(15) ? null : reader.GetString(15));
+
+    /// <summary>A single action record by its primary key (lifecycle completion reads it to
+    /// preserve the start row's identity fields).</summary>
+    public async Task<TaskActionRecord?> GetTaskActionAsync(string actionId)
+    {
+        if (string.IsNullOrEmpty(actionId)) return null;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM task_actions WHERE action_id = @actionId;";
+        command.Parameters.AddWithValue("@actionId", actionId);
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null;
+        return new TaskActionRecord(
+            ActionId: reader.GetString(0),
+            ReplayKey: reader.IsDBNull(1) ? null : reader.GetString(1),
+            TaskId: reader.IsDBNull(2) ? null : reader.GetString(2),
+            RunId: reader.IsDBNull(3) ? null : reader.GetString(3),
+            StepId: reader.IsDBNull(4) ? null : reader.GetString(4),
+            TurnId: reader.IsDBNull(5) ? null : reader.GetString(5),
+            ToolName: reader.GetString(6),
+            ArgumentsJson: reader.IsDBNull(7) ? null : reader.GetString(7),
+            SideEffectLevel: Enum.TryParse<ToolSideEffectLevel>(reader.GetString(8), out var lvl) ? lvl : ToolSideEffectLevel.ExternalSideEffect,
+            Status: Enum.TryParse<ActionExecutionStatus>(reader.GetString(9), out var st) ? st : ActionExecutionStatus.Unknown,
+            StartedAtUtc: DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            CompletedAtUtc: reader.IsDBNull(11) ? null : DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            ResultPreview: reader.IsDBNull(12) ? null : reader.GetString(12),
+            Error: reader.IsDBNull(13) ? null : reader.GetString(13),
+            ModelId: reader.IsDBNull(14) ? null : reader.GetString(14),
+            ProtocolKey: reader.IsDBNull(15) ? null : reader.GetString(15));
+    }
+
+    /// <summary>
+    /// Marks every action a run left InProgress as <see cref="ActionExecutionStatus.Unknown"/>
+    /// (review §10): a process death mid-execution means we do NOT know whether the action
+    /// completed, failed, or is still running — the durable record must say so, so recovery
+    /// inspects instead of blindly re-executing.
+    /// </summary>
+    public async Task MarkInProgressActionsUnknownAsync(string runId, DateTime when)
+    {
+        if (string.IsNullOrEmpty(runId)) return;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            UPDATE task_actions SET status = @status, completed_at = @when
+            WHERE run_id = @runId AND status = @inProgress;";
+        command.Parameters.AddWithValue("@status", ActionExecutionStatus.Unknown.ToString());
+        command.Parameters.AddWithValue("@when", when.ToString("o"));
+        command.Parameters.AddWithValue("@runId", runId);
+        command.Parameters.AddWithValue("@inProgress", ActionExecutionStatus.InProgress.ToString());
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Persists one evidence row (INSERT OR REPLACE by evidence id).</summary>
+    public async Task SaveExecutionEvidenceAsync(DurableEvidenceRecord evidence)
+    {
+        if (evidence == null) throw new ArgumentNullException(nameof(evidence));
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO execution_evidence
+                (evidence_id, task_id, run_id, step_id, action_id, workspace_version, kind,
+                 subject, tool_name, exit_code, payload_json, timestamp_utc, invalidated_at)
+            VALUES
+                (@evidenceId, @taskId, @runId, @stepId, @actionId, @workspaceVersion, @kind,
+                 @subject, @toolName, @exitCode, @payloadJson, @timestampUtc, @invalidatedAt);";
+        command.Parameters.AddWithValue("@evidenceId", evidence.EvidenceId);
+        command.Parameters.AddWithValue("@taskId", (object?)evidence.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@runId", (object?)evidence.RunId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@stepId", (object?)evidence.StepId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@actionId", (object?)evidence.ActionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@workspaceVersion", evidence.WorkspaceVersion);
+        command.Parameters.AddWithValue("@kind", evidence.Kind.ToString());
+        command.Parameters.AddWithValue("@subject", (object?)evidence.Subject ?? DBNull.Value);
+        command.Parameters.AddWithValue("@toolName", (object?)evidence.ToolName ?? DBNull.Value);
+        command.Parameters.AddWithValue("@exitCode", (object?)evidence.ExitCode ?? DBNull.Value);
+        command.Parameters.AddWithValue("@payloadJson", (object?)evidence.PayloadJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("@timestampUtc", evidence.TimestampUtc.ToString("o"));
+        command.Parameters.AddWithValue("@invalidatedAt", (object?)(evidence.InvalidatedAtUtc?.ToString("o")) ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>All evidence rows for a run (or a task when runId is null), oldest first.</summary>
+    public async Task<List<DurableEvidenceRecord>> GetExecutionEvidenceAsync(string? taskId, string? runId)
+    {
+        var result = new List<DurableEvidenceRecord>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        if (!string.IsNullOrEmpty(runId))
+        {
+            command.CommandText = "SELECT * FROM execution_evidence WHERE run_id = @runId ORDER BY timestamp_utc ASC;";
+            command.Parameters.AddWithValue("@runId", runId);
+        }
+        else
+        {
+            command.CommandText = "SELECT * FROM execution_evidence WHERE task_id = @taskId ORDER BY timestamp_utc ASC;";
+            command.Parameters.AddWithValue("@taskId", (object?)taskId ?? DBNull.Value);
+        }
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new DurableEvidenceRecord(
+                EvidenceId: reader.GetString(0),
+                TaskId: reader.IsDBNull(1) ? null : reader.GetString(1),
+                RunId: reader.IsDBNull(2) ? null : reader.GetString(2),
+                StepId: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ActionId: reader.IsDBNull(4) ? null : reader.GetString(4),
+                WorkspaceVersion: reader.GetInt32(5),
+                Kind: Enum.TryParse<EvidenceKind>(reader.GetString(6), out var kind) ? kind : EvidenceKind.Unspecified,
+                Subject: reader.IsDBNull(7) ? null : reader.GetString(7),
+                ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
+                ExitCode: reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                PayloadJson: reader.IsDBNull(10) ? null : reader.GetString(10),
+                TimestampUtc: DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                InvalidatedAtUtc: reader.IsDBNull(12) ? null : DateTime.Parse(reader.GetString(12), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Durably invalidates evidence: every CURRENT row for the TASK recorded at a workspace
+    /// version BELOW the given version is stamped invalidated (a file change happened after
+    /// it, so it can no longer verify the current files). Task-scoped — not run-scoped —
+    /// because a recovered run inherits the previous run's surviving evidence and its
+    /// workspace version: a file change in the new run must invalidate inherited evidence
+    /// too, or stale builds would verify forever.
+    /// </summary>
+    public async Task InvalidateExecutionEvidenceAsync(string taskId, int belowWorkspaceVersion, DateTime invalidatedAt)
+    {
+        if (string.IsNullOrEmpty(taskId)) return;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            UPDATE execution_evidence SET invalidated_at = @invalidatedAt
+            WHERE task_id = @taskId AND workspace_version < @belowVersion AND invalidated_at IS NULL;";
+        command.Parameters.AddWithValue("@invalidatedAt", invalidatedAt.ToString("o"));
+        command.Parameters.AddWithValue("@taskId", taskId);
+        command.Parameters.AddWithValue("@belowVersion", belowWorkspaceVersion);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// The task's CURRENT (non-invalidated) evidence rows across all runs — the durable
+    /// source a recovered run rehydrates from, so verification facts survive process death.
+    /// </summary>
+    public async Task<List<DurableEvidenceRecord>> GetCurrentExecutionEvidenceAsync(string taskId)
+    {
+        var result = new List<DurableEvidenceRecord>();
+        if (string.IsNullOrEmpty(taskId)) return result;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM execution_evidence WHERE task_id = @taskId AND invalidated_at IS NULL ORDER BY timestamp_utc ASC;";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(MapEvidenceRecord(reader));
+        }
+        return result;
+    }
+
+    private static DurableEvidenceRecord MapEvidenceRecord(SqliteDataReader reader)
+        => new(
+            EvidenceId: reader.GetString(0),
+            TaskId: reader.IsDBNull(1) ? null : reader.GetString(1),
+            RunId: reader.IsDBNull(2) ? null : reader.GetString(2),
+            StepId: reader.IsDBNull(3) ? null : reader.GetString(3),
+            ActionId: reader.IsDBNull(4) ? null : reader.GetString(4),
+            WorkspaceVersion: reader.GetInt32(5),
+            Kind: Enum.TryParse<EvidenceKind>(reader.GetString(6), out var kind) ? kind : EvidenceKind.Unspecified,
+            Subject: reader.IsDBNull(7) ? null : reader.GetString(7),
+            ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
+            ExitCode: reader.IsDBNull(9) ? null : reader.GetInt32(9),
+            PayloadJson: reader.IsDBNull(10) ? null : reader.GetString(10),
+            TimestampUtc: DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            InvalidatedAtUtc: reader.IsDBNull(12) ? null : DateTime.Parse(reader.GetString(12), null, System.Globalization.DateTimeStyles.RoundtripKind));
+
+    /// <summary>Persists one supervisor decision (INSERT OR REPLACE by decision id).</summary>
+    public async Task SaveExecutionDecisionAsync(ExecutionDecisionRecord decision)
+    {
+        if (decision == null) throw new ArgumentNullException(nameof(decision));
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO execution_decisions
+                (decision_id, task_id, run_id, step_id, decision, reason, timestamp_utc)
+            VALUES
+                (@decisionId, @taskId, @runId, @stepId, @decision, @reason, @timestampUtc);";
+        command.Parameters.AddWithValue("@decisionId", decision.DecisionId);
+        command.Parameters.AddWithValue("@taskId", (object?)decision.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@runId", (object?)decision.RunId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@stepId", (object?)decision.StepId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@decision", decision.Decision.ToString());
+        command.Parameters.AddWithValue("@reason", decision.Reason.ToString());
+        command.Parameters.AddWithValue("@timestampUtc", decision.TimestampUtc.ToString("o"));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>All recorded supervisor decisions for a run (or a task when runId is null), oldest first.</summary>
+    public async Task<List<ExecutionDecisionRecord>> GetExecutionDecisionsAsync(string? taskId, string? runId)
+    {
+        var result = new List<ExecutionDecisionRecord>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        if (!string.IsNullOrEmpty(runId))
+        {
+            command.CommandText = "SELECT * FROM execution_decisions WHERE run_id = @runId ORDER BY timestamp_utc ASC;";
+            command.Parameters.AddWithValue("@runId", runId);
+        }
+        else
+        {
+            command.CommandText = "SELECT * FROM execution_decisions WHERE task_id = @taskId ORDER BY timestamp_utc ASC;";
+            command.Parameters.AddWithValue("@taskId", (object?)taskId ?? DBNull.Value);
+        }
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new ExecutionDecisionRecord(
+                DecisionId: reader.GetString(0),
+                TaskId: reader.IsDBNull(1) ? null : reader.GetString(1),
+                RunId: reader.IsDBNull(2) ? null : reader.GetString(2),
+                StepId: reader.IsDBNull(3) ? null : reader.GetString(3),
+                Decision: Enum.TryParse<ExecutionDecision>(reader.GetString(4), out var d) ? d : ExecutionDecision.ContinueStep,
+                Reason: Enum.TryParse<ContinuationReason>(reader.GetString(5), out var r) ? r : ContinuationReason.StepIncomplete,
+                TimestampUtc: DateTime.Parse(reader.GetString(6), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+        }
+        return result;
+    }
+
+    // ===== Durable typed TaskStep mirror (review §3) ========================================
+
+    /// <summary>Replaces a task's persisted typed-step mirror (delete + insert in one
+    /// transaction). Written whenever the plan checklist changes; read on recovery so step
+    /// semantics survive restarts without re-deriving from English text.</summary>
+    public async Task SaveTaskStepsAsync(string taskId, IReadOnlyList<TaskStep> steps)
+    {
+        if (string.IsNullOrEmpty(taskId)) return;
+        await using var connection = await CreateConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var del = connection.CreateCommand())
+        {
+            del.Transaction = (SqliteTransaction)transaction;
+            del.CommandText = "DELETE FROM task_steps WHERE task_id = @taskId;";
+            del.Parameters.AddWithValue("@taskId", taskId);
+            await del.ExecuteNonQueryAsync();
+        }
+        string now = DateTime.UtcNow.ToString("o");
+        foreach (var step in steps)
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.Transaction = (SqliteTransaction)transaction;
+            cmd.CommandText = @"
+                INSERT OR REPLACE INTO task_steps
+                    (step_id, task_id, order_index, title, status, expected_action_kind,
+                     allowed_tools_json, required_skills_json, expected_artifacts_json,
+                     verification_criteria_json, completion_condition, attempt_count,
+                     last_action_id, started_at, completed_at, updated_at)
+                VALUES
+                    (@stepId, @taskId, @orderIndex, @title, @status, @expectedActionKind,
+                     @allowedToolsJson, @requiredSkillsJson, @expectedArtifactsJson,
+                     @verificationCriteriaJson, @completionCondition, @attemptCount,
+                     @lastActionId, @startedAt, @completedAt, @updatedAt);";
+            cmd.Parameters.AddWithValue("@stepId", step.StepId);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@orderIndex", step.Order);
+            cmd.Parameters.AddWithValue("@title", step.Title);
+            cmd.Parameters.AddWithValue("@status", step.Status.ToString());
+            cmd.Parameters.AddWithValue("@expectedActionKind", step.ExpectedActionKind.ToString());
+            cmd.Parameters.AddWithValue("@allowedToolsJson", step.AllowedTools == null ? (object)DBNull.Value : System.Text.Json.JsonSerializer.Serialize(step.AllowedTools.OrderBy(n => n, StringComparer.Ordinal)));
+            cmd.Parameters.AddWithValue("@requiredSkillsJson", (object)System.Text.Json.JsonSerializer.Serialize(step.RequiredSkills));
+            cmd.Parameters.AddWithValue("@expectedArtifactsJson", (object)System.Text.Json.JsonSerializer.Serialize(step.ExpectedArtifacts));
+            cmd.Parameters.AddWithValue("@verificationCriteriaJson", (object)System.Text.Json.JsonSerializer.Serialize(step.VerificationCriteria));
+            cmd.Parameters.AddWithValue("@completionCondition", (object?)step.CompletionCondition ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@attemptCount", step.AttemptCount);
+            cmd.Parameters.AddWithValue("@lastActionId", (object?)step.LastActionId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@startedAt", (object?)(step.StartedAt?.ToString("o")) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@completedAt", (object?)(step.CompletedAt?.ToString("o")) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@updatedAt", now);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        await transaction.CommitAsync();
+    }
+
+    /// <summary>The task's persisted typed steps in plan order, or an empty list.</summary>
+    public async Task<List<TaskStep>> GetTaskStepsAsync(string taskId)
+    {
+        var result = new List<TaskStep>();
+        if (string.IsNullOrEmpty(taskId)) return result;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM task_steps WHERE task_id = @taskId ORDER BY order_index ASC;";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new TaskStep(
+                StepId: reader.GetString(0),
+                TaskId: reader.GetString(1),
+                Order: reader.GetInt32(2),
+                Title: reader.GetString(3),
+                Status: Enum.TryParse<TaskStepStatus>(reader.GetString(4), out var st) ? st : TaskStepStatus.Pending,
+                ExpectedActionKind: Enum.TryParse<StepActionKind>(reader.GetString(5), out var kind) ? kind : StepActionKind.None,
+                AllowedTools: reader.IsDBNull(6) ? null : new HashSet<string>(System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(6)) ?? new List<string>(), StringComparer.OrdinalIgnoreCase),
+                RequiredSkills: reader.IsDBNull(7) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(7)) ?? new List<string>(),
+                ExpectedArtifacts: reader.IsDBNull(8) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(8)) ?? new List<string>(),
+                VerificationCriteria: reader.IsDBNull(9) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(9)) ?? new List<string>(),
+                CompletionCondition: reader.IsDBNull(10) ? null : reader.GetString(10),
+                AttemptCount: reader.GetInt32(11),
+                LastActionId: reader.IsDBNull(12) ? null : reader.GetString(12),
+                StartedAt: reader.IsDBNull(13) ? null : DateTime.Parse(reader.GetString(13), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                CompletedAt: reader.IsDBNull(14) ? null : DateTime.Parse(reader.GetString(14), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+        }
+        return result;
+    }
+
+    /// <summary>Deletes a task's persisted typed-step mirror (task resolved / plan replaced).</summary>
+    public async Task ClearTaskStepsAsync(string taskId)
+    {
+        if (string.IsNullOrEmpty(taskId)) return;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM task_steps WHERE task_id = @taskId;";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        await command.ExecuteNonQueryAsync();
     }
 
     /// <summary>

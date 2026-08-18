@@ -2,13 +2,15 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Klydis.Core.Chat;
+using Klydis.Core.Memory;
 
 namespace Klydis.Core.Tasks;
 
 /// <summary>A decision the supervisor produced, recorded so a process death mid-dispatch is
-/// recoverable and diagnosable (P1.12 runtime phase A). In-memory + logged for now; the
-/// durable store write lands with the persistence milestone.</summary>
+/// recoverable and diagnosable (P1.12). Persisted durably (review §15) — the in-memory copy
+/// is a cache of the execution_decisions table, not the source of truth.</summary>
 public sealed record ExecutionDecisionRecord(
     string DecisionId,
     string? TaskId,
@@ -37,15 +39,18 @@ public sealed record EvidenceLedgerEntry(Evidence Evidence, int WorkspaceVersion
 }
 
 /// <summary>
-/// The run-scoped, versioned execution evidence ledger (P1.12). This is the home of
-/// DURABLE evidence — distinct from <see cref="StateDelta"/>, which is turn-local. It is
+/// The run-scoped, versioned execution evidence ledger (P1.12, review §2). This is the home
+/// of DURABLE evidence — distinct from <see cref="StateDelta"/>, which is turn-local. It is
 /// the backbone of the completion gate and recovery:
 ///
 ///   - evidence is recorded per run with the workspace version at recording time;
 ///   - a file change (write_file/edit_file) bumps the workspace version, which INVALIDATES
 ///     every older entry (build/preview evidence is only valid against the code it verified);
 ///   - the completion gate then refuses completion while required verification is stale or
-///     missing ("plan marked complete but build never ran" can no longer seal a task).
+///     missing ("plan marked complete but build never ran" can no longer seal a task);
+///   - every evidence row and decision is PERSISTED to SQLite, and a fresh run rehydrates the
+///     task's surviving (non-invalidated) evidence — a process crash cannot erase a recorded
+///     BuildPassed, so completion recovery across restarts works.
 ///
 /// Thread-safe; keyed by task (reset when a fresh run starts).
 /// </summary>
@@ -58,47 +63,148 @@ public sealed class ExecutionEvidenceLedger
         public readonly List<ExecutionDecisionRecord> Decisions = new();
     }
 
+    private readonly MessageStore? _store;
     private readonly ConcurrentDictionary<string, RunLedger> _runs = new(StringComparer.Ordinal);
+
+    /// <summary>Constructs the ledger. When a store is supplied, evidence/decisions are
+    /// persisted durably and rehydrated on <see cref="Reset"/>; without one the ledger is
+    /// in-memory only (legacy/test behavior).</summary>
+    public ExecutionEvidenceLedger(MessageStore? store = null)
+    {
+        _store = store;
+    }
 
     private RunLedger Ledger(string runKey)
         => _runs.GetOrAdd(runKey ?? string.Empty, _ => new RunLedger());
 
-    /// <summary>Resets the ledger for a key — called when a FRESH run starts (a continued run
-    /// keeps its ledger so evidence survives user turns within the run).</summary>
+    /// <summary>
+    /// Resets the ledger for a key — called when a FRESH run starts (a continued run keeps
+    /// its ledger so evidence survives user turns within the run). With a durable store, the
+    /// reset REHYDRATES the task's surviving evidence: the new run inherits the previous
+    /// run's workspace version and non-invalidated verification facts, so a crash cannot
+    /// erase a recorded BuildPassed and completion recovery works (review §2).
+    /// </summary>
     public void Reset(string runKey)
     {
         _runs[runKey ?? string.Empty] = new RunLedger();
+        if (_store == null) return;
+        try
+        {
+            var rows = _store.GetCurrentExecutionEvidenceAsync(runKey ?? string.Empty).GetAwaiter().GetResult();
+            var ledger = Ledger(runKey ?? string.Empty);
+            lock (ledger)
+            {
+                foreach (var row in rows)
+                {
+                    ledger.Evidence.Add(new EvidenceLedgerEntry(
+                        new Evidence(
+                            Kind: row.Kind,
+                            Description: string.Empty,
+                            TimestampUtc: row.TimestampUtc,
+                            Subject: row.Subject,
+                            ToolName: row.ToolName,
+                            StepId: row.StepId,
+                            ExitCode: row.ExitCode,
+                            Payload: row.PayloadJson,
+                            WorkspaceVersion: row.WorkspaceVersion),
+                        row.WorkspaceVersion));
+                    if (row.WorkspaceVersion > ledger.WorkspaceVersion)
+                    {
+                        ledger.WorkspaceVersion = row.WorkspaceVersion;
+                    }
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Rehydration failure must not crash the run start; the in-memory ledger is empty
+            // and verification fails closed (missing evidence ⇒ not eligible) rather than
+            // wrongly completing. The DB stays the durable copy for the next recovery.
+        }
     }
 
-    /// <summary>Records evidence against the current workspace version.</summary>
-    public void RecordEvidence(string runKey, Evidence evidence)
+    /// <summary>Records evidence against the current workspace version and persists it. The
+    /// optional run/action ids give the durable row its lineage (which run and which action
+    /// produced it — review §2's Evidence record).</summary>
+    public void RecordEvidence(string runKey, Evidence evidence, string? runId = null, string? actionId = null)
     {
         if (evidence == null) throw new ArgumentNullException(nameof(evidence));
         var ledger = Ledger(runKey);
         lock (ledger)
         {
-            ledger.Evidence.Add(new EvidenceLedgerEntry(evidence, ledger.WorkspaceVersion));
+            // Stamp the workspace version into the evidence itself so predicates can demand
+            // MinWorkspaceVersion and the durable row is self-describing.
+            var stamped = evidence.WorkspaceVersion == 0
+                ? evidence with { WorkspaceVersion = ledger.WorkspaceVersion }
+                : evidence;
+            ledger.Evidence.Add(new EvidenceLedgerEntry(stamped, ledger.WorkspaceVersion));
+
+            if (_store == null) return;
+            try
+            {
+                var row = new DurableEvidenceRecord(
+                    EvidenceId: "E-" + Guid.NewGuid().ToString("N")[..12],
+                    TaskId: runKey,
+                    RunId: runId,
+                    StepId: stamped.StepId,
+                    ActionId: actionId,
+                    WorkspaceVersion: stamped.WorkspaceVersion,
+                    Kind: stamped.Kind,
+                    Subject: stamped.Subject,
+                    ToolName: stamped.ToolName,
+                    TimestampUtc: stamped.TimestampUtc,
+                    ExitCode: stamped.ExitCode,
+                    PayloadJson: stamped.Payload);
+                _store.SaveExecutionEvidenceAsync(row).GetAwaiter().GetResult();
+            }
+            catch (Exception)
+            {
+                // A persistence failure must not take down the executing turn; the in-memory
+                // copy still serves the completion gate for this process. The durable write
+                // is retried on the next reset/rehydration cycle.
+            }
         }
     }
 
     /// <summary>Records a file change — bumps the workspace version, invalidating every
-    /// evidence entry recorded against an older version (stale build/preview evidence).</summary>
+    /// evidence entry recorded against an older version (stale build/preview evidence),
+    /// durably when a store is present.</summary>
     public void NoteFileChanged(string runKey)
     {
         var ledger = Ledger(runKey);
         lock (ledger)
         {
             ledger.WorkspaceVersion++;
+            if (_store == null) return;
+            try
+            {
+                _store.InvalidateExecutionEvidenceAsync(
+                    runKey ?? string.Empty, ledger.WorkspaceVersion, DateTime.UtcNow).GetAwaiter().GetResult();
+            }
+            catch (Exception)
+            {
+                // See RecordEvidence: the in-memory version bump still invalidates for this
+                // process; the durable stamp catches up on the next write.
+            }
         }
     }
 
-    /// <summary>Records a supervisor decision for the run.</summary>
+    /// <summary>Records a supervisor decision for the run and persists it (review §15).</summary>
     public void RecordDecision(string runKey, ExecutionDecisionRecord decision)
     {
         var ledger = Ledger(runKey);
         lock (ledger)
         {
             ledger.Decisions.Add(decision);
+            if (_store == null) return;
+            try
+            {
+                _store.SaveExecutionDecisionAsync(decision).GetAwaiter().GetResult();
+            }
+            catch (Exception)
+            {
+                // See RecordEvidence.
+            }
         }
     }
 

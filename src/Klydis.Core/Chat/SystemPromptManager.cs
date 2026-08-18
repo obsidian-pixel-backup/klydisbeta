@@ -408,7 +408,7 @@ public class SystemPromptManager
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
         sb.AppendLine("- Your chat has a live workbench panel the user watches: PLAN (your todo list), FILES (every file you touch), CHANGES (your activity log), PREVIEW (renderable files you produce), NOTES (user-pinned instructions), and QUEUE (pending user messages).");
-        sb.AppendLine("- TODO LIST: The harness seeds the plan for actionable requests — you see it live in the PLAN tab. Keep it current: check items off with action=complete the moment they are done (that is how the runtime advances progress). Do NOT create a parallel plan or expand it before the design step exists.");
+        sb.AppendLine("- TODO LIST: The harness seeds the plan for actionable requests — you see it live in the PLAN tab. The runtime OWNS the checklist and advances it from your executed actions; you do NOT check items off yourself. Do NOT create a parallel plan or expand it before the design step exists.");
         sb.AppendLine("- ARTIFACTS: Any file you write with 'write_file' appears in the PREVIEW tab, and HTML/Markdown/JSON files are rendered live for the user. When a deliverable can be a file — a page, dashboard, report, config, script, or doc — WRITE IT TO A FILE so the user can view it in the panel, then summarize it concisely in chat.");
         sb.AppendLine("- WORK RECORD: Every tool call you make in this chat is recorded in FILES/CHANGES. Keep your actions on-goal and relevant to the current session — that record is what the user sees of your work. Do not touch unrelated files or wander into other projects.");
         sb.AppendLine("- USER NOTES: Instructions the user pins in the NOTES tab reach you as 'USER NOTES FOR THIS CHAT' and take precedence over ordinary conversation — re-read them whenever they are present and obey them.");
@@ -492,7 +492,7 @@ public class SystemPromptManager
             sb.AppendLine();
         }
         sb.AppendLine("### TOOL RULES");
-        sb.AppendLine("- Tools are REAL and execute on this machine with full system access: run_command runs actual commands, search_web queries the live web, read_file reads actual files. NEVER simulate tool use or fabricate results — emit the real <tool_call> tag and use the actual returned output.");
+        sb.AppendLine("- Tools are REAL and execute on this machine with full system access as granted by the runtime's approval and workspace policy: run_command runs actual commands, search_web queries the live web, read_file reads actual files. A call may be denied by the runtime (approval, workspace boundary, or step restrictions) — that denial is final for that call. NEVER simulate tool use or fabricate results — emit the real <tool_call> tag and use the actual returned output.");
         sb.AppendLine("- NEVER claim you lack access or that live data is unavailable (internet, weather, files, system) — the tools above execute for you on demand. Call the tool.");
         sb.AppendLine("- NEVER repeat a tool call with identical arguments. If you already received a result, USE IT. Identical failed retries are blocked — change the arguments or use a different tool.");
         sb.AppendLine("- ALWAYS analyze tool results before making additional calls; try a DIFFERENT approach on errors.");
@@ -546,7 +546,7 @@ public class SystemPromptManager
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
-        sb.AppendLine("- The harness seeds your todo list (shown live in the PLAN tab); keep it current by checking items off as you complete them — do not create a parallel plan.");
+        sb.AppendLine("- The harness seeds your todo list (shown live in the PLAN tab) and tracks progress from your executed actions — do not check items off yourself and do not create a parallel plan.");
         sb.AppendLine("- Files you write appear in the PREVIEW tab — HTML/Markdown/JSON render live for the user. If a deliverable can be a file (page, dashboard, report, script, doc), write it to disk so the user can preview it, then summarize in chat.");
         sb.AppendLine("- All your tool calls in this chat are tracked in FILES/CHANGES: keep actions on-goal and relevant to this session only.");
         sb.AppendLine("- User-pinned NOTES reach you as 'USER NOTES FOR THIS CHAT' and take precedence — obey them.");

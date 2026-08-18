@@ -165,7 +165,31 @@ public partial class App : Application
         services.AddSingleton<ContextOrchestrator>();
         services.AddSingleton<ModelMessageQueue>();
         services.AddSingleton<Klydis.Core.Tasks.TaskManager>();
-        services.AddSingleton<Klydis.Core.Tasks.AgentRuntime>();
+        // P0: the task workspace root is established ONCE at startup from the process working
+        // directory (canonicalized). It is propagated to the runtime (whose workspace-boundary
+        // validator then encloses task-mode file tools) and to the tool executor (whose
+        // run_command default cwd and tool-output offload stay inside it). Previously
+        // AgentRuntime.WorkspaceRoot was never assigned in production, so the validator's
+        // null-root path left the boundary permissive.
+        string? appWorkspaceRoot = null;
+        try
+        {
+            appWorkspaceRoot = System.IO.Path.GetFullPath(Environment.CurrentDirectory);
+        }
+        catch (Exception ex)
+        {
+            // Unresolvable working directory — keep the root null (permissive) and surface it.
+            System.Diagnostics.Debug.WriteLine($"Failed to resolve workspace root from the process working directory; workspace enforcement is DISABLED: {ex}");
+        }
+        services.AddSingleton<Klydis.Core.Tasks.AgentRuntime>(sp =>
+        {
+            var runtime = new Klydis.Core.Tasks.AgentRuntime(
+                sp.GetRequiredService<Klydis.Core.Tasks.TaskManager>(),
+                sp.GetRequiredService<MessageStore>(),
+                sp.GetService<ILogger<Klydis.Core.Tasks.AgentRuntime>>());
+            runtime.WorkspaceRoot = appWorkspaceRoot;
+            return runtime;
+        });
         services.AddSingleton<Klydis.Core.Learning.AdaptiveLearningService>();
         services.AddSingleton<Klydis.Core.Chat.CamoufoxManager>();
         services.AddSingleton<Klydis.Core.Chat.StealthBrowserService>();
@@ -202,6 +226,9 @@ public partial class App : Application
             // prompt-injection surface from RAG docs and crawled pages is unsafe as a default;
             // users who want the fully autonomous mode switch to it in the UI selector.
             toolExecutor.CurrentRiskLevel = RiskLevel.Standard;
+            // P0: same canonical workspace root as the runtime, so run_command defaults and
+            // tool-output offload stay inside the project boundary.
+            toolExecutor.WorkspaceRoot = appWorkspaceRoot;
             return toolExecutor;
         });
         services.AddSingleton<ChatEngine>(sp =>

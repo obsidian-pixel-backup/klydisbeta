@@ -265,6 +265,14 @@ public class ChatEngine(
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> _pendingConsolidations = new();
     private int _consecutiveBlockedToolCalls = 0;
 
+    // P0: consecutive-stalled-turn tracking, keyed by task (fallback: session). The
+    // supervisor's stagnation circuit breaker consumes this value — previously the snapshot
+    // hardcoded ConsecutiveStalledTurns: 0, so the Replan-on-stagnation branch could never
+    // fire. Incremented on a supervisor checkpoint with NO factual state delta (no tool
+    // executed, no file/plan/evidence change); reset on meaningful progress, on a user
+    // decision (a fresh turn), and on a supervisor Replan.
+    private readonly Dictionary<string, int> _stalledTurnsByTask = new();
+
     // P1.12: run-scoped action replay ledger. Side-effect-bearing actions that SUCCESSFULLY
     // executed are recorded by replay key (tool + canonicalized args) and the gate rejects a
     // re-execution — a recovery loop must never duplicate a command or destructive call. The
@@ -682,7 +690,12 @@ public class ChatEngine(
                content.StartsWith("[System Warning:", StringComparison.Ordinal) ||
                content.StartsWith("[System ERROR:", StringComparison.Ordinal) ||
                content.StartsWith("[SYSTEM OVERRIDE:", StringComparison.Ordinal) ||
-               content.StartsWith("[System: Tool calling", StringComparison.Ordinal);
+               content.StartsWith("[System: Tool calling", StringComparison.Ordinal) ||
+               // P0: gate/completion rejections are runtime-control messages, not conversation.
+               // They are persisted as ChatRole.Tool rows (legacy path) and must never re-enter
+               // history as ordinary tool results on a later load.
+               content.StartsWith("[SYSTEM — ACTION REJECTED BY ACTION GATE]", StringComparison.Ordinal) ||
+               content.StartsWith("[SYSTEM — COMPLETION CLAIM REJECTED BY DETERMINISTIC VERIFIER]", StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1123,6 +1136,9 @@ public class ChatEngine(
         // plan/step progress). The supervisor's notion of progress comes from this, never
         // from how much text the model produced.
         var turnState = new Klydis.Core.Tasks.TurnStateCollector();
+        // P0: a new user turn is a user decision — the stall clock restarts (see
+        // _stalledTurnsByTask). A stale count from an earlier task/turn must not carry over.
+        _stalledTurnsByTask.Clear();
         IReadOnlyList<ToolExecutor.PlanEntry>? planAtTurnStart = null;
         try
         {
@@ -1211,6 +1227,11 @@ public class ChatEngine(
 
         int iterationCount = 0;
         const int MAX_ITERATIONS = 100;
+
+        // P1.12/review §3: the typed-step mirror is persisted only when the plan actually
+        // changed (signature = text + done flags), so per-iteration step persistence never
+        // becomes a hot path.
+        string? lastPersistedPlanSig = null;
 
         // Turn-level count of task_complete claims the deterministic gate rejected this turn
         // (across all iterations). Feeds the snapshot so the supervisor's Pause decision
@@ -1397,8 +1418,8 @@ public class ChatEngine(
             // open: completion is runtime-eligible, and the best validation is the one that
             // happens BEFORE generation. The gate still backstops a premature claim (the
             // model can literally not call what it never saw).
-            string toolsSchema = fullToolsSchema;
-            if (!toolsDisabled && currentStepForTurn?.AllowedTools != null && tools.Count > 0)
+            string toolsSchema = rescueTriggered ? string.Empty : fullToolsSchema;
+            if (!toolsDisabled && !rescueTriggered && currentStepForTurn?.AllowedTools != null && tools.Count > 0)
             {
                 // A non-null current step means open plan items remain — completion is not
                 // yet eligible, so hide task_complete from the model surface.
@@ -1554,7 +1575,28 @@ public class ChatEngine(
         // window (see the budget check below), in which case they also fall back to the compact
         // prompt so session history is never starved out of the context window.
         string sysPrompt;
-        if (toolsDisabled)
+        if (rescueTriggered)
+        {
+            // P0: rescue mode is a distinct execution mode, not a boolean tweak. The ENTIRE
+            // generation request is rebuilt from the mode: zero tool schema, no qwen tools
+            // prelude, no plan/artifact/task-contract ceremony, no open think block — one
+            // plain-answer generation carrying the latest user request and a safe task
+            // summary (the WorldState header is summarized historical context, which is
+            // exactly the "safe task summary" rescue should keep). Tool parsing is disabled
+            // by the rescueTriggered gate at parse time, so even a stray <tool_call> in the
+            // rescue output is never executed.
+            sysPrompt = rescueSysMsg.Content;
+            if (!string.IsNullOrWhiteSpace(worldStateHeader))
+            {
+                sysPrompt += worldStateHeader;
+            }
+            if (!string.IsNullOrWhiteSpace(CurrentTaskObjective))
+            {
+                sysPrompt += "\n\nTASK SUMMARY (background only — do not act on tools for it): " + CurrentTaskObjective.Trim();
+            }
+            sysPrompt += "\n\n[RUNTIME NOTICE] Rescue mode: tool execution is disabled for this attempt — no tool calls will be parsed or executed and no task state will change. Answer the user's latest message directly in plain text.";
+        }
+        else if (toolsDisabled)
         {
             // Conversation mode: minimal prompt — persona, personality, World State (background
             // history), plus user notes appended below. No tools, no task contract, no plan, no
@@ -2300,6 +2342,13 @@ public class ChatEngine(
                 // <think> in ApplyTemplate, so flipping it off yields a plain direct answer.
                 rescueTriggered = true;
                 isQwenThinkingModel = false;
+                // P0: rescue latches the ENTIRE tool path off — no native prelude, no grammar
+                // constraint, no tool schema, no parsing (the per-iteration gates below consult
+                // rescueTriggered). Setting only the message/thinking booleans left tool
+                // definitions in the prompt and the parse path active despite the plain-answer
+                // instruction.
+                useQwenNativePrelude = false;
+                inferenceEngine.EnableToolGrammarConstrainedDecoding = false;
                 sysPromptMsg = rescueSysMsg;
                 logger.LogWarning("Loop corrections exhausted ({Max}) and output is still degenerate. Switching to rescue mode: plain direct answer without tools or thinking blocks.", MaxSelfCorrectionsPerTurn);
                 NoteLesson("rescue_mode", "Rescue mode triggered: loop corrections exhausted; a plain direct answer (no tools, no thinking blocks) was forced.");
@@ -2331,7 +2380,9 @@ public class ChatEngine(
             // Conversation mode: no tools exist, so tool tags (if the model emits any) are
             // never parsed or executed — the whole output is delivered as the reply. The same
             // gate applies when the task layer failed (fail-closed: nothing may execute).
-            var toolCallRequests = toolsDisabled ? new List<ToolCallRequest>() : ParseToolCalls(visibleResponse);
+            var toolCallRequests = (toolsDisabled || rescueTriggered)
+                ? new List<ToolCallRequest>()
+                : ParseToolCalls(visibleResponse);
 
             // After repeated malformed tool calls, block execution entirely and force a direct
             // answer. The notice is injected once; subsequent iterations with tool tags just
@@ -2439,11 +2490,35 @@ public class ChatEngine(
                 string? activeRunId = _runtime?.GetActiveRunId(CurrentTaskId ?? string.Empty);
                 // P1.12: the replay ledger is RUN-scoped, not generation-scoped — reset only
                 // when the active run changes so a replay across turns (context reset, model
-                // retry, replan, user reconnect) is still caught.
+                // retry, replan, user reconnect) is still caught. On a fresh run it is SEEDED
+                // from the durable action ledger (review §9): actions a previous process
+                // executed (Succeeded) or may have landed (Unknown) must still be rejected
+                // after a restart — recovery never re-runs side effects just because process
+                // memory reset.
                 if (!string.Equals(activeRunId, _runExecutedActionsRunId, StringComparison.Ordinal))
                 {
                     _runExecutedActionsRunId = activeRunId;
                     _runExecutedActions.Clear();
+                    if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+                    {
+                        try
+                        {
+                            var durableKeys = await _runtime.GetExecutedReplayKeysAsync(CurrentTaskId);
+                            foreach (var k in durableKeys)
+                            {
+                                _runExecutedActions.Add(k);
+                            }
+                            if (durableKeys.Count > 0)
+                            {
+                                logger.LogDebug("Hydrated replay protection for task {TaskId} from the durable action ledger: {Count} replay keys.",
+                                    CurrentTaskId, durableKeys.Count);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogDebug(ex, "Failed to hydrate replay protection from the durable action ledger for task {TaskId}.", CurrentTaskId);
+                        }
+                    }
                 }
 
                 foreach (var req in toolCallRequests)
@@ -2553,7 +2628,8 @@ public class ChatEngine(
                         new Klydis.Core.Tasks.ActionValidationContext(
                             CompletionIsEligible: completionEligibleNow,
                             CompletionIneligibilityReason: completionIneligibilityReason,
-                            RunAlreadyExecuted: _runExecutedActions));
+                            RunAlreadyExecuted: _runExecutedActions,
+                            WorkspaceRoot: _runtime?.WorkspaceRoot));
                     if (!gateVerdict.Allowed)
                     {
                         actionGateRejectionsThisTurn++;
@@ -2569,7 +2645,10 @@ public class ChatEngine(
                         NoteLesson("action_gate", $"Action rejected by the deterministic gate: tool={req.Name} code={gateErrorCode}");
                         var gateRejObj = new ChatMessage(ChatRole.Tool, rejection, req.Name);
                         AddToSessionHistory(activeHistory, gateRejObj, generatingSessionId);
-                        await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, rejection, 0, null);
+                        // P0: the rejection is engine-internal feedback for THIS turn only — it is
+                        // never persisted as a conversational message (see IsEngineInjectedMessage).
+                        // Previously it landed in the store as a Tool row and re-entered later
+                        // prompts, making the model re-litigate harness rules instead of working.
                         yield return new ChatStreamEvent(ChatStreamEventType.Error, rejection);
                         if (actionGateRejectionsThisTurn >= 4)
                         {
@@ -2593,9 +2672,57 @@ public class ChatEngine(
                     lastTurnActivityUtc = DateTime.UtcNow;
                     toolCallInProgress = true;
                     ToolResult result;
+                    // P1.12/review §9: the durable action ledger — every executed tool call is
+                    // recorded InProgress BEFORE execution and completed AFTER, with its replay
+                    // key, side-effect level, arguments and result. A process death mid-call
+                    // leaves the row InProgress, which run recovery marks Unknown (never
+                    // silently Succeeded/Failed). The action id correlates the start with the
+                    // completion record and any gate rejection for the same call.
+                    string? runActionId = null;
+                    Klydis.Core.Tasks.ActionExecutionStatus actionFinalStatus = Klydis.Core.Tasks.ActionExecutionStatus.Cancelled;
+                    string? actionResultPreview = null;
+                    string? actionError = null;
                     try
                     {
+                        // Stamp the durable action with the executing model + protocol so the
+                        // capability analyzer can attribute every action to a (model, protocol)
+                        // pair — per-model telemetry is built from these rows (agent-intelligence
+                        // stage §3). Model id is the stable file-name identity, matching the
+                        // adaptive-learning service's model naming.
+                        var executingProfile = CurrentModelProfile;
+                        runActionId = _runtime?.RecordRunActionStart(
+                            CurrentTaskId, activeRunId, currentTaskStep?.StepId,
+                            _runtime?.GetActiveTurnId(CurrentTaskId ?? string.Empty) ?? activeRunId ?? "turn",
+                            req, turnActionOrdinal,
+                            modelId: executingProfile == null
+                                ? null
+                                : Klydis.Core.Learning.AdaptiveLearningService.DeriveModelName(executingProfile.ModelPath),
+                            protocolKey: executingProfile == null
+                                ? null
+                                : Klydis.Core.Protocol.ProtocolRegistry.ResolveProtocolKey(executingProfile) ?? "legacy");
+                        if (_runtime != null && string.IsNullOrEmpty(runActionId))
+                        {
+                            // P0: prepare-before-execute. The durable InProgress record could
+                            // not be written, so executing this action would create a real side
+                            // effect with no durable record. Fail closed: do NOT execute;
+                            // surface the cause and continue the loop. (The old path executed
+                            // anyway, so a storage failure produced side effects the ledger
+                            // never recorded.)
+                            logger.LogError("Durable action record could not be written for tool={Tool} task={Task}; the action was NOT executed (fail-closed).", req.Name, CurrentTaskId ?? "—");
+                            NoteLesson("durable_action_write_failed", $"Durable action record write failed for tool={req.Name}; action was NOT executed (fail-closed).");
+                            var failClosedMsg = new ChatMessage(ChatRole.Tool,
+                                "[Tool Error: The action could not be durably recorded (storage/persistence failure), so it was NOT executed. The runtime will not run an action it cannot record. Retry once storage is healthy.]",
+                                req.Name);
+                            AddToSessionHistory(activeHistory, failClosedMsg, generatingSessionId);
+                            yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The action was blocked because its durable execution record could not be written. It was NOT executed.");
+                            continue;
+                        }
                         result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, stallCts.Token, inferenceEngine.CurrentModelPath);
+                        actionFinalStatus = result.Success
+                            ? Klydis.Core.Tasks.ActionExecutionStatus.Succeeded
+                            : Klydis.Core.Tasks.ActionExecutionStatus.Failed;
+                        actionResultPreview = result.Output;
+                        actionError = result.Error;
                         // P1.8: record the factual tool execution for the state delta.
                         turnState.RecordTool(req.Name, result.Success);
                         // P1.8: a successful file write/edit is a factual FILE change — the
@@ -2638,9 +2765,14 @@ public class ChatEngine(
                             }
                             if (_runtime != null)
                             {
+                                // The real exit code rides on the evidence (review §6–§7):
+                                // BuildPassed is only meaningful when the command actually
+                                // exited 0, and predicates can demand it.
                                 _runtime.RecordRunEvidence(CurrentTaskId ?? string.Empty,
                                     new Klydis.Core.Tasks.Evidence(recordedKind, description,
-                                        DateTime.UtcNow, subject, req.Name, currentTaskStep?.StepId));
+                                        DateTime.UtcNow, subject, req.Name, currentTaskStep?.StepId,
+                                        ExitCode: result.ExitCode),
+                                    runId: activeRunId, actionId: runActionId);
                             }
                         }
                         // P1.12: a SUCCESSFUL side-effect-bearing action is now part of this
@@ -2656,6 +2788,21 @@ public class ChatEngine(
                     }
                     finally
                     {
+                        // Complete the durable action record: Succeeded/Failed from the result,
+                        // or Cancelled when execution threw (the row is never left InProgress
+                        // for an in-process outcome we do know).
+                        if (runActionId != null && _runtime != null)
+                        {
+                            try
+                            {
+                                _runtime.RecordRunActionComplete(runActionId, actionFinalStatus,
+                                    actionResultPreview, actionError);
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogDebug(ex, "Failed to complete durable action record {ActionId}.", runActionId);
+                            }
+                        }
                         toolCallInProgress = false;
                         lastTurnActivityUtc = DateTime.UtcNow;
                     }
@@ -2680,6 +2827,20 @@ public class ChatEngine(
                         if (accepted)
                         {
                             _goalCompletedThisTurn = true;
+                            // P1.15: the acceptance is on the SAME decision ledger as every
+                            // other supervisor decision — CompleteTask is dispatched (sealed
+                            // durably by EvaluateCompletionClaimAsync) and recorded, so the
+                            // audit trail shows exactly when and why the task was sealed.
+                            try
+                            {
+                                _runtime.RecordRunDecision(CurrentTaskId!, new Klydis.Core.Tasks.SupervisorDecision(
+                                    Klydis.Core.Tasks.ExecutionDecision.CompleteTask,
+                                    Klydis.Core.Chat.ContinuationReason.CompletionAccepted));
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogDebug(ex, "Failed to record the accepted completion decision for task {TaskId}.", CurrentTaskId);
+                            }
                             logger.LogInformation("Supervisor accepted task_complete for task {TaskId}; task sealed Completed.", CurrentTaskId);
                             // CurrentTaskId is non-null here (guarded by the enclosing
                             // condition), but the compiler cannot narrow a field, so suppress
@@ -2696,7 +2857,9 @@ public class ChatEngine(
                         logger.LogWarning("Supervisor REJECTED task_complete for task {TaskId} (rejection {N}): {Reason}", CurrentTaskId, completionRejectionsThisTurn, rejectionReason);
                         var gateRejObj = new ChatMessage(ChatRole.Tool, gateRejection, "task_complete");
                         AddToSessionHistory(activeHistory, gateRejObj, generatingSessionId);
-                        await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, gateRejection, 0, null);
+                        // P0: the rejection is runtime-control feedback for the current turn only —
+                        // never persisted (see IsEngineInjectedMessage), so a stale rejection cannot
+                        // re-enter a later prompt as an ordinary tool result.
                         yield return new ChatStreamEvent(ChatStreamEventType.CompletionRejected, rejectionReason ?? "Completion claim rejected");
                         continue; // skip the ordinary tool-result handling for this call
                     }
@@ -2889,19 +3052,21 @@ public class ChatEngine(
                 bool noActionProducedThisTurn = isGoalMode && !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
                     (refusalLike || (openStepsRemain && (!stepProducesText || !substantiveDeliverable)));
 
-                // Supervisor: classify the generation outcome and record the runtime's decision
-                // against the durable task state. The branch mechanics below implement the
-                // decision; the decision itself is owned by the supervisor, so the loop's
-                // choices are explicit, logged, and testable instead of being scattered
-                // conditions. (The per-turn rejection counter currently lives inside the tool
-                // execution scope; the full rejections-based Pause decision lands with the
-                // loop extraction.)
+                // Supervisor: classify the generation outcome and execute the runtime's
+                // decision through the SINGLE dispatcher (P1.15). The decision is owned by
+                // the supervisor from durable facts; the dispatcher executes its durable half
+                // (task-state transitions, completion seal) and returns the directive the
+                // branch mechanics below render — so the loop's choices are explicit, logged,
+                // and testable instead of being scattered conditions.
+                // P1.15 (Phase A): the supervisor's dispatch directive is hoisted OUTSIDE the
+                // task-layer guard and the try-with-catch — the dispatch below contains yield
+                // expressions (iterators cannot yield inside one), and the loop's continuation
+                // machinery further below must honor the directive (e.g. only inject a
+                // truncation continuation when the directive asks for it), so it must be
+                // visible there too.
+                Klydis.Core.Tasks.DispatchDirective? dispatchDirective = null;
                 if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
                 {
-                    // Hoisted so the P1.15 decision DISPATCH below (which contains yield
-                    // expressions) can run OUTSIDE the try-with-catch — iterators cannot
-                    // yield inside one.
-                    Klydis.Core.Tasks.SupervisorDecision? supervisorDecision = null;
                     try
                     {
                         var outcome = _runtime.ClassifyGeneration(
@@ -2913,6 +3078,17 @@ public class ChatEngine(
                             noActionProduced: noActionProducedThisTurn);
                         var planNow = toolExecutor.GetSessionPlanEntries(generatingSessionId);
                         var pendingNow = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId).Count ?? 0;
+
+                        // P1.12/review §3: persist the typed TaskStep mirror when the plan
+                        // changed since the last persist, so step metadata (kind, allowed
+                        // tools, criteria, status) survives restarts without re-deriving from
+                        // English text.
+                        var planSig = string.Join("\n", planNow.Select(e => (e.Done ? "[x] " : "[ ] ") + e.Text));
+                        if (planSig != lastPersistedPlanSig)
+                        {
+                            lastPersistedPlanSig = planSig;
+                            await _runtime.PersistStepsAsync(CurrentTaskId, planNow);
+                        }
 
                         // P1.8: plan progress this turn is factual evidence — a step checked
                         // off is progress; text is not.
@@ -2933,6 +3109,17 @@ public class ChatEngine(
 
                         var currentStep = Klydis.Core.Tasks.TaskStepBuilder.CurrentStep(
                             Klydis.Core.Tasks.TaskStepBuilder.Build(planNow, CurrentTaskId));
+                        // P0: feed the supervisor a REAL consecutive-stalled count instead of a
+                        // hardcoded 0. Progress is the factual state delta only (tool executed,
+                        // file/plan/evidence changed) — the model generating more text never
+                        // resets the clock. See _stalledTurnsByTask.
+                        var stateDeltaNow = turnState.Build();
+                        string stallKey = CurrentTaskId ?? generatingSessionId;
+                        bool madeProgressNow = !stateDeltaNow.IsEmpty;
+                        int stalledNow = madeProgressNow
+                            ? 0
+                            : (_stalledTurnsByTask.TryGetValue(stallKey, out var priorStalled) ? priorStalled : 0) + 1;
+                        _stalledTurnsByTask[stallKey] = stalledNow;
                         var snapshot = new Klydis.Core.Tasks.TaskExecutionSnapshot(
                             CurrentTaskId,
                             CurrentTaskObjective,
@@ -2941,82 +3128,165 @@ public class ChatEngine(
                             planNow,
                             pendingNow,
                             outcome,
-                            turnState.Build(),
+                            stateDeltaNow,
                             CompletionRejections: completionRejectionsThisTurnTotal,
-                            ConsecutiveStalledTurns: 0,
+                            ConsecutiveStalledTurns: stalledNow,
                             CompletionClaimAccepted: _goalCompletedThisTurn);
                         // _runtime is a captured field; the enclosing null guard cannot be
                         // narrowed across awaits, so suppress explicitly (the guard holds).
                         var decision = await _runtime!.DecideAfterTurnAsync(snapshot, maxCompletionRejections: 3);
-                        supervisorDecision = decision;
-                        // P1.12: every supervisor decision is recorded against the run — a
-                        // process death mid-dispatch is diagnosable and the decision history
-                        // is inspectable (this makes the decision itself durable state, not
-                        // a log line).
-                        _runtime.RecordRunDecision(CurrentTaskId!, decision);
                         logger.LogInformation(
                             "Supervisor: outcome={Outcome} decision={Decision} reason={Reason} nextStep={NextStep}",
                             outcome, decision.Decision, decision.Reason, decision.NextStepId ?? "—");
+                        // P1.15 — the decision is DISPATCHED, not merely logged. The runtime
+                        // records the decision against the run and executes the durable half
+                        // (task-state transitions, completion seal); the returned directive
+                        // is what the loop renders below. Every decision — ContinueStep,
+                        // RepairProtocol, Verify, Replan, Pause, FailTask, AwaitUser,
+                        // CompleteTask — flows through this single dispatcher; there is no
+                        // second branch tree in ChatEngine.
+                        dispatchDirective = await _runtime!.DispatchAsync(decision, snapshot);
                     }
                     catch (Exception ex)
                     {
-                        logger.LogDebug(ex, "Supervisor decision logging failed.");
+                        logger.LogDebug(ex, "Supervisor decision/dispatch failed.");
                     }
 
-                    // P1.15 (Phase A) — the decision is DISPATCHED, not merely logged. The
-                    // generation/streaming mechanics below stay put; WHAT happens next is
-                    // decided here: ContinueStep / RepairProtocol / CompleteTask are executed
-                    // by the loop's own machinery further below, while Pause / Replan /
-                    // FailTask were DEAD decisions until now — this dispatch makes them live.
-                    // (Yield expressions must live OUTSIDE the try-with-catch above: iterators
-                    // cannot yield inside one.)
-                    if (supervisorDecision is { } sd)
+                    // Execute the directive: inject repair/replan/verification instructions
+                    // and regenerate, end the turn with a structured notice (pause / await /
+                    // fail), seal harness-verified completion, or continue the loop. The
+                    // generation/streaming mechanics below are the RENDER of ContinueStep;
+                    // they no longer decide what happens next. (Yield expressions must live
+                    // OUTSIDE the try-with-catch above: iterators cannot yield inside one.)
+                    if (dispatchDirective is { } dd)
                     {
-                        string? dispatchNotice = null;
-                        string? replanDirective = null;
-                        switch (sd.Decision)
+                        bool endTurn = false;
+                        switch (dd.Kind)
                         {
-                            case Klydis.Core.Tasks.ExecutionDecision.Pause:
-                                // A decision that was exhausted (completion claims,
-                                // stagnation) — end the turn with a structured notice instead
-                                // of letting the loop churn.
-                                dispatchNotice =
-                                    sd.Reason == Klydis.Core.Chat.ContinuationReason.VerificationFailed
-                                        ? "⏸ The supervisor paused this turn: completion was claimed too many times without satisfying verification. The task stays open — resume to continue the real verification work."
-                                        : "⏸ The supervisor paused this turn: the execution budget was exhausted. The task stays open — resume to continue.";
-                                break;
-
-                            case Klydis.Core.Tasks.ExecutionDecision.Replan:
+                            case Klydis.Core.Tasks.DispatchDirectiveKind.InjectReplan:
                                 // Stagnation: the approach is not making progress — revise
                                 // the plan instead of repeating the failing steps.
-                                replanDirective =
-                                    "[System Prompt: The supervisor has determined the current approach is not producing progress. REVISE the plan now with 'plan' (action=create): replace the steps that are not working with a fresh, concrete approach, then execute the revised plan. Do NOT repeat the previous failing actions.]";
+                                AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, dd.Message!), generatingSessionId);
+                                // P0: the replan directive is runtime-control feedback for the
+                                // current turn only — never persisted as conversational history.
+                                // A replan is itself a state change, so it resets the stall clock.
+                                _stalledTurnsByTask[CurrentTaskId ?? generatingSessionId] = 0;
+                                NoteLesson("supervisor_replan", "Supervisor decided Replan; replan directive injected.");
+                                yield return new ChatStreamEvent(ChatStreamEventType.Error, "↻ The supervisor ordered a replan (no progress) — plan revision injected.");
+                                continue;
+
+                            case Klydis.Core.Tasks.DispatchDirectiveKind.InjectRepair:
+                            case Klydis.Core.Tasks.DispatchDirectiveKind.InjectVerificationInstruction:
+                            {
+                                // The supervisor's RepairProtocol / Verify decisions: a
+                                // step-aware instruction injected as runtime guidance for the
+                                // NEXT generation only (never persisted — see
+                                // IsEngineInjectedMessage). The supervisor cannot see the
+                                // loop's rescue/budget state, so the loop keeps its legacy
+                                // bound here — otherwise a model that keeps failing the same
+                                // way would churn full re-prefills all the way to
+                                // MAX_ITERATIONS.
+                                if (rescueTriggered)
+                                {
+                                    // The repair loop already exhausted its budget and the
+                                    // rescue attempt produced this answer — deliver it
+                                    // instead of re-entering the repair loop (mirrors the
+                                    // legacy no-action guard's rescue exemption).
+                                    endTurn = true;
+                                    break;
+                                }
+                                string instruction = dd.Message!;
+                                AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, instruction), generatingSessionId);
+                                if (dd.Kind == Klydis.Core.Tasks.DispatchDirectiveKind.InjectVerificationInstruction)
+                                {
+                                    NoteLesson("supervisor_verify", "Supervisor decided Verify; verification instruction injected.");
+                                }
+                                else
+                                {
+                                    NoteLesson("supervisor_repair", $"Supervisor decided RepairProtocol ({dd.Reason}); repair directive injected.");
+                                }
+                                if (visibleEmpty)
+                                {
+                                    // Empty generations count against the self-correction
+                                    // budget; exhausted ⇒ rescue mode (one plain direct
+                                    // answer), exactly like the legacy empty-response
+                                    // cascade.
+                                    selfCorrectionsThisTurn++;
+                                    if (selfCorrectionsThisTurn >= MaxSelfCorrectionsPerTurn)
+                                    {
+                                        rescueTriggered = true;
+                                        isQwenThinkingModel = false;
+                                        // P0: latch the tool path off with rescue (see the
+                                        // loop-rescue activation for why the whole surface must
+                                        // change, not just the message).
+                                        useQwenNativePrelude = false;
+                                        inferenceEngine.EnableToolGrammarConstrainedDecoding = false;
+                                        sysPromptMsg = rescueSysMsg;
+                                        NoteLesson("rescue_mode_supervisor_repair", "Supervisor repairs exhausted on empty output; rescue mode forced (plain direct answer).");
+                                        logger.LogWarning("Supervisor repairs exhausted ({Max}) on empty output; switching to rescue mode.", MaxSelfCorrectionsPerTurn);
+                                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The model keeps producing empty responses — one final attempt with a plain direct answer…");
+                                        continue;
+                                    }
+                                }
+                                else
+                                {
+                                    // Text-but-no-action generations count against the
+                                    // no-action repair budget; exhausted ⇒ a terminal
+                                    // diagnostic with the task left active (legacy
+                                    // behavior).
+                                    noActionRepairsThisTurn++;
+                                    if (noActionRepairsThisTurn >= MaxNoActionRepairs)
+                                    {
+                                        NoteLesson("no_action_exhausted_supervisor", "Supervisor no-action/verification repair budget exhausted; turn ended with a diagnostic and the task left active.");
+                                        logger.LogWarning("Supervisor repair budget exhausted after {Max} repairs; ending the turn with a diagnostic (task remains active).", MaxNoActionRepairs);
+                                        yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                                            dd.Kind == Klydis.Core.Tasks.DispatchDirectiveKind.InjectVerificationInstruction
+                                                ? "⚠ The runtime verification gate could not be satisfied this turn. The task remains active — run the verification (build/tests/preview) in a follow-up message."
+                                                : "⚠ The model kept responding without performing any action. The task remains active — try rephrasing, switching the model, or starting a new chat.");
+                                        endTurn = true;
+                                        break;
+                                    }
+                                }
+                                yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                                    dd.Kind == Klydis.Core.Tasks.DispatchDirectiveKind.InjectVerificationInstruction
+                                        ? "✔ Verification still required — verification instruction injected."
+                                        : "⚠ The supervisor detected a protocol failure — re-engaging the model on the current step…");
+                                continue;
+                            }
+
+                            case Klydis.Core.Tasks.DispatchDirectiveKind.EndTurnNotice:
+                                // Pause / AwaitUser — the turn ends with a structured notice
+                                // and the task stays open (resumable).
+                                yield return new ChatStreamEvent(ChatStreamEventType.Error, dd.Message!);
+                                endTurn = true;
                                 break;
 
-                            case Klydis.Core.Tasks.ExecutionDecision.FailTask:
-                                dispatchNotice =
-                                    "✖ The supervisor failed the task: a runtime generation error stopped execution. The task is left open and recoverable.";
+                            case Klydis.Core.Tasks.DispatchDirectiveKind.MarkFailed:
+                                // FailTask — the runtime transitioned the task to Failed; the
+                                // turn ends with the diagnostic.
+                                yield return new ChatStreamEvent(ChatStreamEventType.Error, dd.Message!);
+                                endTurn = true;
+                                break;
+
+                            case Klydis.Core.Tasks.DispatchDirectiveKind.SealCompletion:
+                                // The runtime already sealed the task Completed; the directive
+                                // is the completion event. Ends the run as Completed in the
+                                // turn's finally below.
+                                _goalCompletedThisTurn = true;
+                                yield return new ChatStreamEvent(ChatStreamEventType.GoalComplete,
+                                    dd.Message ?? "Task completed.",
+                                    new Dictionary<string, object> { ["TaskId"] = CurrentTaskId! });
+                                endTurn = true;
                                 break;
 
                             default:
-                                // ContinueStep / RepairProtocol / CompleteTask / Verify /
-                                // AwaitUser / BudgetExhausted: implemented by the loop's own
-                                // machinery below (repair injections, cancellation handling,
-                                // the completion claim seal).
+                                // ContinueLoop: the loop's continuation/end machinery below
+                                // is the RENDER of the directive — the truncation continuation
+                                // runs only when the directive carries the instruction flag.
                                 break;
                         }
-
-                        if (replanDirective != null)
+                        if (endTurn)
                         {
-                            AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, replanDirective), generatingSessionId);
-                            await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Runtime, replanDirective, 0, null);
-                            NoteLesson("supervisor_replan", "Supervisor decided Replan; replan directive injected.");
-                            yield return new ChatStreamEvent(ChatStreamEventType.Error, "↻ The supervisor ordered a replan (no progress) — plan revision injected.");
-                            continue;
-                        }
-                        if (dispatchNotice != null)
-                        {
-                            yield return new ChatStreamEvent(ChatStreamEventType.Error, dispatchNotice);
                             break;
                         }
                     }
@@ -3088,7 +3358,14 @@ public class ChatEngine(
                     yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Generation was interrupted — the model was switched or unloaded while responding. Your message is still here; send it again once the model has finished loading.");
                     break;
                 }
-                else if ((isTruncatedMidGeneration || hitOutputCap || cutShortMidStream) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn && eosDeclinesThisTurn < MaxConsecutiveEosDeclines)
+                // P1.15: when the task-layer supervisor is active, the truncation continuation
+                // is the RENDER of the ContinueStep directive — it runs only when the
+                // directive's ContinueLoop carries the continuation-instruction flag (reason
+                // GenerationTruncated / ModelEndedEarly). The raw truncation flags above are
+                // facts that fed the supervisor's decision; they no longer decide. Legacy
+                // sessions (no directive) keep the raw-flag behavior.
+                else if ((isTruncatedMidGeneration || hitOutputCap || cutShortMidStream) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn && eosDeclinesThisTurn < MaxConsecutiveEosDeclines &&
+                    (dispatchDirective == null || dispatchDirective.IncludeContinuationInstruction))
                 {
                     continuationsThisTurn++;
                     logger.LogInformation("Continuation: reason={Reason} (hitMaxTokens={HitCap}, midSentence={MidSentence}, cutShortMidStream={CutShort}, endedOnOwnStop={OwnStop}, chunkChars={ChunkChars}, visibleChars={VisibleChars}, declines={Declines}). Auto-continuation iteration {Count}/{Max}.",
@@ -3158,6 +3435,9 @@ public class ChatEngine(
                     // above). One final attempt so the user is never left with nothing.
                     rescueTriggered = true;
                     isQwenThinkingModel = false;
+                    // P0: latch the tool path off with rescue (see the loop-rescue activation).
+                    useQwenNativePrelude = false;
+                    inferenceEngine.EnableToolGrammarConstrainedDecoding = false;
                     sysPromptMsg = rescueSysMsg;
                     logger.LogWarning("Empty-response corrections exhausted ({Max}). Switching to rescue mode: plain direct answer without tools or thinking blocks.", MaxSelfCorrectionsPerTurn);
                     NoteLesson("rescue_mode_empty", "Rescue mode triggered after repeated empty responses; plain direct answer forced.");

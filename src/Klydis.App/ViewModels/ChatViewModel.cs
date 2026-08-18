@@ -64,6 +64,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 {
     private readonly ChatEngine? _chatEngine;
     private CancellationTokenSource? _generationCts;
+    // P0: the in-flight turn's Task, captured so a replacement turn (ForceSend) can await the
+    // previous turn's FULL completion (finally included) as a lifecycle barrier before
+    // starting — replacing the old 200 ms sleep, which was not a synchronization barrier.
+    private Task? _generationTask;
     private CancellationTokenSource? _modelLoadCts;
     private string? _generatingSessionId;
     private long _modelLoadSequenceId = 0;
@@ -967,14 +971,43 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 await _chatEngine.CancelActiveGenerationAsync();
             }
 
-            // Small delay to allow active loop background task to finalize partial response history
-            await Task.Delay(200);
+            // P0: REAL lifecycle barrier — await the previous turn's method until it has fully
+            // unwound (streaming loop, tool cleanup, durable action completion, and its finally
+            // block) before the replacement turn starts. The old 200 ms delay was not a
+            // barrier: the old turn's finally could still be running after the new turn
+            // replaced _generationCts, letting the old turn dispose the NEW turn's cancellation
+            // source, clear IsGenerating, and close the new turn's bubbles — the observed
+            // empty-response and cancellation races.
+            var previousTurnTask = _generationTask;
+            if (previousTurnTask != null && !previousTurnTask.IsCompleted)
+            {
+                try
+                {
+                    await previousTurnTask;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Previous generation task faulted during force-send barrier: {ex}");
+                }
+            }
         }
 
         await SendMessageForTextAsync(userMessage, attachments);
     }
 
     private async Task SendMessageForTextAsync(string userMessage, List<AttachmentItemViewModel>? attachments = null)
+    {
+        if (string.IsNullOrWhiteSpace(userMessage) && (attachments == null || attachments.Count == 0))
+            return;
+
+        // P0: capture the running turn task so ForceSendMessageAsync can await the FULL turn
+        // (finally included) before replacing it. Shared generation state changes hands only
+        // after the previous turn has fully unwound.
+        _generationTask = SendMessageForTextCoreAsync(userMessage, attachments);
+        await _generationTask;
+    }
+
+    private async Task SendMessageForTextCoreAsync(string userMessage, List<AttachmentItemViewModel>? attachments = null)
     {
         if (string.IsNullOrWhiteSpace(userMessage) && (attachments == null || attachments.Count == 0))
             return;
@@ -1040,7 +1073,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         IsGenerating = true;
         var localGeneratingSessionId = SelectedSession?.Id;
         _generatingSessionId = localGeneratingSessionId;
-        _generationCts = new CancellationTokenSource();
+        // P0: the turn holds its OWN cancellation source locally; the shared _generationCts
+        // field is only the slot that the CURRENT turn owns. Every shared-state write in the
+        // finally block is guarded by an ownership check (ReferenceEquals), so an old turn
+        // unwinding after a replacement turn started can never dispose the new turn's source,
+        // clear IsGenerating, or wipe the new turn's generation state.
+        var localGenerationCts = new CancellationTokenSource();
+        _generationCts = localGenerationCts;
 
         // Per-session working indicator: mark this chat as the one the model is working
         // on, so the sidebar/header shows it even if the user switches away mid-turn.
@@ -1243,7 +1282,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     }
                 }
 
-                await foreach (var evt in _chatEngine.StreamResponseAsync(promptMessagePayload, _generationCts.Token, skillContext))
+                await foreach (var evt in _chatEngine.StreamResponseAsync(promptMessagePayload, localGenerationCts.Token, skillContext))
                 {
 
                     switch (evt.Type)
@@ -1475,7 +1514,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
         catch (OperationCanceledException)
         {
-            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
+            // P0: only surface the cancellation notice if this turn still owns the slot — a
+            // stale turn must not inject UI state into a session a replacement turn now owns.
+            if (ReferenceEquals(_generationCts, localGenerationCts) &&
+                localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
                 OnUi(() => AppendMessage(new ChatMessageViewModel
                 {
@@ -1487,7 +1529,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
+            // P0: ownership-guarded like the cancellation path above.
+            if (ReferenceEquals(_generationCts, localGenerationCts) &&
+                localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
                 OnUi(() => AppendMessage(new ChatMessageViewModel
                 {
@@ -1503,7 +1547,16 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // bubbles are closed/settled below.
             FlushAllPendingText();
 
-            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
+            // P0 turn-ownership guard: this turn may only touch shared generation state if it
+            // STILL OWNS the generation slot. A force-send (or any replacement turn) swaps
+            // _generationCts for the new turn's source before this finally runs; a stale turn
+            // must only flush its own buffered text — never dispose the new turn's CTS, clear
+            // IsGenerating, null the shared session id, close the new turn's bubbles, or
+            // advance the queue for a turn that is no longer current.
+            bool stillOwner = ReferenceEquals(_generationCts, localGenerationCts);
+            bool isCancelled = localGenerationCts.IsCancellationRequested;
+
+            if (stillOwner && localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId)
             {
                 OnUi(() =>
                 {
@@ -1522,31 +1575,39 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     Messages.Remove(typingIndicator);
                 });
             }
-            bool isCancelled = _generationCts != null && _generationCts.IsCancellationRequested;
-            IsGenerating = false;
-            _generatingSessionId = null;
-            _generationCts?.Dispose();
-            _generationCts = null;
 
-            // Clear the per-session working indicator and the live-transcript snapshot.
-            if (localGeneratingSessionId != null)
+            if (stillOwner)
+            {
+                IsGenerating = false;
+                _generatingSessionId = null;
+                _generationCts?.Dispose();
+                _generationCts = null;
+            }
+
+            // Clear the per-session working indicator and the live-transcript snapshot — only
+            // while this turn still owns the slot: a replacement turn in the same session is
+            // still working and must keep the indicator.
+            if (stillOwner && localGeneratingSessionId != null)
             {
                 _sessionTranscriptCache.Remove(localGeneratingSessionId);
             }
-            UpdateSessionWorkingState(localGeneratingSessionId, false, null);
+            if (stillOwner)
+            {
+                UpdateSessionWorkingState(localGeneratingSessionId, false, null);
+            }
 
             // If the turn completed while the user was viewing another chat, the engine's
             // in-memory cached history for this session may be a stale DB snapshot (taken
             // mid-generation by a switch-back load). Converge it with the store so the model
             // never answers this chat's next message without the finished turn in context.
-            if (!isCancelled && _chatEngine != null && localGeneratingSessionId != null)
+            if (stillOwner && !isCancelled && _chatEngine != null && localGeneratingSessionId != null)
             {
                 FireAndForget.Observe(_chatEngine.ResyncSessionHistoryFromStoreAsync(localGeneratingSessionId), operation: "ResyncSessionHistoryFromStore");
             }
 
             // Auto-rename chat if it is the first interaction
             var responseText = fullAssistantText.ToString();
-            if (localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId && SessionTitle == "New Chat" && Messages.Count >= 2 && !string.IsNullOrWhiteSpace(responseText))
+            if (stillOwner && localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId && SessionTitle == "New Chat" && Messages.Count >= 2 && !string.IsNullOrWhiteSpace(responseText))
             {
                 FireAndForget.Run(async () =>
                 {
@@ -1570,7 +1631,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // and auto-feeding the next of 64 queued messages into it turns a bounded per-turn
             // correction budget into an unbounded full-context-rebuild loop until the app dies.
             // A failed turn surfaces its error to the user instead of silently churning the queue.
-            if (!isCancelled && turnProducedOutput)
+            if (stillOwner && !isCancelled && turnProducedOutput)
             {
                 ProcessNextQueuedMessageIfAvailable(localGeneratingSessionId);
             }

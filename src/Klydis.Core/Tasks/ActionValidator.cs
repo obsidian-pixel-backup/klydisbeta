@@ -13,7 +13,8 @@ namespace Klydis.Core.Tasks;
 public sealed record ActionValidationContext(
     bool CompletionIsEligible = true,
     string? CompletionIneligibilityReason = null,
-    IReadOnlySet<string>? RunAlreadyExecuted = null);
+    IReadOnlySet<string>? RunAlreadyExecuted = null,
+    string? WorkspaceRoot = null);
 
 /// <summary>
 /// The second validation layer (P1.8): <see cref="ActionGate"/> answers "is this tool call
@@ -64,6 +65,10 @@ public static class ActionValidator
             registeredTools,
             obligation?.AllowedTools,
             obligation == null ? null : obligation.Title,
+            // REVIEW §12: the task workspace root is propagated through the context so the
+            // WorkspaceBoundaryValidator is active for EVERY filesystem action in the live
+            // gate path — not just the call sites that remember to pass it.
+            workspaceRoot: context.WorkspaceRoot,
             alreadyExecuted: context.RunAlreadyExecuted);
         if (!verdict.Allowed) return verdict;
 

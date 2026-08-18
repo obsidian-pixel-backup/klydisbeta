@@ -142,8 +142,11 @@ public class TaskManager(
 
             case TaskResolutionKind.SteerTask when current != null:
                 // Same task, modified in place. The objective stays the anchor; the model
-                // refines the plan via the plan tool as before.
-                result = current with { UpdatedAtUtc = DateTime.UtcNow };
+                // refines the plan via the plan tool as before. A task the supervisor left
+                // Paused (or otherwise suspended) is re-activated to Running — otherwise the
+                // completion gate could never seal it (Paused → Completed is not a legal
+                // transition), making the Pause decision a dead end.
+                result = ResumeIfSuspended(current);
                 await SaveTaskAsync(result);
                 _currentBySession[sessionId] = result;
                 _logger?.LogInformation("Task resolution: STEER TASK {TaskId} for session {SessionId}.", result.TaskId, sessionId);
@@ -157,7 +160,7 @@ public class TaskManager(
                 }
                 else
                 {
-                    result = result with { UpdatedAtUtc = DateTime.UtcNow };
+                    result = ResumeIfSuspended(result);
                     await SaveTaskAsync(result);
                 }
                 _currentBySession[sessionId] = result;
@@ -167,6 +170,19 @@ public class TaskManager(
 
         return result;
     }
+
+    /// <summary>
+    /// Re-activates a suspended task back to Running when the user continues or steers it.
+    /// The supervisor's Pause decision transitions the task to Paused (durable), so resuming
+    /// MUST move it back through the guarded state machine — otherwise the completion gate
+    /// cannot seal (Paused → Completed is illegal) and a paused task is a dead end. Also
+    /// covers Waiting/Blocked/AwaitingUser and terminal states reached through a continue
+    /// message (a Failed task can be resumed with a fresh attempt).
+    /// </summary>
+    private static AgentTask ResumeIfSuspended(AgentTask task)
+        => task.Status == TaskStatus.Running
+            ? task
+            : TaskStateMachine.TryTransition(task, TaskStatus.Running) ?? task with { UpdatedAtUtc = DateTime.UtcNow };
 
     /// <summary>
     /// Deterministic classification. Order matters: explicit relationship language wins

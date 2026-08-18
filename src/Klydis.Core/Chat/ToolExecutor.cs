@@ -47,7 +47,7 @@ public record ToolCallRequest(string Name, IDictionary<string, object> Arguments
 /// <summary>
 /// Represents the result of executing a tool.
 /// </summary>
-public record ToolResult(string ToolName, bool Success, string Output, string? Error, bool IsValidationError = false);
+public record ToolResult(string ToolName, bool Success, string Output, string? Error, bool IsValidationError = false, int? ExitCode = null);
 
 /// <summary>
 /// A single recorded tool invocation for a session. Kept per session so the UI's right-side
@@ -97,6 +97,39 @@ public class ToolExecutor(
     /// Null outside a turn (direct invocations, tests) → legacy session-scoped behavior.
     /// </summary>
     public string? CurrentTaskId { get; set; }
+
+    /// <summary>
+    /// The active run id for <see cref="CurrentTaskId"/>, when the task layer resolved one.
+    /// Durable activity/execution-event rows are stamped with it so tool activity is
+    /// attributable to (task, run) — previously the durable rows were written with
+    /// RunId: null, so a run's activity could not be reconstructed after a restart.
+    /// Null outside a turn.
+    /// </summary>
+    public string? CurrentRunId { get; set; }
+
+    /// <summary>
+    /// The canonical task workspace root, when established. Used as the default working
+    /// directory for run_command and as the base for tool-output offload, so autonomous
+    /// execution stays inside the project boundary instead of the process working directory.
+    /// Canonicalized (absolute path) on assignment; null = fall back to the process cwd
+    /// (legacy behavior).
+    /// </summary>
+    private string? _workspaceRoot;
+    public string? WorkspaceRoot
+    {
+        get => _workspaceRoot;
+        set
+        {
+            try
+            {
+                _workspaceRoot = string.IsNullOrWhiteSpace(value) ? null : System.IO.Path.GetFullPath(value);
+            }
+            catch
+            {
+                _workspaceRoot = null;
+            }
+        }
+    }
 
     public Klydis.Core.Tasks.TaskManager? TaskManager { get; set; } = taskManager;
     
@@ -430,7 +463,10 @@ public class ToolExecutor(
         }
 
         var tools = await GetToolDefinitionsAsync();
-        var toolDef = tools.FirstOrDefault(t => t.Name == request.Name);
+        // P1: the gate compares tool names case-insensitively; the executor must resolve the
+        // same way. A case-sensitive lookup let calls like READ_FILE pass the gate and then
+        // fail dispatch as "unknown tool".
+        var toolDef = tools.FirstOrDefault(t => t.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase));
         
         if (toolDef == null)
         {
@@ -605,7 +641,7 @@ public class ToolExecutor(
                 ActivityId: Guid.NewGuid().ToString("N"),
                 SessionId: sessionId ?? string.Empty,
                 TaskId: CurrentTaskId,
-                RunId: null,
+                RunId: CurrentRunId,
                 ToolName: request.Name,
                 ArgsJson: argsJson,
                 Success: result.Success,
@@ -658,7 +694,11 @@ public class ToolExecutor(
 
         try
         {
-            var offloadDir = Path.Combine(Directory.GetCurrentDirectory(), ".klydis", "artifacts", "tool_outputs");
+            // P0: offload output under the task workspace root when one is established, so
+            // internal tool output never escapes the project boundary and the model can reach
+            // it with workspace-scoped file tools. Falls back to the process cwd (legacy).
+            var offloadRoot = WorkspaceRoot ?? Directory.GetCurrentDirectory();
+            var offloadDir = Path.Combine(offloadRoot, ".klydis", "artifacts", "tool_outputs");
             Directory.CreateDirectory(offloadDir);
 
             var fileName = $"offload_{result.ToolName}_{Guid.NewGuid():N}.txt";
@@ -1154,7 +1194,7 @@ public class ToolExecutor(
             EventId: Guid.NewGuid().ToString("N"),
             SessionId: sessionId ?? string.Empty,
             TaskId: taskId,
-            RunId: null,
+            RunId: CurrentRunId,
             EventType: eventType,
             TimestampUtc: DateTime.UtcNow,
             ToolName: toolName,
@@ -1188,7 +1228,9 @@ public class ToolExecutor(
         var workingDir = GetStringArg(request.Arguments, "working_directory");
         if (string.IsNullOrWhiteSpace(workingDir) || !Directory.Exists(workingDir))
         {
-            workingDir = Directory.GetCurrentDirectory();
+            // P0: default to the task workspace root when established — not the process cwd,
+            // which may be anywhere (and may not even exist as a project boundary).
+            workingDir = WorkspaceRoot ?? Directory.GetCurrentDirectory();
         }
 
         int timeoutMs = 60000;
@@ -1304,7 +1346,8 @@ public class ToolExecutor(
                     : "Command executed successfully with no output.";
             }
 
-            return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null);
+            return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null,
+                ExitCode: process.ExitCode);
         }
         catch (Exception ex)
         {
@@ -2231,7 +2274,7 @@ public class ToolExecutor(
     private async Task<ToolResult> ExecuteCustomToolAsync(ToolCallRequest request, CancellationToken ct)
     {
         var customTools = await messageStore.GetCustomToolsAsync();
-        var tool = customTools.FirstOrDefault(t => t.Name == request.Name);
+        var tool = customTools.FirstOrDefault(t => t.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase));
         
         if (tool == null)
             return new ToolResult(request.Name, false, string.Empty, $"Tool '{request.Name}' not implemented.");
