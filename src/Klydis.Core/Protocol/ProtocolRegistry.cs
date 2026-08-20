@@ -1,18 +1,15 @@
+using System;
+using System.Collections.Generic;
+using Klydis.Core.Chat;
+
 namespace Klydis.Core.Protocol;
 
 /// <summary>
 /// Registry that maps a <see cref="ModelProfile"/> to the protocol implementation that knows
-/// how to talk to that model. P1: populated progressively with adapters (Qwen first). Until a
-/// profile has a registered adapter, the runtime falls back to the legacy paths — the
-/// registry is the single place that decides which path a model takes, so the fallback is
-/// explicit and observable instead of implicit.
+/// how to talk to that model.
 /// </summary>
 public static class ProtocolRegistry
 {
-    // Thread safety (review: multiple sessions / model switches / tests resolve protocols
-    // concurrently — the dictionary and the defaults flag were unsynchronized mutable
-    // statics). A single lock covers both; resolution copies the factory reference under the
-    // lock so the dictionary is never read while another thread mutates it.
     private static readonly object _sync = new();
     private static readonly Dictionary<string, Func<ModelProfile, IModelProtocol>> _factories = new(StringComparer.Ordinal);
     private static bool _defaultsRegistered;
@@ -28,10 +25,7 @@ public static class ProtocolRegistry
     }
 
     /// <summary>
-    /// Registers the built-in adapters — currently qwen-native; generic-json and the other
-    /// families land with their own adapters. Idempotent; called lazily by the runtime and
-    /// available to tests. Reset() clears everything (including the default flag) so tests
-    /// can simulate a fresh registry.
+    /// Registers the built-in adapters across all 10 model protocols.
     /// </summary>
     public static void RegisterDefaultAdapters()
     {
@@ -40,6 +34,15 @@ public static class ProtocolRegistry
             if (_defaultsRegistered) return;
             _defaultsRegistered = true;
             _factories["qwen-native"] = static profile => new QwenProtocolAdapter(profile);
+            _factories["llama3"] = static profile => new Llama3ProtocolAdapter(profile);
+            _factories["deepseek"] = static profile => new DeepSeekProtocolAdapter(profile);
+            _factories["mistral"] = static profile => new MistralProtocolAdapter(profile);
+            _factories["gemma"] = static profile => new GemmaProtocolAdapter(profile);
+            _factories["phi"] = static profile => new PhiProtocolAdapter(profile);
+            _factories["command-r"] = static profile => new CommandRProtocolAdapter(profile);
+            _factories["openai-style"] = static profile => new OpenAiProtocolAdapter(profile);
+            _factories["antml"] = static profile => new AntmlProtocolAdapter(profile);
+            _factories["generic-json"] = static profile => new GenericJsonProtocolAdapter(profile);
         }
     }
 
@@ -55,25 +58,36 @@ public static class ProtocolRegistry
 
     /// <summary>
     /// The protocol key for a profile, or null when no protocol is registered (legacy fallback).
-    /// Derived from the profile's tool protocol, so a Qwen-native profile resolves to
-    /// "qwen-native" and everything else to "generic-json".
     /// </summary>
     public static string? ResolveProtocolKey(ModelProfile profile)
         => profile.ToolProtocol switch
         {
             ToolProtocol.QwenNative => "qwen-native",
+            ToolProtocol.Llama3Native => "llama3",
+            ToolProtocol.DeepSeekNative => "deepseek",
+            ToolProtocol.MistralNative => "mistral",
+            ToolProtocol.GemmaNative => "gemma",
+            ToolProtocol.PhiNative => "phi",
+            ToolProtocol.CommandRNative => "command-r",
             ToolProtocol.Antml => "antml",
             ToolProtocol.OpenAiStyle => "openai-style",
-            // Unknown = NO protocol claimed until a capability probe proves one (the
-            // optimistic mapping to "generic-json" would make every unknown GGUF enter a
-            // JSON execution protocol it was never trained to produce).
+            ToolProtocol.GenericJson => "generic-json",
             ToolProtocol.Unknown => null,
-            _ => "generic-json"
+            _ => profile.Template switch
+            {
+                ChatTemplate.Llama3 => "llama3",
+                ChatTemplate.DeepSeek => "deepseek",
+                ChatTemplate.Mistral => "mistral",
+                ChatTemplate.Gemma => "gemma",
+                ChatTemplate.Phi => "phi",
+                ChatTemplate.CommandR => "command-r",
+                ChatTemplate.Qwen => "qwen-native",
+                _ => "generic-json"
+            }
         };
 
     /// <summary>
-    /// The protocol adapter for a profile, or null when none is registered (the runtime falls
-    /// back to legacy parsing for that model).
+    /// The protocol adapter for a profile, or null when none is registered.
     /// </summary>
     public static IModelProtocol? Resolve(ModelProfile profile)
     {

@@ -20,7 +20,9 @@ public record GgufMetadata(
     string? RawChatTemplate = null,
     string? FineTuneName = null,
     string? ModelName = null,
-    string? PreTokenizer = null
+    string? PreTokenizer = null,
+    string? EosToken = null,
+    string? BosToken = null
 );
 
 /// <summary>
@@ -175,6 +177,26 @@ public static class GgufMetadataReader
         string? modelName = rawKvs.TryGetValue("general.name", out var nameVal) && nameVal is string nStr ? nStr : null;
         string? preTokenizer = rawKvs.TryGetValue("tokenizer.ggml.pre", out var preVal) && preVal is string preStr ? preStr : null;
 
+        // Stop-token extraction (blueprint TODO 012): the tokenizer vocab is an array of
+        // strings; eos/bos ids are uint32. Resolve the ids to their token TEXT here and
+        // discard the (potentially 150K-entry) vocab array so the cached GgufMetadata stays
+        // small — callers only need the stop-token strings, never the full vocab.
+        string? eosToken = null;
+        string? bosToken = null;
+        if (rawKvs.TryGetValue("tokenizer.ggml.tokens", out var tokensVal) && tokensVal is string[] tokens)
+        {
+            if (rawKvs.TryGetValue("tokenizer.ggml.eos_token_id", out var eosVal) && eosVal is IConvertible eosConv)
+            {
+                uint eosId = Convert.ToUInt32(eosConv);
+                if (eosId < (uint)tokens.Length) eosToken = tokens[eosId];
+            }
+            if (rawKvs.TryGetValue("tokenizer.ggml.bos_token_id", out var bosVal) && bosVal is IConvertible bosConv)
+            {
+                uint bosId = Convert.ToUInt32(bosConv);
+                if (bosId < (uint)tokens.Length) bosToken = tokens[bosId];
+            }
+        }
+
         long? blockCount = GetLongValue(rawKvs, architecture, "block_count");
         long? contextLength = GetLongValue(rawKvs, architecture, "context_length");
         long? embeddingLength = GetLongValue(rawKvs, architecture, "embedding_length");
@@ -194,7 +216,9 @@ public static class GgufMetadataReader
             RawChatTemplate: rawChatTemplate,
             FineTuneName: fineTuneName,
             ModelName: modelName,
-            PreTokenizer: preTokenizer
+            PreTokenizer: preTokenizer,
+            EosToken: eosToken,
+            BosToken: bosToken
         );
     }
 
@@ -253,7 +277,21 @@ public static class GgufMetadataReader
     {
         var itemType = (GgufValueType)reader.ReadUInt32();
         ulong count = reader.ReadUInt64();
-        
+
+        // String arrays (e.g. tokenizer.ggml.tokens) are materialized so callers can map token
+        // ids to their text (eos/bos stop tokens). All other array types are seeked past exactly
+        // as before — materializing the large typed tensor-metadata arrays GGUF files carry would
+        // balloon memory for no benefit.
+        if (itemType == GgufValueType.String)
+        {
+            var items = new string[count];
+            for (ulong i = 0; i < count; i++)
+            {
+                items[i] = ReadGgufString(reader);
+            }
+            return items;
+        }
+
         long itemSize = GetFixedItemSize(itemType);
         if (itemSize > 0)
         {
@@ -263,12 +301,7 @@ public static class GgufMetadataReader
         {
             for (ulong i = 0; i < count; i++)
             {
-                if (itemType == GgufValueType.String)
-                {
-                    ulong len = reader.ReadUInt64();
-                    reader.BaseStream.Seek((long)len, SeekOrigin.Current);
-                }
-                else if (itemType == GgufValueType.Array)
+                if (itemType == GgufValueType.Array)
                 {
                     ReadGgufArray(reader);
                 }

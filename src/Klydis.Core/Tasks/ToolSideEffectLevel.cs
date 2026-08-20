@@ -44,7 +44,8 @@ public static class ToolSideEffectClassifier
 
     private static readonly HashSet<string> IdempotentTools = new(StringComparer.OrdinalIgnoreCase)
     {
-        "write_file", "edit_file", "str_replace", "store_memory", "index_folder_rag",
+        "write_file", "edit_file", "replace_lines", "apply_patch", "structural_replace",
+        "str_replace", "store_memory", "index_folder_rag",
         "activate_skill", "learn_skill", "learn_lesson", "task_progress", "plan",
         "incorporate_queued_message", "summarize_context"
     };
@@ -54,10 +55,29 @@ public static class ToolSideEffectClassifier
         "delete_skill", "delete_custom_tool", "delete_file", "remove_file", "clear_rag"
     };
 
-    /// <summary>Classifies a tool by its registered name. Conservative for unknown names.</summary>
-    public static ToolSideEffectLevel Classify(string? toolName)
+    /// <summary>Classifies a tool by its registered name and optional arguments. Conservative for unknown names.</summary>
+    public static ToolSideEffectLevel Classify(string? toolName, IDictionary<string, object>? args = null)
     {
         if (string.IsNullOrWhiteSpace(toolName)) return ToolSideEffectLevel.ExternalSideEffect;
+
+        if (string.Equals(toolName, "manage_process", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args != null && (args.TryGetValue("action", out var actionObj) || args.TryGetValue("act", out actionObj)))
+            {
+                string? action = actionObj?.ToString();
+                if (string.Equals(action, "status", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(action, "list", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ToolSideEffectLevel.ReadOnly;
+                }
+                if (string.Equals(action, "kill", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ToolSideEffectLevel.Destructive;
+                }
+            }
+            return ToolSideEffectLevel.ExternalSideEffect;
+        }
+
         if (ReadOnlyTools.Contains(toolName)) return ToolSideEffectLevel.ReadOnly;
         if (IdempotentTools.Contains(toolName)) return ToolSideEffectLevel.Idempotent;
         if (DestructiveTools.Contains(toolName)) return ToolSideEffectLevel.Destructive;

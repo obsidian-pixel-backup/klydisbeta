@@ -28,6 +28,8 @@ public enum EvidenceKind
     CommandFailed,
     ScreenshotCaptured,
     RequirementSatisfied,
+    AssertionPassed,
+    AssertionFailed,
 
     /// <summary>An artifact was CREATED — proves existence, NOT correctness (never verification-capable).</summary>
     ArtifactCreated,

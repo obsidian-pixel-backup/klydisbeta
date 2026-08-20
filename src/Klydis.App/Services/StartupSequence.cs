@@ -68,7 +68,7 @@ public sealed class StartupSequence
     /// startup). Runs fully off the UI thread; a first-run download can take minutes while the
     /// splash keeps the user informed. Restarting to activate an updated engine is handled here.
     /// </summary>
-    private Task PrepareNativeEngineAsync()
+    private async Task PrepareNativeEngineAsync()
     {
         // Watchdog: the native-engine sync/update step must NEVER hang the splash. A slow
         // network or a multi-hundred-MB llama.cpp download used to leave the user staring at
@@ -76,7 +76,7 @@ public sealed class StartupSequence
         // finish in time, cancel it and start with the current engine — the daily-throttled
         // update check simply retries on a later launch.
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
-        return Task.Run(async () =>
+        await Task.Run(async () =>
         {
             // The status callback fires on the thread pool; marshal it onto the splash (UI thread).
             void SetStatus(string text) => _splash.Dispatcher.Invoke(() => _splash.SetStatus(text));
@@ -115,7 +115,7 @@ public sealed class StartupSequence
                 _logger.LogWarning(ex, "Native engine sync/update failed; continuing with the bundled engine.");
                 try { NativeEngineManager.EnsureNativeLibraryConfigured(); } catch { }
             }
-        });
+        }).ConfigureAwait(false);
     }
 
     private async Task ScanModelLibraryAsync()

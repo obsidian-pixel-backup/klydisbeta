@@ -491,7 +491,7 @@ public class PromptTemplateEngine
         return template switch
         {
             ChatTemplate.ChatML or ChatTemplate.Qwen or ChatTemplate.DeepSeek => new[] { "<|im_end|>", "<|im_start|>" },
-            ChatTemplate.Llama3 => new[] { "<|eot_id|>", "<|end_of_text|>" },
+            ChatTemplate.Llama3 => new[] { "<|eot_id|>", "<|end_of_text|>", "</s>" },
             ChatTemplate.Llama2 => new[] { "[/INST]", "</s>" },
             ChatTemplate.Mistral => new[] { "[/INST]", "</s>" },
             ChatTemplate.Gemma => new[] { "<end_of_turn>", "<eos>" },

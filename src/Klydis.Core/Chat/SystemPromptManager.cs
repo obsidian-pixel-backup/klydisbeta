@@ -418,17 +418,11 @@ public class SystemPromptManager
             sb.AppendLine();
             sb.AppendLine("### AUTONOMOUS GOAL EXECUTION MODE DIRECTIVES");
             sb.AppendLine("- You are operating in AUTONOMOUS GOAL MODE. The user has assigned you a goal to achieve.");
-            sb.AppendLine("- You MUST work continuously and autonomously across turns until the goal is fully accomplished.");
-            sb.AppendLine("- Do NOT ask the user for permission or confirmation between turns — execute tools to investigate, fix, test, or build.");
-            sb.AppendLine("- The runtime maintains the plan and progress from your tool activity; do NOT maintain a parallel todo list or report progress yourself.");
-            sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary — the runtime gate rejects premature claims.");
-            sb.AppendLine("- If an approach fails, try an alternative tool or parameter strategy. Never stop until the goal is completed or unresolvable.");
-            sb.AppendLine();
-            sb.AppendLine("### FACT GROUNDING (KNOWN vs ASSUMED vs PROPOSED)");
-            sb.AppendLine("- Put everything you produce into one of three buckets: KNOWN (stated by the user or verified through tools), ASSUMED (working assumptions), PROPOSED (creative suggestions / optional directions).");
-            sb.AppendLine("- NEVER present an assumption or proposal as a user-provided fact. Do not invent company facts, product lines, customer segments, capabilities, existing assets, brand claims, or existing technology.");
-            sb.AppendLine("- When the user gave only a brief description (e.g. \"a landing page for my laser engraving company\"), treat company name, target audience, products, services, brand identity, location, and assets as UNKNOWN. Name what is unknown instead of inventing it, or verify it with a tool.");
-            sb.AppendLine("- CREATIVE LEAD: when the user asks you to take a creative lead (\"TAKE A CREATIVE LEAD\", \"don't expect details from me\", \"your call\"), UNKNOWN details do NOT block execution — propose a working direction clearly labeled PROPOSED (working name, copy, palette, layout) instead of asking. Never promote a proposal to a fact or present it as user-provided.");
+            sb.AppendLine("- You MUST work continuously and autonomously across steps until the goal is fully accomplished.");
+            sb.AppendLine("- Reason for yourself, make sound technical and design choices, and proactively execute tools (write_file, edit_file, read_file, run_command) to build, test, and verify deliverables.");
+            sb.AppendLine("- Do NOT stall, ask permission, or endlessly restate requirements. When specifics (e.g. brand name, copy, palette) are not given, make tasteful, modern design choices and build the complete working deliverable immediately.");
+            sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary.");
+            sb.AppendLine("- If an approach fails, adapt: diagnose the error, try an alternative strategy, and keep going until the goal is achieved.");
         }
 
         if (!string.IsNullOrWhiteSpace(worldStateHeader))
@@ -555,15 +549,9 @@ public class SystemPromptManager
         {
             sb.AppendLine();
             sb.AppendLine("### AUTONOMOUS GOAL EXECUTION MODE");
-            sb.AppendLine("- You are operating in goal mode: execute the current step, use tools to gather what you need, and drive the task to completion. Keep the user informed of progress.");
-            sb.AppendLine("- The runtime maintains the plan and progress; you do not maintain a parallel todo list or report progress yourself.");
-            sb.AppendLine("- Verify the deliverable exists and works before calling 'task_complete'.");
-            sb.AppendLine();
-            sb.AppendLine("### FACT GROUNDING (KNOWN vs ASSUMED vs PROPOSED)");
-            sb.AppendLine("- KNOWN = stated by the user or verified by a tool. ASSUMED = working assumptions. PROPOSED = creative suggestions / optional directions.");
-            sb.AppendLine("- Never present assumptions or proposals as user-provided facts. Do not invent company facts, product lines, customer segments, capabilities, existing assets, or brand claims.");
-            sb.AppendLine("- If the user gave only a brief description, treat company name, audience, products, brand identity, and assets as UNKNOWN — say what is unknown instead of inventing it, or verify it with a tool.");
-            sb.AppendLine("- CREATIVE LEAD: when the user asks you to take a creative lead (\"TAKE A CREATIVE LEAD\", \"don't expect details from me\", \"your call\"), UNKNOWN details do NOT block execution — propose a working direction clearly labeled PROPOSED (working name, copy, palette, layout) instead of asking. Never promote a proposal to a fact or present it as user-provided.");
+            sb.AppendLine("- You are operating in goal mode: reason independently, execute tools decisively, and drive the task to complete, functional delivery.");
+            sb.AppendLine("- Proactively create files (write_file, edit_file), test and verify deliverables, and call 'task_complete' when the goal is achieved.");
+            sb.AppendLine("- Do not stall, ask permission, or endlessly restate requirements. If details are not specified, make tasteful, professional design choices and execute immediately.");
         }
 
         sb.AppendLine();

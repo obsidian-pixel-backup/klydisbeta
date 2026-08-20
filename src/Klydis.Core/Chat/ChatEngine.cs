@@ -221,6 +221,11 @@ public interface IInferenceEngine
     /// </summary>
     int LastGenerationPrefixLength { get; }
 
+    /// <summary>
+    /// Structured result of the most recent generation, populated at generation completion.
+    /// </summary>
+    GenerationResult? LastGenerationResult { get; }
+
     int GetTokenCount(string text);
     Task CancelActiveGenerationAsync();
     Task UnloadModelAsync(CancellationToken ct = default);
@@ -397,6 +402,9 @@ public class ChatEngine(
                         rawChatTemplate: inferenceEngine.RawChatTemplate,
                         declaredTemplate: null,
                         explicitOverride: null);
+                    // GGUF-derived stop tokens (eos/bos token text) merged with the
+                    // template-family defaults as a safety net (blueprint TODO 012).
+                    profile = profile with { StopTokens = ResolveProfileStopTokens(inferenceEngine.CurrentModelPath, profile.Template) };
                     _currentModelProfile = profile;
                     var protocolKey = Klydis.Core.Protocol.ProtocolRegistry.ResolveProtocolKey(profile) ?? "legacy-fallback";
                     logger.LogInformation(
@@ -464,6 +472,41 @@ public class ChatEngine(
                 }
             }
             return _currentProtocolAdapter;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the per-model stop-token list (blueprint TODO 012): the GGUF tokenizer's
+    /// eos/bos token text when the file carries it, merged with the template-family defaults
+    /// (kept as a safety net — some templates end generation on a structural token the model's
+    /// own eos/bos do not cover). Falls back to the family defaults alone when the model file
+    /// is unavailable or unreadable. The GGUF parse is cached, so this is cheap after the
+    /// first call per model.
+    /// </summary>
+    private static IReadOnlyList<string> ResolveProfileStopTokens(string? modelPath, Klydis.Core.Chat.ChatTemplate template)
+    {
+        var defaults = new PromptTemplateEngine().GetStopTokens(template);
+        if (string.IsNullOrWhiteSpace(modelPath)) return defaults;
+
+        try
+        {
+            var meta = Klydis.Core.Models.GgufMetadataReader.ParseCached(modelPath);
+            if (meta == null) return defaults;
+
+            var tokens = new List<string>(defaults.Length + 2);
+            if (!string.IsNullOrWhiteSpace(meta.EosToken)) tokens.Add(meta.EosToken);
+            if (!string.IsNullOrWhiteSpace(meta.BosToken)) tokens.Add(meta.BosToken);
+            foreach (var d in defaults)
+            {
+                if (!tokens.Contains(d)) tokens.Add(d);
+            }
+            return tokens;
+        }
+        catch (Exception ex)
+        {
+            // A metadata read failure must never break model loading — fall back to defaults.
+            System.Diagnostics.Debug.WriteLine($"Failed to read GGUF stop tokens: {ex.Message}");
+            return defaults;
         }
     }
 
@@ -583,9 +626,17 @@ public class ChatEngine(
             string? owner = toolExecutor.GetSessionPlanOwner(sessionId);
             if (!string.IsNullOrEmpty(owner) && owner != userMessage)
             {
-                logger.LogInformation(
-                    "Replacing obsolete plan from a previous task with a fresh harness-seeded plan for the current message.");
-                await toolExecutor.SeedSessionPlanAsync(sessionId, steps);
+                bool hasUnfinishedItems = existing.Any(e => !e.Done);
+                if (!hasUnfinishedItems)
+                {
+                    logger.LogInformation(
+                        "Replacing completed plan from a previous task with a fresh harness-seeded plan for the current message.");
+                    await toolExecutor.SeedSessionPlanAsync(sessionId, steps);
+                }
+                else
+                {
+                    logger.LogInformation("Continuing active plan with updated user steering: '{Message}'.", userMessage);
+                }
             }
         }
         catch (Exception ex)
@@ -1205,7 +1256,13 @@ public class ChatEngine(
                                inferenceEngine.CurrentModelPath,
                                inferenceEngine.RawChatTemplate,
                                inferenceEngine.FineTuneName);
-        var nativeStopTokens = promptEngine.GetStopTokens(templateType);
+        // Per-model stop tokens (blueprint TODO 012): when the model profile carries GGUF-derived
+        // eos/bos token text, prefer it — the family defaults remain inside the merged list as a
+        // safety net, so this can only ADD correct stop behavior, never remove it.
+        var profileStopTokens = CurrentModelProfile?.StopTokens;
+        var nativeStopTokens = (profileStopTokens != null && profileStopTokens.Count > 0)
+            ? profileStopTokens
+            : promptEngine.GetStopTokens(templateType);
         var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
         var tools = toolsDisabled ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
@@ -1213,16 +1270,19 @@ public class ChatEngine(
         // model actually sees is sliced per-iteration to the current step's allowed set.
         var fullToolsSchema = toolsDisabled ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
 
-        // Qwen3.5/Qwen3.6 thinking models (qwen35 / qwen35moe architectures): their embedded chat
-        // template expects (a) tools presented as an OpenAI-style JSON schema inside a <tools>
-        // block with the native <tool_call><function=...><parameter=...> calling instructions, and
-        // (b) the generation prompt to END with an OPEN <think> block (the model continues it,
-        // then closes it — without the opener it degenerates into spamming <think>). Applying
-        // both makes these models think and call tools correctly.
-        bool isQwenThinkingModel = templateType == ChatTemplate.Qwen &&
-                                   InferenceEngine.IsQwenThinkingArchitecture(inferenceEngine.Architecture) &&
-                                   !string.IsNullOrWhiteSpace(inferenceEngine.RawChatTemplate) &&
-                                   inferenceEngine.RawChatTemplate.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase);
+        // Qwen3.5/Qwen3.6 thinking models: resolved AUTHORITATIVELY through the model profile's
+        // ReasoningProtocol (set by ModelProfileFactory from template + architecture). The profile
+        // owns the decision of whether native thinking is supported, so fine-tuned, converted, or
+        // partially compatible models whose template contains <tool_call> but do NOT support native
+        // thinking are not incorrectly activated. Falls back to the legacy heuristic only when no
+        // profile is available (model not loaded or profile construction failed).
+        var modelProfile = CurrentModelProfile;
+        bool isQwenThinkingModel = modelProfile != null
+            ? modelProfile.Reasoning == Protocol.ReasoningProtocol.NativeThinkBlock
+            : templateType == ChatTemplate.Qwen &&
+              InferenceEngine.IsQwenThinkingArchitecture(inferenceEngine.Architecture) &&
+              !string.IsNullOrWhiteSpace(inferenceEngine.RawChatTemplate) &&
+              inferenceEngine.RawChatTemplate.Contains("<tool_call>", StringComparison.OrdinalIgnoreCase);
 
         // ===== Adaptive learning loop =====
         // Pull the model's accumulated lessons (persisted across sessions) and decide whether it
@@ -1268,7 +1328,7 @@ public class ChatEngine(
         }
 
         int iterationCount = 0;
-        const int MAX_ITERATIONS = 100;
+        int maxIterations = (isGoalMode || mode == InteractionMode.Autonomous) ? 1000 : 100;
 
         // P1.12/review §3: the typed-step mirror is persisted only when the plan actually
         // changed (signature = text + done flags), so per-iteration step persistence never
@@ -1422,7 +1482,7 @@ public class ChatEngine(
             }
         }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
 
-        while (iterationCount < MAX_ITERATIONS)
+        while (iterationCount < maxIterations)
         {
             iterationCount++;
             lastTurnActivityUtc = DateTime.UtcNow;
@@ -1463,8 +1523,6 @@ public class ChatEngine(
             string toolsSchema = rescueTriggered ? string.Empty : fullToolsSchema;
             if (!toolsDisabled && !rescueTriggered && currentStepForTurn?.AllowedTools != null && tools.Count > 0)
             {
-                // A non-null current step means open plan items remain — completion is not
-                // yet eligible, so hide task_complete from the model surface.
                 var allowedForStep = currentStepForTurn.AllowedTools
                     .Where(n => !n.Equals("task_complete", StringComparison.OrdinalIgnoreCase));
                 var sliced = new List<ToolDefinition>(tools.Count);
@@ -1862,42 +1920,22 @@ public class ChatEngine(
             string nextStepText = currentObligationForTurn?.Title
                 ?? "no open plan step — verify the result and call 'task_complete'";
 
-            // The contract is OBLIGATION-AWARE: a Reason step (capture requirements / creative
-            // direction) has NO workspace tools — demanding "a tool action now" on such a step
-            // would force the model into a tool call the gate then rejects (the Qwen export's
-            // failure: it invented web-research tools for a requirements step). The required
-            // output follows the step's expected action kind instead of assuming tool_call.
-            // Summary/UserInput steps are text-deliverable too; every other kind demands ONE
-            // executable action.
             bool contractProducesText = currentObligationForTurn != null &&
                 currentObligationForTurn.ExpectedActionKind is
-                    Klydis.Core.Tasks.StepActionKind.Reason or
                     Klydis.Core.Tasks.StepActionKind.Summary or
                     Klydis.Core.Tasks.StepActionKind.UserInput;
             string requiredOutput = contractProducesText
-                ? "REQUIRED OUTPUT THIS TURN: produce the required design direction / reasoning / summary as TEXT. No workspace tool is permitted for this step — the runtime will reject any workspace tool call.\n" +
-                  "OUTPUT CHANNEL: the deliverable MUST appear as VISIBLE reply text — reasoning produced only inside a think block does not count and is not delivered to the user.\n"
-                : "REQUIRED OUTPUT THIS TURN: perform exactly ONE tool action from the current step's allowed set — inspect, modify, or verify. Text alone is NOT accepted as task progress.\n";
-            // The DELIVERABLES line must not contradict the required output: telling a
-            // text-deliverable step to "write designs to a file with write_file" while the
-            // gate forbids write_file on that step is a second contradiction that stalls the
-            // model (observed qwen 3.6 loop).
-            string deliverablesLine = contractProducesText
-                ? "DELIVERABLES: this step's deliverable is TEXT (a design direction / requirements / summary) — produce it in the reply. Code and pages come later, in steps that allow 'write_file'.\n"
-                : "DELIVERABLES: code, pages, reports, and designs belong in FILES — write them with 'write_file' and let the user view them in the PREVIEW tab. Do NOT dump large code blocks or markup into the chat reply.\n";
-            string creativeLeadLine = IsCreativeLeadRequest(currentUserMessage)
-                ? "CREATIVE LEAD: the user asked you to take a creative lead — propose a working direction (name, copy, palette, layout) clearly labeled PROPOSED instead of asking for details. Unknowns never block execution.\n"
-                : "";
+                ? "REQUIRED OUTPUT THIS TURN: produce the required summary or response as visible text.\n"
+                : "REQUIRED OUTPUT THIS TURN: perform the next action for the current step — inspect, write files, run commands, or verify. Use tools decisively to advance the task.\n";
+            string deliverablesLine = "DELIVERABLES: code, pages, styles, scripts, and designs belong in FILES — write them with 'write_file' so the user can preview them in the PREVIEW tab.\n";
 
             sysPrompt = sysPrompt.TrimEnd() + "\n\n### CURRENT ACTION CONTRACT (AUTONOMOUS MODE — READ IMMEDIATELY BEFORE RESPONDING)\n" +
                 "CURRENT STEP: " + nextStepText + "\n" +
                 requiredOutput +
-                "RUNTIME OWNS: the plan, step transitions, tool execution, verification and completion. You do NOT plan the steps, create a todo list, advance steps yourself, or narrate the runtime — you produce ONE valid action for the current step.\n" +
-                creativeLeadLine +
-                "DO NOT: greet the user, ask permission, ask what to do next, or describe what you would do. Execute the next action.\n" +
+                "AUTONOMY: You own execution for this step. Reason for yourself, make sound creative and technical decisions, and use tools proactively.\n" +
+                "DO NOT: greet the user, ask permission, stall, restate requirements endlessly, or describe what you would do. Execute the next action.\n" +
                 deliverablesLine +
-                "FACTS: only what the user stated or a tool verified is KNOWN. Never present assumptions or creative suggestions as user-provided facts — company name, products, audience, and existing assets are UNKNOWN until stated or verified.\n" +
-                "If the goal is finished and verified, call 'task_complete'. If the plan is wrong, revise it with 'plan' (action=create).";
+                "If the goal is finished and verified, call 'task_complete'. If the plan needs adjustments, revise it with 'plan' (action=create).";
         }
 
         var sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
@@ -1907,6 +1945,28 @@ public class ChatEngine(
         int sysPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(sysOnlyPrompt) : contextOrchestrator.EstimateTokens(sysOnlyPrompt);
         // Feed the EXACT system-prompt size to the idle context gauge (see EstimateCurrentContextTokensAsync).
         Interlocked.Exchange(ref _lastSystemPromptTokens, sysPromptTokens);
+
+        // P0 audit — FINAL SYSTEM-PROMPT BUDGET RE-CHECK: the Qwen-prelude budget check above
+        // runs BEFORE notes / artifacts / task contract / plan / continuation contract / action
+        // contract are appended. Those optional sections can push the final system prompt past
+        // the safe budget even when the prelude alone fit. History trimming cannot fix that —
+        // the strict truncation loop below only evicts history and must keep the current user
+        // message. When the system prompt alone exceeds maxTotalPromptTokens - minUserBudget,
+        // fall back to the compact system prompt (drops the optional ceremony) so the
+        // conversation-budget floor is preserved and the final prompt is guaranteed to fit.
+        // Skipped in rescue mode (its prompt is deliberately small and must not be replaced)
+        // and conversation mode (no optional sections are appended there).
+        if (!rescueTriggered && !toolsDisabled && sysPromptTokens > maxTotalPromptTokens - minUserBudget)
+        {
+            logger.LogWarning("Final system prompt ({SysTokens} tokens) exceeds the prompt budget ({Budget}) after optional sections were appended; falling back to the compact system prompt so the conversation budget is preserved.",
+                sysPromptTokens, maxTotalPromptTokens - minUserBudget);
+            NoteLesson("sysprompt_over_budget", $"Final system prompt ({sysPromptTokens} tokens) exceeded the budget after optional sections; fell back to the compact prompt.");
+            sysPrompt = sysPromptManager.BuildCompactSystemPrompt(toolsSchema, worldStateHeader, queueNotice, ragNotice, skillHeader, lessonsSection, personalityMode: SelectedPersonality, isGoalMode: isGoalMode, interactionMode: mode);
+            sysPromptMsg = new ChatMessage(ChatRole.System, sysPrompt);
+            sysOnlyPrompt = promptEngine.ApplyTemplate(new List<ChatMessage> { sysPromptMsg }, templateType, qwenThinking: isQwenThinkingModel);
+            sysPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(sysOnlyPrompt) : contextOrchestrator.EstimateTokens(sysOnlyPrompt);
+            Interlocked.Exchange(ref _lastSystemPromptTokens, sysPromptTokens);
+        }
 
         // Target user budget for conversation history after accounting for the system prompt.
         // Never claims more than the context can actually hold — the old Math.Max(4096, ...)
@@ -2178,6 +2238,33 @@ public class ChatEngine(
         // OPEN <think> block, so the parser starts INSIDE that block.
         var streamParser = new ChatStreamParser(isQwenThinkingModel);
 
+        // Per-model/per-step thinking budget (P0 audit): the model profile's MaxStepThinkingTokens
+        // is the per-step cap for THIS model (4096 for native-thinking models). Ordinary text /
+        // Reason steps keep the profile default; complex planning and artifact-implementation
+        // steps get a larger cap. The inference engine enforces the cap only while the model is
+        // inside a thinking block (see InferenceEngine.MaxThinkingTokensPerGenerationOverride).
+        // Null means the engine's context-derived default applies (non-thinking models or no
+        // profile). Set before every generation so a step change this iteration is reflected.
+        int? stepThinkingCap = modelProfile?.MaxStepThinkingTokens;
+        if (stepThinkingCap is > 0 && currentStepForTurn != null)
+        {
+            stepThinkingCap = currentStepForTurn.ExpectedActionKind switch
+            {
+                Klydis.Core.Tasks.StepActionKind.Plan
+                    or Klydis.Core.Tasks.StepActionKind.FileMutation
+                    or Klydis.Core.Tasks.StepActionKind.CommandExecution
+                    or Klydis.Core.Tasks.StepActionKind.TerminalInteraction
+                    or Klydis.Core.Tasks.StepActionKind.Verification => Math.Max(stepThinkingCap.Value, 8192),
+                _ => stepThinkingCap
+            };
+        }
+        // The override lives on the concrete engine (not the interface) so fakes and tests stay
+        // stable; the real engine enforces the cap while the model is inside a think block.
+        if (inferenceEngine is InferenceEngine realEngine)
+        {
+            realEngine.MaxThinkingTokensPerGenerationOverride = stepThinkingCap is > 0 ? stepThinkingCap : null;
+        }
+
         // Stream tokens
         bool generationStalled = false;
         var tokenStream = inferenceEngine.StreamTokensAsync(prompt, stopTokens, sysPromptTokens, stallCts.Token);
@@ -2339,6 +2426,34 @@ public class ChatEngine(
                 : cleanHistoryResponse;
 
             var assistantMsgObj = new ChatMessage(ChatRole.Assistant, assistantContent);
+
+            // STORAGE GATE: decide whether this assistant response should be persisted.
+            // A thinking-only response (raw text exists but ALL of it was inside think blocks,
+            // producing zero visible tokens and no tool-call tags) must NOT be stored:
+            //   - it inserts an unclosed <think> block into conversation history
+            //   - the next retry prompt inherits that broken block
+            //   - the model repeats the same thinking-only behavior
+            //   - context grows on every retry with useless reasoning
+            bool hasToolCallMarkers = fullResponse.Contains("<tool_call", StringComparison.OrdinalIgnoreCase) ||
+                                     fullResponse.Contains("<|tool_call", StringComparison.OrdinalIgnoreCase) ||
+                                     fullResponse.Contains("<function=", StringComparison.OrdinalIgnoreCase) ||
+                                     fullResponse.Contains("function=", StringComparison.OrdinalIgnoreCase);
+
+            bool isThinkingOnlyResponse = !string.IsNullOrWhiteSpace(fullResponse)
+                && visibleTextBuilder.Length == 0
+                && !hasToolCallMarkers
+                && (
+                    // Qwen thinking model that never closed its think block
+                    (isQwenThinkingModel && !fullResponse.Contains("</think>", StringComparison.OrdinalIgnoreCase)
+                                         && !fullResponse.Contains("<|/think|>", StringComparison.OrdinalIgnoreCase)
+                                         && !fullResponse.Contains("</thought>", StringComparison.OrdinalIgnoreCase))
+                    // Or stream parser tracked that the stream remained inside think mode
+                    || streamParser.IsUnclosedThink
+                    || (streamParser.HasThinkingTokens && !streamParser.HasVisibleTokens)
+                    // Or clean history text (stripped of think tags) is completely empty
+                    || string.IsNullOrWhiteSpace(cleanHistoryResponse)
+                );
+
             if (string.IsNullOrWhiteSpace(fullResponse))
             {
                 // The entire output was degenerate/empty. Storing an empty assistant message
@@ -2346,6 +2461,19 @@ public class ChatEngine(
                 // later turns — it is skipped. The self-correction / rescue path below carries
                 // the turn forward. (The old guard only skipped when loopTruncated was set, so
                 // plain empty generations leaked empty assistant rows into the session.)
+            }
+            else if (isThinkingOnlyResponse)
+            {
+                // The model produced raw tokens but ALL of them were classified as thinking
+                // (no visible text, no tool-call tags in the cleaned response). Storing this
+                // would insert an unclosed <think> block into history, poisoning every
+                // subsequent prompt and creating a self-reinforcing retry failure. Skip
+                // storage entirely — the self-correction / rescue path below will handle
+                // recovery. The raw thinking content is logged for diagnostics only.
+                logger.LogWarning(
+                    "Thinking-only response detected (raw length {RawLen}, visible length 0, clean length {CleanLen}). " +
+                    "Skipping history persistence to prevent context poisoning from unclosed think block.",
+                    fullResponse.Length, cleanHistoryResponse?.Length ?? 0);
             }
             else
             {
@@ -2953,7 +3081,31 @@ public class ChatEngine(
                     }
 
                     var toolOutput = string.IsNullOrWhiteSpace(result.Output) ? (result.Error ?? "Empty result") : result.Output;
-                    
+
+                    // Blueprint TODO 092: structured compiler/test diagnostics. When a build/test
+                    // command produced error/warning output, append a compact structured block
+                    // (file:line:col + code + message) so the model acts on precise locations
+                    // instead of parsing raw log walls. Gated to run_command and skipped for
+                    // offloaded ("context budget") directives; clean output parses to nothing and
+                    // is untouched.
+                    if (req.Name == "run_command" &&
+                        !toolOutput.StartsWith("[Tool Output Exceeded Context Budget]", StringComparison.Ordinal))
+                    {
+                        try
+                        {
+                            var diags = Klydis.Core.Diagnostics.DiagnosticsParser.Parse(toolOutput);
+                            string structured = Klydis.Core.Diagnostics.DiagnosticsParser.FormatForContext(diags);
+                            if (!string.IsNullOrWhiteSpace(structured))
+                            {
+                                toolOutput += "\n\n" + structured;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogDebug(ex, "Failed to parse compiler diagnostics from tool output.");
+                        }
+                    }
+
                     // P0.7 queue isolation: after a tool call, only messages belonging to the
                     // CURRENT task may be surfaced to the model. The session-wide read here
                     // silently reintroduced cross-task contamination — queued messages from an
@@ -3450,7 +3602,7 @@ public class ChatEngine(
                 // GenerationTruncated / ModelEndedEarly). The raw truncation flags above are
                 // facts that fed the supervisor's decision; they no longer decide. Legacy
                 // sessions (no directive) keep the raw-flag behavior.
-                else if ((isTruncatedMidGeneration || hitOutputCap || cutShortMidStream) && continuationAllowed && iterationCount < MAX_ITERATIONS && continuationsThisTurn < MaxContinuationsPerTurn && eosDeclinesThisTurn < MaxConsecutiveEosDeclines &&
+                else if ((isTruncatedMidGeneration || hitOutputCap || cutShortMidStream) && continuationAllowed && iterationCount < maxIterations && continuationsThisTurn < MaxContinuationsPerTurn && eosDeclinesThisTurn < MaxConsecutiveEosDeclines &&
                     (dispatchDirective == null || dispatchDirective.IncludeContinuationInstruction))
                 {
                     continuationsThisTurn++;
@@ -3492,8 +3644,14 @@ public class ChatEngine(
                     // path — previously it fell through the gated branches to a silent break
                     // after burning up to 16 continuation re-prefills.
                     selfCorrectionsThisTurn++;
-                    NoteLesson("empty_response", $"Model produced an empty visible response; empty-response self-correction injected (correction {selfCorrectionsThisTurn}).");
-                    logger.LogWarning("Model produced an empty visible response. Injecting empty-response self-correction (correction {Count} of {Max} this turn).",
+                    // Distinguish thinking-only from transport-empty for diagnostics:
+                    // a thinking-only response has raw content that was all inside think blocks;
+                    // a transport-empty response produced zero tokens entirely.
+                    bool wasThinkingOnly = !string.IsNullOrWhiteSpace(fullResponse) && visibleTextBuilder.Length == 0;
+                    string emptyReason = wasThinkingOnly ? "thinking_only" : "empty_response";
+                    NoteLesson(emptyReason, $"Model produced {(wasThinkingOnly ? "internal reasoning but no visible answer" : "an empty visible response")}; self-correction injected (correction {selfCorrectionsThisTurn}).");
+                    logger.LogWarning("Model produced {Reason}. Injecting self-correction (correction {Count} of {Max} this turn).",
+                        wasThinkingOnly ? "internal reasoning but no visible answer" : "an empty visible response",
                         selfCorrectionsThisTurn, MaxSelfCorrectionsPerTurn);
                     // Step-aware correction (P1.8): an empty generation (typically a qwen
                     // thinking model that only reasoned and never closed its think block) needs
@@ -3512,7 +3670,10 @@ public class ChatEngine(
                     var emptyMsgObj = new ChatMessage(ChatRole.Runtime, emptyCorrection);
                     AddToSessionHistory(activeHistory, emptyMsgObj, generatingSessionId);
                     // Engine-internal correction: in-memory only (see IsEngineInjectedMessage).
-                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model produced an empty response — self-correcting…");
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error,
+                        wasThinkingOnly
+                            ? "⚠ Model produced internal reasoning but no visible answer — self-correcting…"
+                            : "⚠ Model produced an empty response — self-correcting…");
                 }
                 else if (visibleEmpty && !rescueTriggered)
                 {
@@ -3526,8 +3687,8 @@ public class ChatEngine(
                     inferenceEngine.EnableToolGrammarConstrainedDecoding = false;
                     sysPromptMsg = rescueSysMsg;
                     logger.LogWarning("Empty-response corrections exhausted ({Max}). Switching to rescue mode: plain direct answer without tools or thinking blocks.", MaxSelfCorrectionsPerTurn);
-                    NoteLesson("rescue_mode_empty", "Rescue mode triggered after repeated empty responses; plain direct answer forced.");
-                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model keeps producing empty responses — one final attempt with a plain direct answer…");
+                    NoteLesson("rescue_mode_empty", "Rescue mode triggered after repeated failures to produce visible output; plain direct answer forced.");
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model keeps failing to produce a visible answer — one final attempt with a plain direct answer…");
                     continue;
                 }
                 else
@@ -3564,40 +3725,58 @@ public class ChatEngine(
                                 repairStepText = "finish and verify the remaining work";
                             }
                         }
-                        // The repair directive is STEP-AWARE (P1.8): it re-states the current
-                        // step's obligation — the allowed tools or the required text deliverable
-                        // — instead of demanding a generic tool call the step's gate would
-                        // reject. The old hardcoded message told every step "write files with
-                        // 'write_file'" and "produce exactly ONE of tool_call/plan/task_complete"
-                        // — on a Reason step (no workspace tools) that demand is unsatisfiable
-                        // and stalls the model into empty output (the observed qwen 3.6 loop).
                         var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response produced only text — no tool action, no file change, no state change. In autonomous task mode, text is not progress; only executed actions and changed task state count.\n" +
                             "CURRENT STEP: " + repairStepText + "\n" +
                             BuildAutonomousDirective(repairStepText) + "\n" +
                             "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — do it.]";
                         var noActionMsgObj = new ChatMessage(ChatRole.Runtime, noActionMsg);
                         AddToSessionHistory(activeHistory, noActionMsgObj, generatingSessionId);
-                        // Engine-internal repair notice: in-memory only (see IsEngineInjectedMessage).
                         yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The model replied without performing any action — re-engaging it on the task…");
                         continue;
                     }
 
                     if (noActionRepairsThisTurn >= MaxNoActionRepairs && noActionRepairsThisTurn > 0)
                     {
-                        // Repair budget exhausted: never present a text-only response as task
-                        // progress. The text was already streamed; surface the diagnostic and
-                        // end the turn with the task still active (resumable).
                         NoteLesson("no_action_exhausted", "Autonomous no-action repair budget exhausted; turn ended with a diagnostic and the task left active.");
                         logger.LogWarning("Autonomous no-action repair budget exhausted after {Max} repairs; ending the turn with a diagnostic (task remains active).", MaxNoActionRepairs);
                         yield return new ChatStreamEvent(ChatStreamEventType.Error,
                             "⚠ The model kept responding without performing any action. The task remains active — try rephrasing, switching the model, or starting a new chat.");
+                        break;
                     }
+
+                    // AUTONOMOUS MULTI-STEP LONG-HORIZON CONTINUATION:
+                    // In autonomous / goal mode, if the model completed a step and open plan steps remain,
+                    // automatically advance the plan and continue the agentic loop without stopping after a single message!
+                    if ((isGoalMode || mode == InteractionMode.Autonomous) && openStepsRemain && currentStepForTurn != null)
+                    {
+                        await toolExecutor.AdvancePlanItemDoneAsync(generatingSessionId, currentStepForTurn.Title);
+                        var remainingPlan = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                        var nextStep = remainingPlan.FirstOrDefault(e => !e.Done);
+                        if (nextStep != null)
+                        {
+                            logger.LogInformation("Autonomous loop auto-advancing from completed step '{Current}' to next step '{Next}'.",
+                                currentStepForTurn.Title, nextStep.Text);
+                            var advanceMsg = $"[Autonomous Execution: Step '{currentStepForTurn.Title}' completed. Proceeding immediately to Next Step: '{nextStep.Text}'. Reason independently, execute the required tools, and continue building the deliverable.]";
+                            AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, advanceMsg), generatingSessionId);
+                            yield return new ChatStreamEvent(ChatStreamEventType.Error, $"✔ Step completed — auto-advancing to: {nextStep.Text}…");
+                            continue;
+                        }
+                        else
+                        {
+                            // All steps completed! Prompt model to verify and call task_complete.
+                            var completePrompt = "[Autonomous Execution: All plan steps are complete. Perform final verification if needed, and call tool 'task_complete' with a summary of the completed work.]";
+                            AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, completePrompt), generatingSessionId);
+                            yield return new ChatStreamEvent(ChatStreamEventType.Error, "✔ All steps complete — finalizing and verifying deliverable…");
+                            continue;
+                        }
+                    }
+
                     break;
                 }
             }
         }
 
-        if (iterationCount >= MAX_ITERATIONS)
+        if (iterationCount >= maxIterations)
         {
             yield return new ChatStreamEvent(ChatStreamEventType.Error, "Max tool iterations reached.");
         }

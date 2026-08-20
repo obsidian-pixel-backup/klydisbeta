@@ -231,6 +231,112 @@ internal static class ActionDialectParser
             if (results.Count > 0) return results;
         }
 
+        // 0c. DeepSeek native tool calls:
+        // <｜tool calls begin｜><｜tool call begin｜>function<｜tool sep｜>NAME\n```json\n{...}\n```<｜tool call end｜><｜tool calls end｜>
+        {
+            var dsBlocks = Regex.Matches(response,
+                @"(?:<｜tool call begin｜>|<tool_call_begin>)(?:function(?:<｜tool sep｜>|:))?([a-zA-Z0-9_.\-]+)[\r\n]+(?:```(?:json)?[\r\n]+)?([\s\S]*?)(?:```)?[\r\n]*(?:<｜tool call end｜>|<tool_call_end>|$)",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            foreach (Match m in dsBlocks)
+            {
+                var fnName = m.Groups[1].Value.Trim();
+                var rawArgs = m.Groups[2].Value.Trim();
+                var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(rawArgs))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(SanitizeJsonControlCharacters(rawArgs));
+                        if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                        {
+                            foreach (var p in doc.RootElement.EnumerateObject())
+                            {
+                                var val = ToolExecutor.UnwrapJsonElement(p.Value);
+                                if (val != null) args[p.Name] = val;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                if (!string.IsNullOrEmpty(fnName))
+                {
+                    results.Add(new ParsedCall(new ToolCallRequest(fnName, args), CanonicalActionType.ToolCall, "deepseek-native"));
+                }
+            }
+            if (results.Count > 0) return results;
+        }
+
+        // 0d. Command-R action block:
+        // <|START_OF_ACTION_TOKEN|>[{"tool_name":"...","parameters":{...}}]<|END_OF_ACTION_TOKEN|>
+        {
+            var cmdRBlocks = Regex.Matches(response,
+                @"<\|START_OF_ACTION_TOKEN\|>([\s\S]*?)(?:<\|END_OF_ACTION_TOKEN\|>|$)",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            foreach (Match m in cmdRBlocks)
+            {
+                var rawJson = m.Groups[1].Value.Trim();
+                if (!string.IsNullOrEmpty(rawJson))
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(SanitizeJsonControlCharacters(rawJson));
+                        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var item in doc.RootElement.EnumerateArray())
+                            {
+                                string? name = null;
+                                if (item.TryGetProperty("tool_name", out var tProp)) name = tProp.GetString();
+                                else if (item.TryGetProperty("name", out var nProp)) name = nProp.GetString();
+
+                                if (!string.IsNullOrEmpty(name))
+                                {
+                                    var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                                    if (item.TryGetProperty("parameters", out var pProp) && pProp.ValueKind == JsonValueKind.Object)
+                                    {
+                                        foreach (var p in pProp.EnumerateObject())
+                                        {
+                                            var v = ToolExecutor.UnwrapJsonElement(p.Value);
+                                            if (v != null) args[p.Name] = v;
+                                        }
+                                    }
+                                    results.Add(new ParsedCall(new ToolCallRequest(name, args), CanonicalActionType.ToolCall, "command-r-native"));
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            if (results.Count > 0) return results;
+        }
+
+        // 0e. Llama 3 python tag format: <|python_tag|>tool_name(k="v") or <|python_tag|>{"name":"..."}
+        {
+            var pyBlocks = Regex.Matches(response,
+                @"<\|python_tag\|>\s*([a-zA-Z0-9_.\-]+)\s*\(([\s\S]*?)\)",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            foreach (Match m in pyBlocks)
+            {
+                var fnName = m.Groups[1].Value.Trim();
+                var rawParamString = m.Groups[2].Value.Trim();
+                var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                var kwMatches = Regex.Matches(rawParamString,
+                    @"([a-zA-Z0-9_]+)\s*=\s*(?:""([^""]*)""|'([^']*)'|([a-zA-Z0-9_.-]+))",
+                    RegexOptions.IgnoreCase);
+                foreach (Match kw in kwMatches)
+                {
+                    var k = kw.Groups[1].Value;
+                    var v = FirstNonEmpty(kw, 2, 3, 4);
+                    args[k] = v;
+                }
+                if (!string.IsNullOrEmpty(fnName))
+                {
+                    results.Add(new ParsedCall(new ToolCallRequest(fnName, args), CanonicalActionType.ToolCall, "llama3-python"));
+                }
+            }
+            if (results.Count > 0) return results;
+        }
+
         var blocksToParse = new List<string>();
 
         // 1. Native <tool_call> / <tool_calls> JSON format (supports singular/plural, nested braces, and missing end tag)

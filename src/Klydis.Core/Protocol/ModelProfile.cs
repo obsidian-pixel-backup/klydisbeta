@@ -40,7 +40,25 @@ public enum ToolProtocol
     Antml,
 
     /// <summary>OpenAI-style function_call / tool_calls objects.</summary>
-    OpenAiStyle
+    OpenAiStyle,
+
+    /// <summary>Meta Llama 3 / 3.1 / 3.2 / 3.3 native ipython tags &amp; control tokens.</summary>
+    Llama3Native,
+
+    /// <summary>DeepSeek V2.5 / V3 / R1 native tool calling tags and think blocks.</summary>
+    DeepSeekNative,
+
+    /// <summary>Mistral 7B / NeMo / Mixtral / Codestral [TOOL_CALLS] brackets &amp; [INST].</summary>
+    MistralNative,
+
+    /// <summary>Google Gemma 2 / 3 &lt;start_of_turn&gt; and thought tags.</summary>
+    GemmaNative,
+
+    /// <summary>Microsoft Phi-3 / 3.5 / 4 &lt;|system|&gt;, &lt;|user|&gt;, &lt;|assistant|&gt;, &lt;|end|&gt;.</summary>
+    PhiNative,
+
+    /// <summary>Cohere Command-R / Command-R+ &lt;|START_OF_ACTION_TOKEN|&gt;.</summary>
+    CommandRNative
 }
 
 /// <summary>
@@ -98,6 +116,26 @@ public sealed record ModelProfile
 
     /// <summary>True when the model reliably continues after a tool result (multi-call turns).</summary>
     public bool SupportsToolContinuation { get; init; }
+
+    /// <summary>Whether the harness should pre-open a <c>&lt;think&gt;</c> block at the end of the
+    /// generation prompt (required for Qwen3.x native thinking models).</summary>
+    public bool PreOpensThinkBlock { get; init; }
+
+    /// <summary>Whether visible output is required to consider a generation successful.
+    /// True for all models using <see cref="ReasoningProtocol.NativeThinkBlock"/>.</summary>
+    public bool RequiresVisibleOutput { get; init; }
+
+    /// <summary>Default maximum thinking tokens per generation step. Zero means no cap
+    /// (the inference engine's own budget applies). Overridable per-step.</summary>
+    public int MaxStepThinkingTokens { get; init; }
+
+    /// <summary>
+    /// Stop tokens that end a generation for this model. When non-empty the runtime prefers
+    /// these over the template-family defaults (the family defaults are still appended as a
+    /// safety net). Populated from the GGUF tokenizer metadata (eos/bos token text) when
+    /// available (blueprint TODO 012); empty falls back to family defaults.
+    /// </summary>
+    public IReadOnlyList<string> StopTokens { get; init; } = Array.Empty<string>();
 
     /// <summary>
     /// Supported tool-call dialects for this model (from template/metadata).

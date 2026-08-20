@@ -199,9 +199,7 @@ public static class StepClassifier
                 Array.Empty<string>(), // no workspace tools — control tools only
                 skills: new[] { "requirement-capture", "design-direction" },
                 artifacts: new[] { "Requirements / design direction" },
-                criteria: new[] { "No invented facts — proposals clearly labeled PROPOSED",
-                                  "Unknowns named instead of fabricated",
-                                  "Creative proposals allowed when the user asked for a creative lead" },
+                criteria: new[] { "Requirements analyzed", "Creative direction established" },
                 condition: "requirements captured / creative direction produced");
         }
         // PLANNING comes BEFORE inspection/mutation (semantic precedence, P1.8-Fix-1): a
@@ -239,7 +237,7 @@ public static class StepClassifier
         if (MutationMarkers.Any(t.Contains))
         {
             return Make(StepActionKind.FileMutation,
-                new[] { "read_file", "write_file", "edit_file", "list_directory", "search_files" },
+                new[] { "read_file", "write_file", "edit_file", "replace_lines", "apply_patch", "structural_replace", "list_directory", "search_files" },
                 skills: new[] { "file-mutation" },
                 artifacts: new[] { "Code/Document changed" },
                 criteria: new[] { "Files actually changed", "No syntax errors" },

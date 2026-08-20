@@ -189,4 +189,54 @@ public static class ExecutionDispatcher
                demand + "\n" +
                "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — do it.]";
     }
+
+    /// <summary>
+    /// Lightweight overload for constructing a dispatch directive from decision and step metadata.
+    /// </summary>
+    public static DispatchDirective Build(
+        SupervisorDecision decision,
+        string? stepId = null,
+        string? stepTitle = null,
+        ActionObligation? obligation = null)
+    {
+        return decision.Decision switch
+        {
+            ExecutionDecision.CompleteTask => new(
+                decision.Decision, decision.Reason, DispatchDirectiveKind.SealCompletion,
+                "Task completed — all plan items are complete and the run's verification evidence backs the checklist.",
+                NextStepId: decision.NextStepId ?? stepId),
+
+            ExecutionDecision.RepairProtocol => new(
+                decision.Decision, decision.Reason, DispatchDirectiveKind.InjectRepair,
+                "[Protocol Repair: The model did not produce an actionable tool call. Please emit an exact tool call to advance the task.]",
+                NextStepId: decision.NextStepId ?? stepId),
+
+            ExecutionDecision.Replan => new(
+                decision.Decision, decision.Reason, DispatchDirectiveKind.InjectReplan,
+                "[System Prompt: The supervisor has determined the current approach is not producing progress. REVISE the plan now with 'plan' (action=create): replace the steps that are not working with a fresh, concrete approach, then execute the revised plan. Do NOT repeat the previous failing actions.]",
+                NextStepId: decision.NextStepId ?? stepId),
+
+            ExecutionDecision.Pause => new(
+                decision.Decision, decision.Reason, DispatchDirectiveKind.EndTurnNotice,
+                "⏸ The supervisor paused this turn. The task stays open — resume to continue.",
+                NextStepId: decision.NextStepId ?? stepId),
+
+            ExecutionDecision.FailTask => new(
+                decision.Decision, decision.Reason, DispatchDirectiveKind.MarkFailed,
+                "✖ The supervisor failed the task: a runtime generation error stopped execution. The task is left open and recoverable.",
+                NextStepId: decision.NextStepId ?? stepId),
+
+            ExecutionDecision.AwaitUser => new(
+                decision.Decision, decision.Reason, DispatchDirectiveKind.EndTurnNotice,
+                "⚠ The generation was interrupted while the task stays open.",
+                NextStepId: decision.NextStepId ?? stepId),
+
+            _ => new(
+                decision.Decision, decision.Reason, DispatchDirectiveKind.ContinueLoop,
+                Message: null,
+                IncludeContinuationInstruction: decision.Reason is ContinuationReason.GenerationTruncated or ContinuationReason.ModelEndedEarly,
+                NextStepId: decision.NextStepId ?? stepId)
+        };
+    }
 }
+

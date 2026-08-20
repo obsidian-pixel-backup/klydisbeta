@@ -88,12 +88,45 @@ public sealed class ChatStreamParser
     /// </summary>
     public bool IsToolCall => _isToolCall;
 
+    /// <summary>
+    /// Whether the parser was initialized inside a pre-opened thinking block
+    /// (the prompt ended with <c>&lt;think&gt;</c>).
+    /// </summary>
+    public bool PromptStartedInsideThink { get; }
+
+    /// <summary>
+    /// Whether the model explicitly opened a thinking block during the stream
+    /// (distinct from the harness pre-opening one).
+    /// </summary>
+    public bool ModelOpenedThink { get; private set; }
+
+    /// <summary>
+    /// Whether the model closed a thinking block during the stream.
+    /// </summary>
+    public bool ModelClosedThink { get; private set; }
+
+    /// <summary>
+    /// Whether any visible (non-thinking, non-tool-call) tokens were produced.
+    /// </summary>
+    public bool HasVisibleTokens { get; private set; }
+
+    /// <summary>
+    /// Whether any thinking tokens were produced.
+    /// </summary>
+    public bool HasThinkingTokens { get; private set; }
+
+    /// <summary>
+    /// Whether the stream ended with an unclosed thinking block.
+    /// </summary>
+    public bool IsUnclosedThink => _isThinking && _streamEnded;
+
     public ChatStreamParser(bool startsInsideThinkBlock)
     {
         // For qwen thinking models the generation prompt already ends with an OPEN <think> block
         // (the model continues it, then closes it). Start INSIDE that block — otherwise the
         // model's first </think> close tag is treated as plain text and streamed to the user.
         _isThinking = startsInsideThinkBlock;
+        PromptStartedInsideThink = startsInsideThinkBlock;
     }
 
     /// <summary>
@@ -180,10 +213,12 @@ public sealed class ChatStreamParser
                     string before = _unyieldedText.Substring(0, thinkIndex);
                     if (!string.IsNullOrEmpty(before))
                     {
+                        HasVisibleTokens = true;
                         _events.Enqueue(new ChatStreamEvent(ChatStreamEventType.Token, before));
                     }
 
                     _isThinking = true;
+                    ModelOpenedThink = true;
                     _events.Enqueue(new ChatStreamEvent(ChatStreamEventType.ThinkingStart, string.Empty));
                     _unyieldedText = _unyieldedText.Substring(thinkIndex + thinkTagLen);
                     processedAny = true;
@@ -193,10 +228,12 @@ public sealed class ChatStreamParser
                     string before = _unyieldedText.Substring(0, thinkEndIndex);
                     if (!string.IsNullOrEmpty(before))
                     {
+                        HasThinkingTokens = true;
                         _events.Enqueue(new ChatStreamEvent(ChatStreamEventType.ThinkingToken, before));
                     }
 
                     _isThinking = false;
+                    ModelClosedThink = true;
                     _events.Enqueue(new ChatStreamEvent(ChatStreamEventType.ThinkingEnd, string.Empty));
                     _unyieldedText = _unyieldedText.Substring(thinkEndIndex + thinkEndTagLen);
                     processedAny = true;
@@ -206,6 +243,14 @@ public sealed class ChatStreamParser
                     string before = _unyieldedText.Substring(0, toolIndex);
                     if (!string.IsNullOrEmpty(before))
                     {
+                        if (_isThinking)
+                        {
+                            HasThinkingTokens = true;
+                        }
+                        else
+                        {
+                            HasVisibleTokens = true;
+                        }
                         _events.Enqueue(new ChatStreamEvent(
                             _isThinking ? ChatStreamEventType.ThinkingToken : ChatStreamEventType.Token,
                             before));
@@ -271,6 +316,14 @@ public sealed class ChatStreamParser
             string safePart = _unyieldedText.Substring(0, safeLen);
             if (!string.IsNullOrEmpty(safePart))
             {
+                if (_isThinking)
+                {
+                    HasThinkingTokens = true;
+                }
+                else
+                {
+                    HasVisibleTokens = true;
+                }
                 _events.Enqueue(new ChatStreamEvent(
                     _isThinking ? ChatStreamEventType.ThinkingToken : ChatStreamEventType.Token,
                     safePart));
@@ -279,6 +332,14 @@ public sealed class ChatStreamParser
         }
         else
         {
+            if (_isThinking)
+            {
+                HasThinkingTokens = true;
+            }
+            else
+            {
+                HasVisibleTokens = true;
+            }
             _events.Enqueue(new ChatStreamEvent(
                 _isThinking ? ChatStreamEventType.ThinkingToken : ChatStreamEventType.Token,
                 _unyieldedText));
@@ -320,10 +381,12 @@ public sealed class ChatStreamParser
 
         if (_isThinking)
         {
+            HasThinkingTokens = true;
             _events.Enqueue(new ChatStreamEvent(ChatStreamEventType.ThinkingToken, _unyieldedText));
         }
         else if (!string.IsNullOrEmpty(_unyieldedText))
         {
+            HasVisibleTokens = true;
             _events.Enqueue(new ChatStreamEvent(ChatStreamEventType.Token, _unyieldedText));
         }
         _unyieldedText = string.Empty;

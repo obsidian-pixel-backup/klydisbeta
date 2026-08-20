@@ -63,12 +63,11 @@ public partial class App : Application
             args.SetObserved();
         };
 
-        // UI-thread exceptions: log, then shut down cleanly instead of crashing.
+        // UI-thread exceptions: log forensics and mark handled so the application stays alive.
         this.DispatcherUnhandledException += (s, args) =>
         {
             Klydis.Core.Diagnostics.CrashLog.WriteFatal(args.Exception, "DispatcherUnhandledException");
             args.Handled = true;
-            Current.Shutdown();
         };
     }
 

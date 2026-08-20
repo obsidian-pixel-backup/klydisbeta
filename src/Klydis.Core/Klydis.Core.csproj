@@ -38,6 +38,16 @@
     <PackageReference Include="Microsoft.Playwright" Version="1.62.0" />
     <PackageReference Include="ManagedCode.Playwright.Stealth" Version="1.0.1" />
     <PackageReference Include="ReverseMarkdown" Version="6.2.1" />
+
+    <!-- Resilience & Hashing for Gateway and KV Cache -->
+    <PackageReference Include="Polly" Version="8.5.2" />
+    <PackageReference Include="Polly.Core" Version="8.5.2" />
+    <PackageReference Include="Polly.RateLimiting" Version="8.5.2" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.11" />
+
+    <!-- Managed Liquid / Jinja2 Chat Template Engine -->
+    <PackageReference Include="Fluid.Core" Version="2.18.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.2" />
   </ItemGroup>
 
 </Project>

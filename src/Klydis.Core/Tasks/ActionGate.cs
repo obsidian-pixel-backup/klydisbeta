@@ -128,12 +128,7 @@ public static class ActionGate
         }
 
         // 2. Step scoping: a NON-NULL allowed-tool set is authoritative — the action must be
-        //    in it. NULL means the step declares NO restriction (existence-gated only). An
-        //    EMPTY set (or one containing only control tools) means NO workspace tool is
-        //    permitted — requirement/creative-direction steps are exactly that case. The two
-        //    states are semantically distinct and must not be collapsed: null = "not yet
-        //    declared", empty = "explicitly none". Harness-control tools (plan, task_complete,
-        //    ...) are unioned in by StepClassifier so they always pass.
+        //    in it. NULL means the step declares NO restriction (existence-gated only).
         if (stepAllowedTools != null && !stepAllowedTools.Contains(request.Name))
         {
             var allowed = string.Join(", ", stepAllowedTools

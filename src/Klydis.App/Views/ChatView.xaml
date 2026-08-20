@@ -428,15 +428,12 @@
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding IsWorking}" Value="True">
                                                                     <DataTrigger.EnterActions>
-                                                                        <BeginStoryboard x:Name="SessionWorkingPulse">
+                                                                        <BeginStoryboard>
                                                                             <Storyboard>
                                                                                 <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.25" Duration="0:0:0.6" AutoReverse="True" RepeatBehavior="Forever"/>
                                                                             </Storyboard>
                                                                         </BeginStoryboard>
                                                                     </DataTrigger.EnterActions>
-                                                                    <DataTrigger.ExitActions>
-                                                                        <StopStoryboard BeginStoryboardName="SessionWorkingPulse"/>
-                                                                    </DataTrigger.ExitActions>
                                                                 </DataTrigger>
                                                             </Style.Triggers>
                                                         </Style>
@@ -639,15 +636,12 @@
                                             <Style.Triggers>
                                                 <DataTrigger Binding="{Binding SelectedSession.IsWorking}" Value="True">
                                                     <DataTrigger.EnterActions>
-                                                        <BeginStoryboard x:Name="HeaderWorkingPulse">
+                                                        <BeginStoryboard>
                                                             <Storyboard>
                                                                 <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.25" Duration="0:0:0.6" AutoReverse="True" RepeatBehavior="Forever"/>
                                                             </Storyboard>
                                                         </BeginStoryboard>
                                                     </DataTrigger.EnterActions>
-                                                    <DataTrigger.ExitActions>
-                                                        <StopStoryboard BeginStoryboardName="HeaderWorkingPulse"/>
-                                                    </DataTrigger.ExitActions>
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>

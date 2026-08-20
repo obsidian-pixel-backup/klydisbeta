@@ -207,11 +207,16 @@ public class ToolExecutor(
             new("path", "string", "Absolute path to the file", true),
             new("content", "string", "Content to write", true)
         }, false),
-        new ToolDefinition("edit_file", "Applies a targeted text replacement inside an existing file. Use for incremental edits: provide the exact old_text block to replace and the new_text replacement. The old_text must appear exactly once — if it matches zero or multiple places, the call fails with guidance. The harness captures a real diff and registers the artifact exactly like write_file.", new List<ToolParameter>
+        new ToolDefinition("edit_file", "Applies a targeted text replacement inside an existing file. Use for incremental edits: provide the old_text block to replace and the new_text replacement. The old_text is matched exactly, falling back to a whitespace/indentation-tolerant match (so indentation or line-ending drift does not break the edit). The match must appear exactly once — if it matches zero or multiple places, the call fails with guidance. The harness captures a real diff and registers the artifact exactly like write_file.", new List<ToolParameter>
         {
             new("path", "string", "Absolute path to the file", true),
-            new("old_text", "string", "The exact existing text to replace (must appear exactly once)", true),
+            new("old_text", "string", "The text to replace (matched exactly, then whitespace/indentation-tolerantly; must be unique)", true),
             new("new_text", "string", "The replacement text", true)
+        }, false),
+        new ToolDefinition("apply_patch", "Applies a standard unified diff (diff -u format with ---/+++ headers and @@ hunks) to an existing file. Use for multi-hunk edits or when the change is easier to express as a patch. Hunks are applied in order with trailing-whitespace and line-ending tolerance. The harness captures a real diff and registers the artifact exactly like edit_file.", new List<ToolParameter>
+        {
+            new("path", "string", "Absolute path to the file", true),
+            new("patch", "string", "The unified diff (diff -u format: --- / +++ headers and @@ -a,b +c,d @@ hunks)", true)
         }, false),
         new ToolDefinition("list_directory", "Lists immediate children of a directory with sizes. For very large directories (e.g. system32), consider using search_files instead.", new List<ToolParameter>
         {
@@ -549,6 +554,7 @@ public class ToolExecutor(
                 "read_file" => await ReadFileAsync(request, toolCt),
                 "write_file" => await WriteFileAsync(request, sessionId, toolCt),
                 "edit_file" => await EditFileAsync(request, sessionId, toolCt),
+                "apply_patch" => await ApplyPatchAsync(request, sessionId, toolCt),
                 "list_directory" => await ListDirectoryAsync(request, toolCt),
                 "run_command" => await RunCommandAsync(request, toolCt),
                 "get_system_info" => await GetSystemInfoAsync(toolCt),
@@ -1068,24 +1074,157 @@ public class ToolExecutor(
         }
 
         int idx = beforeContent.IndexOf(oldText, StringComparison.Ordinal);
+        int replaceLen = oldText.Length;
+        bool fuzzyApplied = false;
         if (idx < 0)
         {
-            return new ToolResult(request.Name, false, string.Empty,
-                $"old_text was not found in {path}. Use read_file to get the exact current content, or write_file to rewrite the whole file.");
+            // Exact match failed — try the whitespace/indentation-tolerant fuzzy match before
+            // giving up (blueprint TODO 081). A model that read the file and then the file was
+            // reformatted (indentation drift, CRLF, trailing whitespace) would otherwise fail a
+            // perfectly valid edit. The fuzzy match must still be UNIQUE, and the replacement
+            // replaces the exact original span (preserving the file's real whitespace).
+            var fuzzy = FindTolerantMatch(beforeContent, oldText, out bool fuzzyAmbiguous);
+            if (fuzzy == null)
+            {
+                return new ToolResult(request.Name, false, string.Empty,
+                    fuzzyAmbiguous
+                        ? $"old_text appears more than once in {path} (even after normalizing whitespace/indentation). Include more surrounding context so the match is unique, or use write_file to rewrite the whole file."
+                        : $"old_text was not found in {path} (whitespace/indentation-insensitive search also found nothing). Use read_file to get the exact current content, or write_file to rewrite the whole file.");
+            }
+            idx = fuzzy.Value.Start;
+            replaceLen = fuzzy.Value.Length;
+            fuzzyApplied = true;
         }
-        if (beforeContent.IndexOf(oldText, idx + oldText.Length, StringComparison.Ordinal) >= 0)
+        else if (beforeContent.IndexOf(oldText, idx + oldText.Length, StringComparison.Ordinal) >= 0)
         {
             return new ToolResult(request.Name, false, string.Empty,
                 $"old_text appears more than once in {path}. Include more surrounding context so the match is unique, or use write_file to rewrite the whole file.");
         }
 
-        string afterContent = beforeContent.Substring(0, idx) + newText + beforeContent.Substring(idx + oldText.Length);
+        string afterContent = beforeContent.Substring(0, idx) + newText + beforeContent.Substring(idx + replaceLen);
 
         await File.WriteAllTextAsync(path, afterContent, ct);
 
         await CaptureFileMutationAsync(request, sessionId, path, beforeContent, afterContent);
 
-        return new ToolResult(request.Name, true, "File edited successfully", null);
+        return new ToolResult(request.Name, true,
+            fuzzyApplied ? "File edited successfully (whitespace/indentation-tolerant match applied)" : "File edited successfully",
+            null);
+    }
+
+    /// <summary>
+    /// Applies a unified diff (diff -u format) to an existing file (the <c>apply_patch</c>
+    /// tool, blueprint TODO 082). Parsing and application are pure and whitespace/line-ending
+    /// tolerant (see <see cref="Klydis.Core.Workbench.UnifiedDiff"/>); on success the mutation
+    /// flows through <see cref="CaptureFileMutationAsync"/>, the same pipeline as write_file /
+    /// edit_file, so diffs, artifacts, and events stay consistent.
+    /// </summary>
+    private async Task<ToolResult> ApplyPatchAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
+    {
+        var path = GetStringArg(request.Arguments, "path");
+        var patch = GetStringArg(request.Arguments, "patch");
+        if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Path is required");
+        if (string.IsNullOrEmpty(patch)) return InvalidCall(request.Name, "patch is required");
+        var commandLike = CommandLikePathResult(request, path);
+        if (commandLike != null) return commandLike;
+        if (!File.Exists(path)) return new ToolResult(request.Name, false, string.Empty, $"File not found: {path}");
+
+        string beforeContent;
+        try
+        {
+            beforeContent = await File.ReadAllTextAsync(path, ct);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult(request.Name, false, string.Empty, $"Failed to read {path}: {ex.Message}");
+        }
+
+        string? afterContent = Klydis.Core.Workbench.UnifiedDiff.Apply(beforeContent, patch, out string? applyError);
+        if (afterContent == null)
+        {
+            return new ToolResult(request.Name, false, string.Empty, $"Failed to apply patch: {applyError}");
+        }
+        if (afterContent == beforeContent)
+        {
+            return new ToolResult(request.Name, false, string.Empty,
+                "Patch applied but produced no changes — is the file already patched?");
+        }
+
+        await File.WriteAllTextAsync(path, afterContent, ct);
+        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, afterContent);
+        return new ToolResult(request.Name, true, "Patch applied successfully", null);
+    }
+
+    /// <summary>
+    /// Whitespace/indentation-tolerant substring match (blueprint TODO 081). Normalizes both the
+    /// content and the needle by collapsing every whitespace run to a single space, then searches
+    /// for a UNIQUE match; the normalized match is mapped back to original character offsets so
+    /// the caller replaces the exact original span (preserving the file's real whitespace).
+    /// Returns null when the needle is not found (even fuzzily) or matches more than once
+    /// (<paramref name="ambiguous"/> set in the latter case). A needle that is entirely
+    /// whitespace is rejected — it carries no edit meaning.
+    /// </summary>
+    private static (int Start, int Length)? FindTolerantMatch(string content, string needle, out bool ambiguous)
+    {
+        ambiguous = false;
+        if (string.IsNullOrEmpty(needle) || string.IsNullOrEmpty(content)) return null;
+
+        // Normalize the content, tracking each normalized char's original index so the match can
+        // be mapped back to exact original offsets. LINE BREAKS are kept distinct from horizontal
+        // whitespace: runs of spaces/tabs collapse to a single space and runs of line breaks to a
+        // single '\n'. This tolerates indentation / trailing-whitespace / CRLF drift WITHIN a
+        // line without letting a match swallow the preceding line break or cross line boundaries.
+        var origIndex = new List<int>(content.Length);
+        var normChars = new List<char>(content.Length);
+        bool lastWasLineBreak = false;
+        bool lastWasSpace = false;
+        for (int i = 0; i < content.Length; i++)
+        {
+            char c = content[i];
+            if (c == '\n' || c == '\r')
+            {
+                if (!lastWasLineBreak) { normChars.Add('\n'); origIndex.Add(i); lastWasLineBreak = true; lastWasSpace = false; }
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                if (!lastWasSpace) { normChars.Add(' '); origIndex.Add(i); lastWasSpace = true; lastWasLineBreak = false; }
+            }
+            else
+            {
+                normChars.Add(c); origIndex.Add(i); lastWasSpace = false; lastWasLineBreak = false;
+            }
+        }
+        string normContent = new string(normChars.ToArray());
+
+        var needleNorm = new List<char>(needle.Length);
+        bool nLastLineBreak = false;
+        bool nLastSpace = false;
+        foreach (char c in needle)
+        {
+            if (c == '\n' || c == '\r')
+            {
+                if (!nLastLineBreak) { needleNorm.Add('\n'); nLastLineBreak = true; nLastSpace = false; }
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                if (!nLastSpace) { needleNorm.Add(' '); nLastSpace = true; nLastLineBreak = false; }
+            }
+            else { needleNorm.Add(c); nLastSpace = false; nLastLineBreak = false; }
+        }
+        string normNeedle = new string(needleNorm.ToArray());
+        if (normNeedle.Trim().Length == 0) return null; // all-whitespace needle: no edit meaning
+
+        int first = normContent.IndexOf(normNeedle, StringComparison.Ordinal);
+        if (first < 0) return null;
+        if (normContent.IndexOf(normNeedle, first + normNeedle.Length, StringComparison.Ordinal) >= 0)
+        {
+            ambiguous = true;
+            return null;
+        }
+
+        int origStart = origIndex[first];
+        int origEnd = origIndex[first + normNeedle.Length - 1] + 1;
+        return (origStart, origEnd - origStart);
     }
 
     /// <summary>
@@ -2841,6 +2980,52 @@ public class ToolExecutor(
             logger.LogWarning(ex, "Failed to persist harness-seeded plan for {SessionId}.", sessionId);
         }
         logger.LogInformation("Harness seeded initial plan ({Count} items) for session {SessionId}.", plan.Count, sessionId);
+    }
+
+    /// <summary>
+    /// Programmatically marks a plan item as completed by step text or index and persists the updated plan.
+    /// </summary>
+    public async Task AdvancePlanItemDoneAsync(string sessionId, string stepTitle)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(stepTitle)) return;
+        EnsureSessionPlanLoaded(sessionId);
+        if (!_sessionPlans.TryGetValue(sessionId, out var plan)) return;
+
+        bool updated = false;
+        lock (_sessionPlanLock)
+        {
+            for (int i = 0; i < plan.Count; i++)
+            {
+                if (!plan[i].Done && (plan[i].Text.Equals(stepTitle, StringComparison.OrdinalIgnoreCase) ||
+                                      stepTitle.Contains(plan[i].Text, StringComparison.OrdinalIgnoreCase) ||
+                                      plan[i].Text.Contains(stepTitle, StringComparison.OrdinalIgnoreCase)))
+                {
+                    plan[i] = plan[i] with { Done = true };
+                    updated = true;
+                    break;
+                }
+            }
+        }
+
+        if (updated)
+        {
+            try
+            {
+                var snapshot = new PlanSnapshot(plan.ToList(), -1, GetSessionPlanOwner(sessionId));
+                string json = System.Text.Json.JsonSerializer.Serialize(snapshot);
+                await messageStore.SaveSessionPlanAsync(sessionId, json).ConfigureAwait(false);
+                if (TaskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
+                {
+                    await TaskManager.SavePlanAsync(CurrentTaskId, json).ConfigureAwait(false);
+                }
+                await EmitExecutionEventAsync(sessionId, "PlanUpdated", CurrentTaskId, null, null).ConfigureAwait(false);
+                logger.LogInformation("Autonomous loop advanced plan item '{Title}' to completed for session {SessionId}.", stepTitle, sessionId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to persist updated plan after advancing item for session {SessionId}.", sessionId);
+            }
+        }
     }
 
     /// <summary>

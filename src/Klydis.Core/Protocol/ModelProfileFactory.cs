@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using Klydis.Core.Chat;
 using Klydis.Core.Inference;
 using ChatTemplate = Klydis.Core.Chat.ChatTemplate;
@@ -8,8 +10,7 @@ namespace Klydis.Core.Protocol;
 /// Builds the immutable <see cref="ModelProfile"/> for a loaded model. Pure and deterministic
 /// (no I/O) so it is trivially testable.
 ///
-/// Chat-template resolution order (P0-8 review finding — the OLD order was architecture-first,
-/// which let a qwen architecture string override a genuinely different embedded template):
+/// Chat-template resolution order:
 ///   1. explicit user/model override
 ///   2. valid embedded GGUF chat_template (the actual template is DATA — the strongest signal)
 ///   3. declared metadata template family
@@ -27,38 +28,36 @@ public static class ModelProfileFactory
     /// <param name="rawChatTemplate">Embedded GGUF chat_template string, when present.</param>
     /// <param name="declaredTemplate">Declared template family from model metadata, when present.</param>
     /// <param name="explicitOverride">Explicit user/model override; highest priority.</param>
+    /// <param name="stopTokens">Model-specific stop tokens extracted from GGUF tokenizer metadata.</param>
     public static ModelProfile Build(
         string modelId,
         string modelPath,
         string architecture,
         string? rawChatTemplate = null,
         ChatTemplate? declaredTemplate = null,
-        ChatTemplate? explicitOverride = null)
+        ChatTemplate? explicitOverride = null,
+        IReadOnlyList<string>? stopTokens = null)
     {
         ChatTemplate template = ResolveTemplate(architecture, rawChatTemplate, declaredTemplate, explicitOverride);
         ReasoningProtocol reasoning = ResolveReasoning(template, architecture);
         ToolProtocol toolProtocol = ResolveToolProtocol(template, architecture);
 
         bool isThinking = reasoning == ReasoningProtocol.NativeThinkBlock;
-        bool nativeTools = toolProtocol == ToolProtocol.QwenNative;
+        bool nativeTools = toolProtocol is ToolProtocol.QwenNative
+            or ToolProtocol.Llama3Native
+            or ToolProtocol.DeepSeekNative
+            or ToolProtocol.MistralNative
+            or ToolProtocol.GemmaNative
+            or ToolProtocol.PhiNative
+            or ToolProtocol.CommandRNative;
 
-        // UNKNOWN models are CONSERVATIVE (review: never assume a capability the profile has
-        // not established). A Generic template means nothing was learned about the model's
-        // tool dialect — the protocol is Unknown, structured output/continuation are NOT
-        // assumed, and ToolCalling is Unsupported until a capability probe upgrades the
-        // profile. The optimistic defaults (GenericJson + SupportsStructuredOutput=true +
-        // Continuation=true) would let a future GenericJson adapter silently push every
-        // unknown GGUF into an execution protocol it was never trained to produce.
         bool unknownFamily = template == ChatTemplate.Generic;
 
-        // Supported/preferred/fallback dialects: a qwen-family model supports both the native
-        // format and generic JSON, preferring native; known non-qwen families prefer generic
-        // JSON; unknown families claim NO protocol until probed.
         ToolProtocol[] supported = nativeTools
-            ? new[] { ToolProtocol.QwenNative, ToolProtocol.GenericJson }
+            ? new[] { toolProtocol, ToolProtocol.GenericJson }
             : unknownFamily
                 ? Array.Empty<ToolProtocol>()
-                : new[] { ToolProtocol.GenericJson };
+                : new[] { toolProtocol != ToolProtocol.Unknown ? toolProtocol : ToolProtocol.GenericJson };
 
         return new ModelProfile
         {
@@ -69,14 +68,18 @@ public static class ModelProfileFactory
             Reasoning = reasoning,
             ToolProtocol = toolProtocol,
             SupportedProtocols = supported,
-            PreferredProtocol = nativeTools ? ToolProtocol.QwenNative
-                : unknownFamily ? ToolProtocol.Unknown : ToolProtocol.GenericJson,
+            PreferredProtocol = nativeTools ? toolProtocol
+                : unknownFamily ? ToolProtocol.Unknown : (toolProtocol != ToolProtocol.Unknown ? toolProtocol : ToolProtocol.GenericJson),
             FallbackProtocols = nativeTools ? new[] { ToolProtocol.GenericJson } : Array.Empty<ToolProtocol>(),
             SupportsNativeTools = nativeTools,
-            SupportsStructuredOutput = (toolProtocol == ToolProtocol.GenericJson || nativeTools) && !unknownFamily,
-            SupportsGrammar = nativeTools, // grammar-constrained qwen-native tool calls
+            SupportsStructuredOutput = !unknownFamily,
+            SupportsGrammar = nativeTools || toolProtocol == ToolProtocol.GenericJson || toolProtocol == ToolProtocol.OpenAiStyle,
             SupportsThinking = isThinking,
-            SupportsToolContinuation = !unknownFamily, // never assumed for unknown models
+            SupportsToolContinuation = !unknownFamily,
+            PreOpensThinkBlock = isThinking,
+            RequiresVisibleOutput = isThinking,
+            MaxStepThinkingTokens = isThinking ? 4096 : 0,
+            StopTokens = stopTokens ?? Array.Empty<string>(),
             ToolCalling = nativeTools ? CapabilityLevel.Usable
                 : unknownFamily ? CapabilityLevel.Unsupported : CapabilityLevel.Experimental,
             Continuation = CapabilityLevel.Experimental,
@@ -85,7 +88,7 @@ public static class ModelProfileFactory
     }
 
     /// <summary>
-    /// Resolves the chat-template family with the corrected priority order.
+    /// Resolves the chat-template family with the priority order.
     /// </summary>
     public static ChatTemplate ResolveTemplate(
         string architecture,
@@ -93,13 +96,10 @@ public static class ModelProfileFactory
         ChatTemplate? declaredTemplate = null,
         ChatTemplate? explicitOverride = null)
     {
-        // 1. Explicit override — the user/developer said what the model is.
+        // 1. Explicit override
         if (explicitOverride.HasValue) return explicitOverride.Value;
 
-        // 2. Embedded GGUF chat_template — the strongest factual signal. Special case: qwen3.x
-        // thinking models embed a ChatML-style template (<|im_start|>) but still need the Qwen
-        // family for the native tool protocol — their embedded template is a marker of the
-        // family, not a different format. Everything else follows the embedded template.
+        // 2. Embedded GGUF chat_template
         if (!string.IsNullOrWhiteSpace(rawChatTemplate))
         {
             if (IsQwenThinkingArchitecture(architecture) &&
@@ -111,25 +111,79 @@ public static class ModelProfileFactory
             if (fromEmbedded.HasValue) return fromEmbedded.Value;
         }
 
-        // 3. Declared metadata family.
+        // 3. Declared metadata family
         if (declaredTemplate.HasValue) return declaredTemplate.Value;
 
-        // 4. Known model-family profile.
-        if (!string.IsNullOrWhiteSpace(architecture) &&
-            architecture.Contains("qwen", StringComparison.OrdinalIgnoreCase))
+        // 4. Known model-family profile (architecture heuristics)
+        if (!string.IsNullOrWhiteSpace(architecture))
         {
-            return ChatTemplate.Qwen;
+            var family = ResolveFamilyFromArchitecture(architecture);
+            if (family.HasValue) return family.Value;
         }
 
-        // 5. Generic fallback: unknown models are conversation-capable; tool capability is
-        // probed later, never silently assumed (P0-8 finding).
+        // 5. Generic fallback
         return ChatTemplate.Generic;
+    }
+
+    /// <summary>
+    /// Maps a known GGUF architecture string to its closest chat-template family.
+    /// </summary>
+    public static ChatTemplate? ResolveFamilyFromArchitecture(string? architecture)
+    {
+        if (string.IsNullOrWhiteSpace(architecture)) return null;
+
+        if (architecture.Contains("qwen", StringComparison.OrdinalIgnoreCase))
+            return ChatTemplate.Qwen;
+
+        if (architecture.Contains("deepseek", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("dse", StringComparison.OrdinalIgnoreCase))
+            return ChatTemplate.DeepSeek;
+
+        if (architecture.Contains("llama", StringComparison.OrdinalIgnoreCase))
+            return ChatTemplate.Llama3;
+
+        if (architecture.Contains("mistral", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("mixtral", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("codestral", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("devstral", StringComparison.OrdinalIgnoreCase))
+            return ChatTemplate.Mistral;
+
+        if (architecture.Contains("gemma", StringComparison.OrdinalIgnoreCase))
+            return ChatTemplate.Gemma;
+
+        if (architecture.Contains("phi", StringComparison.OrdinalIgnoreCase))
+            return ChatTemplate.Phi;
+
+        if (architecture.Contains("command", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("cohere", StringComparison.OrdinalIgnoreCase))
+            return ChatTemplate.CommandR;
+
+        if (architecture.Contains("glm4", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("glm-4", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("chatglm", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("smollm2", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("smollm-2", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("starcoder2", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("granite", StringComparison.OrdinalIgnoreCase) ||
+            architecture.Contains("nemotron", StringComparison.OrdinalIgnoreCase))
+        {
+            return ChatTemplate.ChatML;
+        }
+
+        return null;
     }
 
     /// <summary>Resolves the reasoning protocol from the resolved template + architecture.</summary>
     public static ReasoningProtocol ResolveReasoning(ChatTemplate template, string architecture)
     {
-        if (template == ChatTemplate.Qwen && IsQwenThinkingArchitecture(architecture))
+        if ((template == ChatTemplate.Qwen || template == ChatTemplate.ChatML) && IsQwenThinkingArchitecture(architecture))
+        {
+            return ReasoningProtocol.NativeThinkBlock;
+        }
+        if (template == ChatTemplate.DeepSeek ||
+            (!string.IsNullOrWhiteSpace(architecture) &&
+             (architecture.Contains("deepseek", StringComparison.OrdinalIgnoreCase) ||
+              architecture.Contains("r1", StringComparison.OrdinalIgnoreCase))))
         {
             return ReasoningProtocol.NativeThinkBlock;
         }
@@ -139,18 +193,18 @@ public static class ModelProfileFactory
     /// <summary>Resolves the expected tool-call dialect.</summary>
     public static ToolProtocol ResolveToolProtocol(ChatTemplate template, string architecture)
     {
-        if (template == ChatTemplate.Qwen)
+        return template switch
         {
-            return ToolProtocol.QwenNative;
-        }
-        // Unknown family: we have NOT established how this model expresses tool calls.
-        // Claiming GenericJson here is the optimism the review rejected — the profile says
-        // Unknown until a capability probe proves otherwise.
-        if (template == ChatTemplate.Generic)
-        {
-            return ToolProtocol.Unknown;
-        }
-        return ToolProtocol.GenericJson;
+            ChatTemplate.Qwen => ToolProtocol.QwenNative,
+            ChatTemplate.Llama3 => ToolProtocol.Llama3Native,
+            ChatTemplate.DeepSeek => ToolProtocol.DeepSeekNative,
+            ChatTemplate.Mistral => ToolProtocol.MistralNative,
+            ChatTemplate.Gemma => ToolProtocol.GemmaNative,
+            ChatTemplate.Phi => ToolProtocol.PhiNative,
+            ChatTemplate.CommandR => ToolProtocol.CommandRNative,
+            ChatTemplate.Generic => ToolProtocol.Unknown,
+            _ => ToolProtocol.GenericJson
+        };
     }
 
     /// <summary>Qwen3.x thinking architectures (mirrors InferenceEngine.IsQwenThinkingArchitecture).</summary>
@@ -158,18 +212,18 @@ public static class ModelProfileFactory
         => InferenceEngine.IsQwenThinkingArchitecture(architecture);
 
     /// <summary>
-    /// Detects the template family from the embedded GGUF chat-template string using the
-    /// same markers the legacy detector uses. Returns null when no marker matches.
+    /// Detects the template family from the embedded GGUF chat-template string.
     /// </summary>
     internal static ChatTemplate? DetectFromEmbeddedTemplate(string rawChatTemplate)
     {
         if (rawChatTemplate.Contains("<|im_start|>", StringComparison.Ordinal)) return ChatTemplate.ChatML;
         if (rawChatTemplate.Contains("<|start_header_id|>", StringComparison.Ordinal)) return ChatTemplate.Llama3;
         if (rawChatTemplate.Contains("[INST]", StringComparison.Ordinal) && rawChatTemplate.Contains("<<SYS>>", StringComparison.Ordinal)) return ChatTemplate.Llama2;
-        if (rawChatTemplate.Contains("[INST]", StringComparison.Ordinal)) return ChatTemplate.Mistral;
+        if (rawChatTemplate.Contains("[INST]", StringComparison.Ordinal) || rawChatTemplate.Contains("[AVAILABLE_TOOLS]", StringComparison.Ordinal) || rawChatTemplate.Contains("[TOOL_CALLS]", StringComparison.Ordinal)) return ChatTemplate.Mistral;
         if (rawChatTemplate.Contains("<start_of_turn>", StringComparison.Ordinal)) return ChatTemplate.Gemma;
-        if (rawChatTemplate.Contains("<|user|>", StringComparison.Ordinal) || rawChatTemplate.Contains("<|end|>", StringComparison.Ordinal)) return ChatTemplate.Phi;
+        if (rawChatTemplate.Contains("<|user|>", StringComparison.Ordinal) || rawChatTemplate.Contains("<|end|>", StringComparison.Ordinal) || rawChatTemplate.Contains("<|system|>", StringComparison.Ordinal)) return ChatTemplate.Phi;
         if (rawChatTemplate.Contains("<|START_OF_TURN_TOKEN|>", StringComparison.Ordinal)) return ChatTemplate.CommandR;
+        if (rawChatTemplate.Contains("<｜User｜>", StringComparison.Ordinal) || rawChatTemplate.Contains("<｜begin of sentence｜>", StringComparison.Ordinal) || rawChatTemplate.Contains("<｜tool calls begin｜>", StringComparison.Ordinal)) return ChatTemplate.DeepSeek;
         if (rawChatTemplate.Contains("### Instruction:", StringComparison.Ordinal)) return ChatTemplate.Alpaca;
         if (rawChatTemplate.Contains("USER:", StringComparison.Ordinal) && rawChatTemplate.Contains("ASSISTANT:", StringComparison.Ordinal)) return ChatTemplate.Vicuna;
         return null;

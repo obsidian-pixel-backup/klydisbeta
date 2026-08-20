@@ -240,6 +240,19 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     public int LastGenerationPrefixLength { get; private set; }
 
     /// <summary>
+    /// Structured result of the most recent generation, populated at generation completion.
+    /// </summary>
+    public GenerationResult? LastGenerationResult { get; private set; }
+
+    /// <summary>
+    /// Optional per-step thinking-token cap set by the orchestrator (ChatEngine) from the model
+    /// profile's <c>MaxStepThinkingTokens</c> and the current step kind. When null, the
+    /// context-derived default cap applies (see <c>maxThinkTokensPerGeneration</c>). Only
+    /// enforced while the model is inside a thinking block — never on visible output.
+    /// </summary>
+    public int? MaxThinkingTokensPerGenerationOverride { get; set; }
+
+    /// <summary>
     /// Raw GGUF chat template string if present.
     /// </summary>
     public string? RawChatTemplate { get; private set; }
@@ -1072,6 +1085,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 var genStopwatch = new Stopwatch();
                 double ttftMs = 0;
                 int tokenCount = 0;
+                int thinkTokenCount = 0;
                 bool isSpeculationActive = false;
                 // Live tokens/sec tracker (EMA over per-token intervals) — see TokenSpeedTracker.
                 var tokenSpeed = new TokenSpeedTracker();
@@ -1201,11 +1215,25 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                     // fixed 4096: long-horizon planning legitimately drafts large plans inside the
                     // think block, and a fixed small cap cut those mid-reasoning. A degenerate
                     // think-loop still trips the cap — just proportionally to the window.
-                    int maxThinkTokensPerGeneration = Math.Max(4096, (int)(ContextSize * 0.25));
+                    // Per-model/per-step cap: the orchestrator (ChatEngine) sets
+                    // MaxThinkingTokensPerGenerationOverride from the model profile's
+                    // MaxStepThinkingTokens and the current step kind (ordinary text steps get a
+                    // small cap, tool-selection steps a medium one, planning/artifact steps a
+                    // larger one). Without an override the cap scales with the context window
+                    // (25%, floor 4096) — for large-context models that alone can permit tens of
+                    // thousands of hidden reasoning tokens before visible output, which is too
+                    // permissive for an ordinary conversational or requirements step.
+                    int maxThinkTokensPerGeneration = MaxThinkingTokensPerGenerationOverride
+                        ?? Math.Max(4096, (int)(ContextSize * 0.25));
+                    // Tool-call exemption: when a tool tag is detected inside a think block,
+                    // pause the thinking cap for this many tokens (enough for a complete tool-call
+                    // JSON). If the call is not closed within this window, the cap resumes —
+                    // preventing a partial/malformed tag from permanently disabling the cap.
+                    const int ToolCallExemptionBudget = 1024;
                     bool thinkBlockWasOpen = startsInsideThink;
-                    int thinkTokenCount = 0;
+                    thinkTokenCount = 0;
                     bool thinkCapFired = false;
-                    bool toolTagSeen = false;
+                    int toolTagExemptionRemaining = 0;
 
                     // Route through the speculative path when a draft model is loaded OR the
                     // zero-VRAM N-gram fallback is active (previously the fallback was advertised
@@ -1257,13 +1285,18 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                     thinkTokenCount = 0; // new think block: restart the budget
                                 }
                                 thinkBlockWasOpen = thinkOpen;
-                                if (thinkOpen && !toolTagSeen)
+                                if (thinkOpen && toolTagExemptionRemaining <= 0)
                                 {
                                     if (token.Contains("<tool_call", StringComparison.OrdinalIgnoreCase) ||
                                         token.Contains("<|tool_call", StringComparison.OrdinalIgnoreCase) ||
                                         token.Contains("function=", StringComparison.OrdinalIgnoreCase))
                                     {
-                                        toolTagSeen = true;
+                                        // A tool tag appeared: exempt the next ToolCallExemptionBudget
+                                        // tokens from the thinking cap (enough for a complete tool
+                                        // call JSON). If the tool call completes within that window,
+                                        // the generation normally closes the think block. If it does
+                                        // not (malformed / partial tag), the cap resumes.
+                                        toolTagExemptionRemaining = ToolCallExemptionBudget;
                                     }
                                     else
                                     {
@@ -1277,6 +1310,10 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                                             break;
                                         }
                                     }
+                                }
+                                else if (toolTagExemptionRemaining > 0)
+                                {
+                                    toolTagExemptionRemaining--;
                                 }
                             }
                         }
@@ -1521,6 +1558,31 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         );
                         LastTelemetry = telemetry;
                         InferenceCompleted?.Invoke(telemetry);
+
+                        var outcome = LastGenerationPromptFilledWindow
+                            ? GenerationOutcome.ContextFull
+                            : LastGenerationWasCancelled
+                                ? GenerationOutcome.Cancelled
+                                : LastGenerationLoopInfo != null
+                                    ? GenerationOutcome.LoopDetected
+                                    : (isFirstToken || totalGeneratedTokens == 0)
+                                        ? GenerationOutcome.TransportEmpty
+                                        : GenerationOutcome.VisibleMessage;
+
+                        LastGenerationResult = new GenerationResult
+                        {
+                            GenerationId = telemetry.RequestId,
+                            ModelId = CurrentModelPath,
+                            PromptTokenCount = promptTokenCount,
+                            GeneratedTokenCount = totalGeneratedTokens,
+                            ThinkingTokenCount = thinkTokenCount,
+                            VisibleTokenCount = Math.Max(0, totalGeneratedTokens - thinkTokenCount),
+                            Outcome = outcome,
+                            StopReason = LastGenerationLoopInfo != null ? "loop_detected" : (LastGenerationHitMaxTokens ? "max_tokens" : (LastGenerationWasCutShort ? "cut_short" : "stop_token")),
+                            LoopInfo = LastGenerationLoopInfo,
+                            WasCancelled = LastGenerationWasCancelled,
+                            WasContextFull = LastGenerationPromptFilledWindow
+                        };
                     }
 
                     channel.Writer.Complete(completedNormally ? null : generationException);
@@ -1618,25 +1680,33 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             return new SpecialTokenFilterPipeline(profile);
         }
 
-        // Grammar-constrained twin with the identical sampling profile: from the moment the
-        // model opens a <tool_call> block, sampling is constrained to the native call grammar
-        // so malformed/abandoned calls cannot reach the regex parser.
-        var constrained = new LLama.Sampling.DefaultSamplingPipeline
+        try
         {
-            Temperature = profile.Temperature,
-            TopP = profile.TopP,
-            TopK = profile.TopK,
-            MinP = profile.MinP,
-            TypicalP = profile.TypicalP,
-            RepeatPenalty = profile.RepeatPenalty,
-            FrequencyPenalty = profile.FrequencyPenalty,
-            PresencePenalty = profile.PresencePenalty,
-            Seed = profile.Seed,
-            Grammar = new LLama.Sampling.Grammar(ToolCallGrammar.BuildQwenNativeGbnf(), "root")
-        };
+            // Grammar-constrained twin with the identical sampling profile: from the moment the
+            // model opens a <tool_call> block, sampling is constrained to the native call grammar
+            // so malformed/abandoned calls cannot reach the regex parser.
+            var constrained = new LLama.Sampling.DefaultSamplingPipeline
+            {
+                Temperature = profile.Temperature,
+                TopP = profile.TopP,
+                TopK = profile.TopK,
+                MinP = profile.MinP,
+                TypicalP = profile.TypicalP,
+                RepeatPenalty = profile.RepeatPenalty,
+                FrequencyPenalty = profile.FrequencyPenalty,
+                PresencePenalty = profile.PresencePenalty,
+                Seed = profile.Seed,
+                Grammar = new LLama.Sampling.Grammar(ToolCallGrammar.BuildQwenNativeGbnf(), "root")
+            };
 
-        return new SpecialTokenFilterPipeline(
-            new ToolCallConstrainedSamplingPipeline(profile, constrained, ToolCallGrammarFormat.QwenNative, _logger));
+            return new SpecialTokenFilterPipeline(
+                new ToolCallConstrainedSamplingPipeline(profile, constrained, ToolCallGrammarFormat.QwenNative, _logger));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to initialize grammar-constrained sampling pipeline. Falling back to standard sampling.");
+            return new SpecialTokenFilterPipeline(profile);
+        }
     }
 
     /// <summary>

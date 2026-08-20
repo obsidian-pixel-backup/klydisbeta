@@ -49,5 +49,14 @@ public enum ContinuationReason
     /// no file change) while work remains open — a suspicious/repeated/failed action. The
     /// protocol-repair loop re-engages the model; text and un-executed calls are never
     /// progress.</summary>
-    FailedActionNoProgress
+    FailedActionNoProgress,
+
+    /// <summary>Standard state transition without exceptional continuation trigger.</summary>
+    None,
+
+    /// <summary>Unrecoverable error or verification failure.</summary>
+    UnresolvedFailure,
+
+    /// <summary>Turn paused or awaiting user message / steering.</summary>
+    UserMessageAvailable
 }

@@ -120,4 +120,21 @@ public class GoalBudget
 
         return $"{turnsRemaining} turns remaining, ~{tokensRemaining:N0} tokens left, {(int)timeRemaining.TotalMinutes}m remaining";
     }
+
+    /// <summary>
+    /// Creates a GoalBudget configured for unbounded/infinite autonomous operation.
+    /// Bypasses soft turn, token, and wall-time ceilings while retaining hard safety circuit breakers
+    /// (MaxHardConsecutiveEmptyTurns = 20, MaxHardCompletionRejections = 5).
+    /// </summary>
+    public static GoalBudget Infinite() => new GoalBudget
+    {
+        AllowInfinite = true,
+        MaxTurns = int.MaxValue,
+        MaxTotalTokens = int.MaxValue,
+        MaxWallTime = TimeSpan.MaxValue,
+        MaxConsecutiveEmptyTurns = int.MaxValue,
+        MaxCompletionRejections = int.MaxValue,
+        MaxHardConsecutiveEmptyTurns = 20,
+        MaxHardCompletionRejections = 5
+    };
 }
