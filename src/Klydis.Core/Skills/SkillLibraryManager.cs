@@ -325,6 +325,14 @@ public class SkillLibraryManager
                                 case "version":
                                     if (!string.IsNullOrWhiteSpace(val)) version = val;
                                     break;
+                                case "tags":
+                                    if (!string.IsNullOrWhiteSpace(val))
+                                    {
+                                        var trimmed = val.Trim('[', ']');
+                                        var tagList = trimmed.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                        tags.AddRange(tagList.Select(t => t.Trim().Trim('"', '\'')).Where(t => !string.IsNullOrEmpty(t)));
+                                    }
+                                    break;
                             }
                         }
                     }
@@ -356,7 +364,13 @@ public class SkillLibraryManager
                 category = DetermineCategory(skillId, content);
             }
 
-            tags = ExtractTags(skillId, content);
+            foreach (var t in ExtractTags(skillId, content))
+            {
+                if (!tags.Contains(t, StringComparer.OrdinalIgnoreCase))
+                {
+                    tags.Add(t);
+                }
+            }
             SkillComplexity complexity = DetermineComplexity(content);
 
             // Fallback description from first paragraph if empty

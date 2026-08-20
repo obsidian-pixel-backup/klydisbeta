@@ -49,6 +49,14 @@ public enum StepActionKind
 }
 
 /// <summary>
+/// Execution retry policy for a task step.
+/// </summary>
+public sealed record StepRetryPolicy(
+    int MaxAttempts = 3,
+    int BackoffSeconds = 0,
+    bool FailTaskOnMaxRetries = true);
+
+/// <summary>
 /// A first-class, durable execution step (P1.8). Replaces the raw plan-text heuristic model:
 /// the supervisor, the correction directive, and the Action Gate all consume these records —
 /// never ad-hoc phrase matching in the loop. Built from the persisted plan checklist via
@@ -70,7 +78,14 @@ public sealed record TaskStep(
     int AttemptCount,
     string? LastActionId,
     DateTime? StartedAt,
-    DateTime? CompletedAt)
+    DateTime? CompletedAt,
+    string? RunId = null,
+    string? ParentStepId = null,
+    string? FailureReason = null,
+    int Version = 1,
+    IReadOnlyList<string>? Dependencies = null,
+    IReadOnlyList<string>? ExpectedFiles = null,
+    StepRetryPolicy? RetryPolicy = null)
 {
     /// <summary>True when the step is open (not completed or skipped).</summary>
     public bool IsOpen => Status is not (TaskStepStatus.Completed or TaskStepStatus.Skipped);

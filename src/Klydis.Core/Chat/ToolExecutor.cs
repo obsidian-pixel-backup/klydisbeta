@@ -152,8 +152,10 @@ public class ToolExecutor(
     /// stop the loop BETWEEN iterations, so a stalled tool would otherwise block everything.
     /// A timeout returns a failed ToolResult with guidance; the identical-failure circuit
     /// breaker then blocks repeated retries of the same hung call.
+    /// <summary>
+    /// Default timeout for individual tool calls. Extended to 1 hour to support heavy computations and large models.
     /// </summary>
-    public TimeSpan ToolCallTimeout { get; set; } = TimeSpan.FromSeconds(180);
+    public TimeSpan ToolCallTimeout { get; set; } = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Per-tool timeouts for operations that legitimately run longer than the default
@@ -165,12 +167,12 @@ public class ToolExecutor(
             // run_command is deliberately absent: it already self-bounds via its own
             // timeout_seconds argument (default 120s), so the dispatch-level budget only
             // needs to backstop tools without an internal timeout.
-            ["crawl_url"] = TimeSpan.FromMinutes(10),
-            ["search_web"] = TimeSpan.FromMinutes(5),
-            ["store_memory"] = TimeSpan.FromMinutes(5),
-            ["summarize_context"] = TimeSpan.FromMinutes(5),
-            ["index_folder_rag"] = TimeSpan.FromMinutes(10),
-            ["retrieve_memory"] = TimeSpan.FromMinutes(5)
+            ["crawl_url"] = TimeSpan.FromHours(1),
+            ["search_web"] = TimeSpan.FromMinutes(30),
+            ["store_memory"] = TimeSpan.FromMinutes(30),
+            ["summarize_context"] = TimeSpan.FromHours(1),
+            ["index_folder_rag"] = TimeSpan.FromHours(2),
+            ["retrieve_memory"] = TimeSpan.FromMinutes(30)
         };
 
     // Custom tool definitions are re-queried from SQLite on EVERY tool execution and prompt
@@ -330,7 +332,7 @@ public class ToolExecutor(
         }, false),
         new ToolDefinition("plan", "Maintains the agent's todo list for the current task or goal. The plan is persisted for this chat and re-injected into your context every turn, so it is the authoritative checklist you keep updating. Use action 'create' with a newline-separated 'items' list to establish the plan, 'add' to append tasks, 'complete' to mark a task done (match by its number or text), 'remove' to delete a task, 'show' to review the current plan, and 'clear' to reset it.", new List<ToolParameter>
         {
-            new("action", "string", "One of: create, add, complete, remove, show, clear", true, new[] { "create", "add", "complete", "remove", "show", "clear" }),
+            new("action", "string", "One of: create, add, complete, remove, show, clear (defaults to 'show' if omitted, 'create' if items provided, or 'complete' if item provided)", false, new[] { "create", "add", "complete", "remove", "show", "clear" }),
             new("items", "string", "Newline-separated list of tasks (for action=create or add)", false),
             new("item", "string", "Single task to complete or remove — match by its number (e.g. '2') or by text", false),
             new("progress", "integer", "Optional overall completion percent 0-100", false)
@@ -3334,8 +3336,23 @@ public class ToolExecutor(
     {
         string key = sessionId ?? string.Empty;
         EnsureSessionPlanLoaded(key);
-        string action = (GetStringArg(request.Arguments, "action") ?? "show").Trim().ToLowerInvariant();
         var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
+
+        string? rawAction = GetStringArg(request.Arguments, "action");
+        string action;
+        if (string.IsNullOrWhiteSpace(rawAction))
+        {
+            if (!string.IsNullOrWhiteSpace(GetStringArg(request.Arguments, "items")))
+                action = plan.Count == 0 ? "create" : "add";
+            else if (!string.IsNullOrWhiteSpace(GetStringArg(request.Arguments, "item")))
+                action = "complete";
+            else
+                action = "show";
+        }
+        else
+        {
+            action = rawAction.Trim().ToLowerInvariant();
+        }
 
         // P1: the plan list is read concurrently by the UI and prompt builds; mutations and
         // the persistence snapshot are taken under the lock. The SQLite await happens AFTER

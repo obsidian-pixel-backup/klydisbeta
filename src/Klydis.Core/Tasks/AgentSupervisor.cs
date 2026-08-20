@@ -13,7 +13,11 @@ public sealed record CompletionEligibility(
     bool AllRequiredStepsComplete,
     bool AllVerificationPredicatesSatisfied,
     bool NoUnresolvedFailures,
-    IReadOnlyList<string> UnsatisfiedVerification);
+    IReadOnlyList<string> UnsatisfiedVerification)
+{
+    /// <summary>True when all completion eligibility conditions hold.</summary>
+    public bool IsEligible => AllRequiredStepsComplete && AllVerificationPredicatesSatisfied && NoUnresolvedFailures;
+}
 
 /// <summary>
 /// The harness's decision layer — pure and deterministic (no I/O). The model produces a

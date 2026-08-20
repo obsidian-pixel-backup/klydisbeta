@@ -106,13 +106,17 @@ public static class ToolActionParser
             // Greetings / conversational resets.
             "good morning", "good afternoon", "good evening", "good night",
             "how are you", "how are you going", "how have you been",
-            // Permission seeking / asking what to do next.
+            // Permission seeking / asking what to do next / questioning interview loops.
             "how can i help", "how may i help", "what would you like", "what do you want",
             "what can i do", "please tell me", "let me know what", "tell me what you",
             "let me know how", "do you want me to", "would you like me to",
             "do you expect me to", "how are you planning", "what are you planning",
             "how do you plan to", "what should i do", "please clarify",
             "could you clarify", "can you clarify", "what would you have me",
+            "could you share", "can you share", "a couple quick clarifications",
+            "a couple of quick clarifications", "before i start generating",
+            "before we start creating", "before we start", "share a bit more about",
+            "where exactly do you want", "any specific preferences for",
             // Self-description as incapable / text-only.
             "i am an internal", "i'm an internal", "i am only", "i'm only",
             "i am a text-only", "i'm a text-only", "text-only agent", "text only agent",

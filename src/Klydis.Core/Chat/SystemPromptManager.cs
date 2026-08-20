@@ -425,6 +425,8 @@ public class SystemPromptManager
             sb.AppendLine("- If an approach fails, adapt: diagnose the error, try an alternative strategy, and keep going until the goal is achieved.");
         }
 
+        AppendHostEnvironmentContext(sb);
+
         if (!string.IsNullOrWhiteSpace(worldStateHeader))
         {
             sb.Append(worldStateHeader);
@@ -591,6 +593,8 @@ public class SystemPromptManager
         // prunes the raw history the model loses all memory of the session (observed: a
         // multi-turn story continuation forgot the premise entirely and drifted into a new
         // generic plot).
+        AppendHostEnvironmentContext(sb);
+
         if (!string.IsNullOrWhiteSpace(worldStateHeader)) sb.Append(worldStateHeader);
         if (!string.IsNullOrWhiteSpace(queueNotice)) sb.Append(queueNotice);
         if (!string.IsNullOrWhiteSpace(ragNotice)) sb.Append(ragNotice);
@@ -639,6 +643,9 @@ public class SystemPromptManager
             sb.Append(worldStateHeader);
         }
 
+        // Always inject real host facts (OS, workspace root, user home) so conversational turns never hallucinate.
+        AppendHostEnvironmentContext(sb);
+
         return sb.ToString().Trim();
     }
 
@@ -654,5 +661,23 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
 - Treat greetings and small talk (""hey"", ""what's up"", ""whats cooking good looking"") as greetings and answer in kind: short, warm, fun. NEVER answer a greeting with a knowledge-cutoff disclaimer, a list of capabilities, or assistant boilerplate.
 - Keep a human voice even in technical answers — a light touch and a turn of phrase make the substance land better, but the personality never replaces the actual answer; clarity always wins.
 - Your humor is genuine and never mean-spirited. When the user's tone turns serious, drop the playfulness immediately and match the moment.";
+    }
+
+    private static void AppendHostEnvironmentContext(StringBuilder sb)
+    {
+        string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string currentDir = Environment.CurrentDirectory;
+        string userName = Environment.UserName;
+        string osName = Environment.OSVersion.ToString();
+
+        sb.AppendLine();
+        sb.AppendLine("### HOST ENVIRONMENT & WORKSPACE CONTEXT");
+        sb.AppendLine($"- Operating System: {osName} (PowerShell & Cmd available via run_command)");
+        sb.AppendLine($"- Active Workspace Root: {currentDir}");
+        sb.AppendLine($"- User Home Directory: {userProfile}");
+        sb.AppendLine($"- User Account Name: {userName}");
+        sb.AppendLine("- When referencing paths or creating files, use actual valid paths on this machine. Never hallucinate user directories (e.g. never invent 'C:\\Users\\joshu').");
+        sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, run_command). Never ask clarifying interview questions or request permission before starting. Pick modern, elegant defaults and START CODING AND CREATING FILES IMMEDIATELY.");
+        sb.AppendLine();
     }
 }

@@ -455,9 +455,45 @@ public class MessageStore
                 last_action_id TEXT,
                 started_at TEXT,
                 completed_at TEXT,
+                run_id TEXT,
+                parent_step_id TEXT,
+                failure_reason TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                dependencies_json TEXT,
+                expected_files_json TEXT,
+                retry_policy_json TEXT,
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id, order_index);
+            CREATE INDEX IF NOT EXISTS idx_task_steps_run ON task_steps(run_id);
+
+            -- Execution turns: discrete turns executed within a task step/run (Task -> Run -> Step -> Turn -> Generation)
+            CREATE TABLE IF NOT EXISTS turns (
+                turn_id TEXT PRIMARY KEY,
+                step_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                status TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_turns_step ON turns(step_id, sequence);
+            CREATE INDEX IF NOT EXISTS idx_turns_run ON turns(run_id, sequence);
+
+            -- Execution generations: model inference generations for a turn
+            CREATE TABLE IF NOT EXISTS generations (
+                generation_id TEXT PRIMARY KEY,
+                turn_id TEXT NOT NULL,
+                model_id TEXT,
+                request_hash TEXT,
+                response_hash TEXT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                finish_reason TEXT,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_generations_turn ON generations(turn_id, started_at);
 
             -- FTS5 Virtual Table for full-text search
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
@@ -1243,12 +1279,16 @@ public class MessageStore
                     (step_id, task_id, order_index, title, status, expected_action_kind,
                      allowed_tools_json, required_skills_json, expected_artifacts_json,
                      verification_criteria_json, completion_condition, attempt_count,
-                     last_action_id, started_at, completed_at, updated_at)
+                     last_action_id, started_at, completed_at, run_id, parent_step_id,
+                     failure_reason, version, dependencies_json, expected_files_json,
+                     retry_policy_json, updated_at)
                 VALUES
                     (@stepId, @taskId, @orderIndex, @title, @status, @expectedActionKind,
                      @allowedToolsJson, @requiredSkillsJson, @expectedArtifactsJson,
                      @verificationCriteriaJson, @completionCondition, @attemptCount,
-                     @lastActionId, @startedAt, @completedAt, @updatedAt);";
+                     @lastActionId, @startedAt, @completedAt, @runId, @parentStepId,
+                     @failureReason, @version, @dependenciesJson, @expectedFilesJson,
+                     @retryPolicyJson, @updatedAt);";
             cmd.Parameters.AddWithValue("@stepId", step.StepId);
             cmd.Parameters.AddWithValue("@taskId", taskId);
             cmd.Parameters.AddWithValue("@orderIndex", step.Order);
@@ -1264,6 +1304,13 @@ public class MessageStore
             cmd.Parameters.AddWithValue("@lastActionId", (object?)step.LastActionId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@startedAt", (object?)(step.StartedAt?.ToString("o")) ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@completedAt", (object?)(step.CompletedAt?.ToString("o")) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@runId", (object?)step.RunId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@parentStepId", (object?)step.ParentStepId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@failureReason", (object?)step.FailureReason ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@version", step.Version);
+            cmd.Parameters.AddWithValue("@dependenciesJson", step.Dependencies == null ? (object)DBNull.Value : System.Text.Json.JsonSerializer.Serialize(step.Dependencies));
+            cmd.Parameters.AddWithValue("@expectedFilesJson", step.ExpectedFiles == null ? (object)DBNull.Value : System.Text.Json.JsonSerializer.Serialize(step.ExpectedFiles));
+            cmd.Parameters.AddWithValue("@retryPolicyJson", step.RetryPolicy == null ? (object)DBNull.Value : System.Text.Json.JsonSerializer.Serialize(step.RetryPolicy));
             cmd.Parameters.AddWithValue("@updatedAt", now);
             await cmd.ExecuteNonQueryAsync();
         }
@@ -1297,7 +1344,121 @@ public class MessageStore
                 AttemptCount: reader.GetInt32(11),
                 LastActionId: reader.IsDBNull(12) ? null : reader.GetString(12),
                 StartedAt: reader.IsDBNull(13) ? null : DateTime.Parse(reader.GetString(13), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                CompletedAt: reader.IsDBNull(14) ? null : DateTime.Parse(reader.GetString(14), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+                CompletedAt: reader.IsDBNull(14) ? null : DateTime.Parse(reader.GetString(14), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                RunId: reader.IsDBNull(15) ? null : reader.GetString(15),
+                ParentStepId: reader.IsDBNull(16) ? null : reader.GetString(16),
+                FailureReason: reader.IsDBNull(17) ? null : reader.GetString(17),
+                Version: reader.IsDBNull(18) ? 1 : reader.GetInt32(18),
+                Dependencies: reader.IsDBNull(19) ? null : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(19)),
+                ExpectedFiles: reader.IsDBNull(20) ? null : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(20)),
+                RetryPolicy: reader.IsDBNull(21) ? null : System.Text.Json.JsonSerializer.Deserialize<StepRetryPolicy>(reader.GetString(21))));
+        }
+        return result;
+    }
+
+    // ===== Turns and Generations Persistence (Task -> Run -> Step -> Turn -> Generation) =====
+
+    /// <summary>Persists a single turn record to the turns table.</summary>
+    public async Task SaveTurnAsync(TaskTurn turn)
+    {
+        if (turn == null) return;
+        await using var connection = await CreateConnectionAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+            INSERT OR REPLACE INTO turns
+                (turn_id, step_id, run_id, sequence, started_at, completed_at, status)
+            VALUES
+                (@turnId, @stepId, @runId, @sequence, @startedAt, @completedAt, @status);";
+        cmd.Parameters.AddWithValue("@turnId", turn.TurnId);
+        cmd.Parameters.AddWithValue("@stepId", turn.StepId);
+        cmd.Parameters.AddWithValue("@runId", turn.RunId);
+        cmd.Parameters.AddWithValue("@sequence", turn.Sequence);
+        cmd.Parameters.AddWithValue("@startedAt", turn.StartedAtUtc.ToString("o"));
+        cmd.Parameters.AddWithValue("@completedAt", (object?)(turn.CompletedAtUtc?.ToString("o")) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@status", turn.Status);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Retrieves turns for a run, optionally scoped to a step, ordered by sequence.</summary>
+    public async Task<List<TaskTurn>> GetTurnsAsync(string runId, string? stepId = null)
+    {
+        var result = new List<TaskTurn>();
+        if (string.IsNullOrEmpty(runId)) return result;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        if (string.IsNullOrEmpty(stepId))
+        {
+            command.CommandText = "SELECT turn_id, step_id, run_id, sequence, started_at, completed_at, status FROM turns WHERE run_id = @runId ORDER BY sequence ASC;";
+            command.Parameters.AddWithValue("@runId", runId);
+        }
+        else
+        {
+            command.CommandText = "SELECT turn_id, step_id, run_id, sequence, started_at, completed_at, status FROM turns WHERE run_id = @runId AND step_id = @stepId ORDER BY sequence ASC;";
+            command.Parameters.AddWithValue("@runId", runId);
+            command.Parameters.AddWithValue("@stepId", stepId);
+        }
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new TaskTurn(
+                TurnId: reader.GetString(0),
+                StepId: reader.GetString(1),
+                RunId: reader.GetString(2),
+                Sequence: reader.GetInt32(3),
+                StartedAtUtc: DateTime.Parse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                CompletedAtUtc: reader.IsDBNull(5) ? null : DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                Status: reader.GetString(6)));
+        }
+        return result;
+    }
+
+    /// <summary>Persists a single generation record to the generations table.</summary>
+    public async Task SaveGenerationAsync(TaskGeneration generation)
+    {
+        if (generation == null) return;
+        await using var connection = await CreateConnectionAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+            INSERT OR REPLACE INTO generations
+                (generation_id, turn_id, model_id, request_hash, response_hash, started_at, completed_at, finish_reason, token_count, status)
+            VALUES
+                (@generationId, @turnId, @modelId, @requestHash, @responseHash, @startedAt, @completedAt, @finishReason, @tokenCount, @status);";
+        cmd.Parameters.AddWithValue("@generationId", generation.GenerationId);
+        cmd.Parameters.AddWithValue("@turnId", generation.TurnId);
+        cmd.Parameters.AddWithValue("@modelId", (object?)generation.ModelId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@requestHash", (object?)generation.RequestHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@responseHash", (object?)generation.ResponseHash ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@startedAt", generation.StartedAtUtc.ToString("o"));
+        cmd.Parameters.AddWithValue("@completedAt", (object?)(generation.CompletedAtUtc?.ToString("o")) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@finishReason", (object?)generation.FinishReason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@tokenCount", generation.TokenCount);
+        cmd.Parameters.AddWithValue("@status", generation.Status);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Retrieves generations for a turn, ordered by started_at.</summary>
+    public async Task<List<TaskGeneration>> GetGenerationsAsync(string turnId)
+    {
+        var result = new List<TaskGeneration>();
+        if (string.IsNullOrEmpty(turnId)) return result;
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT generation_id, turn_id, model_id, request_hash, response_hash, started_at, completed_at, finish_reason, token_count, status FROM generations WHERE turn_id = @turnId ORDER BY started_at ASC;";
+        command.Parameters.AddWithValue("@turnId", turnId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new TaskGeneration(
+                GenerationId: reader.GetString(0),
+                TurnId: reader.GetString(1),
+                ModelId: reader.IsDBNull(2) ? null : reader.GetString(2),
+                RequestHash: reader.IsDBNull(3) ? null : reader.GetString(3),
+                ResponseHash: reader.IsDBNull(4) ? null : reader.GetString(4),
+                StartedAtUtc: DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                CompletedAtUtc: reader.IsDBNull(6) ? null : DateTime.Parse(reader.GetString(6), null, System.Globalization.DateTimeStyles.RoundtripKind),
+                FinishReason: reader.IsDBNull(7) ? null : reader.GetString(7),
+                TokenCount: reader.GetInt32(8),
+                Status: reader.GetString(9)));
         }
         return result;
     }

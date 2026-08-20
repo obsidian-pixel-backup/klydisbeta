@@ -3,11 +3,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Klydis.Core.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace Klydis.Core.Skills;
 
-public class DynamicSkillSelector
+public class DynamicSkillSelector : ISkillRouter
 {
     private readonly SkillLibraryManager _libraryManager;
     private readonly ILogger<DynamicSkillSelector>? _logger;
@@ -16,6 +19,62 @@ public class DynamicSkillSelector
     {
         _libraryManager = libraryManager;
         _logger = logger;
+    }
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<Skill>> ResolveSkillsAsync(
+        TaskStep step,
+        string? promptContext = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var enabledSkills = _libraryManager.GetEnabledSkills();
+        if (enabledSkills.Count == 0 || step == null)
+        {
+            return Task.FromResult<IReadOnlyList<Skill>>(Array.Empty<Skill>());
+        }
+
+        var matched = new List<Skill>();
+
+        // 1. Explicit RequiredSkills on the step take highest precedence
+        if (step.RequiredSkills != null && step.RequiredSkills.Count > 0)
+        {
+            foreach (var req in step.RequiredSkills)
+            {
+                var found = enabledSkills.FirstOrDefault(s =>
+                    string.Equals(s.Id, req, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(s.Name, req, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(s.Category, req, StringComparison.OrdinalIgnoreCase) ||
+                    s.Id.Contains(req, StringComparison.OrdinalIgnoreCase) ||
+                    s.Name.Contains(req, StringComparison.OrdinalIgnoreCase) ||
+                    s.Tags.Any(t => string.Equals(t, req, StringComparison.OrdinalIgnoreCase)));
+
+                if (found != null && !matched.Contains(found))
+                {
+                    matched.Add(found);
+                }
+            }
+        }
+
+        // 2. If prompt context or step title is provided and we haven't hit quota, evaluate relevance
+        if (matched.Count < 3)
+        {
+            string contextText = $"{step.Title} {promptContext}".Trim();
+            if (!string.IsNullOrWhiteSpace(contextText))
+            {
+                var scored = ReasonAndSelectSkills(contextText, maxSkillsToSelect: 3);
+                foreach (var sk in scored.SelectedSkills)
+                {
+                    if (!matched.Contains(sk) && matched.Count < 3)
+                    {
+                        matched.Add(sk);
+                    }
+                }
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<Skill>>(matched);
     }
 
     public string GenerateBrainIndex()

@@ -13,6 +13,9 @@ public enum ActionExecutionStatus
     /// <summary>Recorded but not yet started.</summary>
     Pending,
 
+    /// <summary>Validated by ActionGate and prepared for execution.</summary>
+    Prepared,
+
     /// <summary>Execution is in flight (started, not yet completed).</summary>
     InProgress,
 
@@ -79,3 +82,31 @@ public sealed record DurableEvidenceRecord(
     int? ExitCode = null,
     string? PayloadJson = null,
     DateTime? InvalidatedAtUtc = null);
+
+/// <summary>
+/// A durable turn record representing one discrete iteration within a step (Task -> Run -> Step -> Turn -> Generation).
+/// </summary>
+public sealed record TaskTurn(
+    string TurnId,
+    string StepId,
+    string RunId,
+    int Sequence,
+    DateTime StartedAtUtc,
+    DateTime? CompletedAtUtc,
+    string Status);
+
+/// <summary>
+/// A durable model generation record capturing model identity, request/response hashes, and token metrics.
+/// </summary>
+public sealed record TaskGeneration(
+    string GenerationId,
+    string TurnId,
+    string? ModelId,
+    string? RequestHash,
+    string? ResponseHash,
+    DateTime StartedAtUtc,
+    DateTime? CompletedAtUtc,
+    string? FinishReason,
+    int TokenCount,
+    string Status);
+

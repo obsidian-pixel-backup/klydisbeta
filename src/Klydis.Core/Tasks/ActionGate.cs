@@ -188,8 +188,14 @@ public static class ActionGate
         // context resets and protocol fallbacks are the same logical action.
         if (alreadyExecuted != null &&
             alreadyExecuted.Contains(ComputeReplayKey(request)) &&
+            !string.Equals(request.Name, "plan", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(request.Name, "task_progress", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(request.Name, "check_message_queue", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(request.Name, "incorporate_queued_message", StringComparison.OrdinalIgnoreCase) &&
             Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(request.Name) !=
-                Klydis.Core.Tasks.ToolSideEffectLevel.ReadOnly)
+                Klydis.Core.Tasks.ToolSideEffectLevel.ReadOnly &&
+            Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(request.Name) !=
+                Klydis.Core.Tasks.ToolSideEffectLevel.Idempotent)
         {
             return new ActionGateVerdict(false, ActionGateError.ReplayDetected,
                 $"Tool '{request.Name}' with IDENTICAL arguments already executed in this run. " +
@@ -294,17 +300,25 @@ public static class ActionGate
         switch (type)
         {
             case "string":
-                return val is string || val is JsonElement je && je.ValueKind == JsonValueKind.String;
+                return val is string || (val is JsonElement je && je.ValueKind == JsonValueKind.String);
             case "integer":
-                return val is int or long ||
-                       val is JsonElement jn && jn.ValueKind == JsonValueKind.Number &&
-                       jn.TryGetInt64(out _);
+                if (val is int or long or short or byte) return true;
+                if (val is double d && Math.Abs(d % 1) < double.Epsilon) return true;
+                if (val is float f && Math.Abs(f % 1) < float.Epsilon) return true;
+                if (val is JsonElement jn && jn.ValueKind == JsonValueKind.Number && jn.TryGetInt64(out _)) return true;
+                if (val is string strInt && (long.TryParse(strInt, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out _) ||
+                                             (double.TryParse(strInt, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var parsedD) && Math.Abs(parsedD % 1) < double.Epsilon))) return true;
+                return false;
             case "number":
-                return val is int or long or double or float ||
-                       val is JsonElement num && num.ValueKind == JsonValueKind.Number;
+                if (val is int or long or double or float or decimal or short or byte) return true;
+                if (val is JsonElement num && num.ValueKind == JsonValueKind.Number) return true;
+                if (val is string strNum && double.TryParse(strNum, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out _)) return true;
+                return false;
             case "boolean":
-                return val is bool ||
-                       val is JsonElement jb && (jb.ValueKind == JsonValueKind.True || jb.ValueKind == JsonValueKind.False);
+                if (val is bool) return true;
+                if (val is JsonElement jb && (jb.ValueKind == JsonValueKind.True || jb.ValueKind == JsonValueKind.False)) return true;
+                if (val is string strBool && bool.TryParse(strBool, out _)) return true;
+                return false;
             default:
                 // Unknown declared type: be permissive rather than wrongly rejecting.
                 return true;

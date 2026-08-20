@@ -63,7 +63,7 @@ public static class InitialPlanGenerator
         // plan (the reviewer's MSCI example: scope → retrieve → analyze → compare → assess →
         // recommend → verify).
         if (ContainsAny(lower, "analyze", "research", "investigate", "review", "compare",
-            "evaluate", "diagnose", "find out", "assess", "why is", "why did"))
+            "evaluate", "diagnose", "find out", "assess", "why is", "why did", "report", "machine report", "system report"))
         {
             return ResearchSteps();
         }

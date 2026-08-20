@@ -60,6 +60,19 @@ public static class InteractionClassifier
         "who won", "what time", "is it raining", "traffic", "flight", "delays"
     };
 
+    // System, hardware, environment, and tool execution queries REQUIRE tools — Task mode.
+    private static readonly string[] SystemInspectionMarkers =
+    {
+        "system report", "full system report", "machine report", "hardware report",
+        "system info", "system information", "system status", "system specs",
+        "hardware specs", "cpu usage", "ram usage", "disk space", "disk usage",
+        "what os", "what operating system", "which os", "which operating system",
+        "confirm what os", "my os", "current machine", "my machine", "my system",
+        "this machine", "test tools", "test all tools", "test all your tools",
+        "test your tools", "run tool", "list files", "show files", "inspect system",
+        "diagnose system", "check system", "check hardware", "memory usage", "disk load"
+    };
+
     // Informational / explanation requests. These are CONVERSATION even when they mention
     // verbs ("explain how to build an autonomous agent" is a question, not a build task).
     private static readonly string[] ExplanationMarkers =
@@ -119,6 +132,9 @@ public static class InteractionClassifier
 
         string normalized = Normalize(message);
         string[] tokens = Tokenize(normalized);
+
+        // 0. System inspection / environment / tool testing queries ALWAYS route to Task mode with tools.
+        if (ContainsAny(tokens, SystemInspectionMarkers)) return InteractionMode.Task;
 
         // 1. Explicit conversational intent wins over everything.
         if (ContainsAny(tokens, GreetingMarkers)) return InteractionMode.Conversation;

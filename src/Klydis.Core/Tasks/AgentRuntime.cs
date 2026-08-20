@@ -17,14 +17,14 @@ namespace Klydis.Core.Tasks;
 /// this service for every execution decision instead of owning them. The loop's mechanics
 /// still live in ChatEngine for now; this class is the seam that owns WHAT happens next.
 /// </summary>
-public class AgentRuntime(
-    TaskManager taskManager,
-    MessageStore store,
-    ILogger<AgentRuntime>? logger = null)
+public class AgentRuntime : IAgentRuntime
 {
-    private readonly TaskManager _taskManager = taskManager ?? throw new ArgumentNullException(nameof(taskManager));
-    private readonly MessageStore _store = store ?? throw new ArgumentNullException(nameof(store));
-    private readonly ILogger<AgentRuntime>? _logger = logger;
+    private readonly TaskManager _taskManager;
+    private readonly MessageStore _store;
+    private readonly IActionExecutor? _actionExecutor;
+    private readonly ICompletionEngine? _completionEngine;
+    private readonly Skills.ISkillRouter? _skillRouter;
+    private readonly ILogger<AgentRuntime>? _logger;
     private readonly ConcurrentDictionary<string, TaskRun> _activeRuns = new();
 
     // P1.12: the run-scoped evidence ledger (workspace-versioned invalidation + decision
@@ -32,7 +32,42 @@ public class AgentRuntime(
     // persisted to the store, and a fresh run rehydrates the task's surviving evidence so a
     // crash cannot erase a recorded BuildPassed. Keyed by task; reset when a FRESH run
     // starts, kept while a run continues so evidence survives user turns within the run.
-    private readonly ExecutionEvidenceLedger _evidenceLedger = new(store);
+    private readonly ExecutionEvidenceLedger _evidenceLedger;
+
+    public AgentRuntime(
+        TaskManager taskManager,
+        MessageStore store,
+        ILogger<AgentRuntime>? logger = null)
+        : this(taskManager, store, null, null, null, logger)
+    {
+    }
+
+    public AgentRuntime(
+        TaskManager taskManager,
+        MessageStore store,
+        IActionExecutor? actionExecutor,
+        ICompletionEngine? completionEngine,
+        ILogger<AgentRuntime>? logger = null)
+        : this(taskManager, store, actionExecutor, completionEngine, null, logger)
+    {
+    }
+
+    public AgentRuntime(
+        TaskManager taskManager,
+        MessageStore store,
+        IActionExecutor? actionExecutor,
+        ICompletionEngine? completionEngine,
+        Skills.ISkillRouter? skillRouter,
+        ILogger<AgentRuntime>? logger = null)
+    {
+        _taskManager = taskManager ?? throw new ArgumentNullException(nameof(taskManager));
+        _store = store ?? throw new ArgumentNullException(nameof(store));
+        _actionExecutor = actionExecutor;
+        _completionEngine = completionEngine;
+        _skillRouter = skillRouter;
+        _logger = logger;
+        _evidenceLedger = new ExecutionEvidenceLedger(store);
+    }
 
     /// <summary>
     /// Maps the inference engine's raw end-of-generation flags to a <see cref="GenerationOutcome"/>.
@@ -531,6 +566,41 @@ public class AgentRuntime(
         return text.Length <= max ? text : text[..max] + "…[truncated]";
     }
 
+    public static IReadOnlyList<ToolExecutor.PlanEntry> ParsePlanEntries(string? planJson)
+    {
+        if (string.IsNullOrWhiteSpace(planJson)) return Array.Empty<ToolExecutor.PlanEntry>();
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(planJson);
+            if (doc.RootElement.TryGetProperty("Items", out var itemsElement) && itemsElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var list = new List<ToolExecutor.PlanEntry>();
+                foreach (var item in itemsElement.EnumerateArray())
+                {
+                    var text = item.TryGetProperty("Text", out var t) ? t.GetString() ?? string.Empty : string.Empty;
+                    var done = item.TryGetProperty("Done", out var d) && d.GetBoolean();
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        list.Add(new ToolExecutor.PlanEntry(text, done));
+                    }
+                }
+                return list;
+            }
+        }
+        catch
+        {
+            // fallback
+        }
+        return Array.Empty<ToolExecutor.PlanEntry>();
+    }
+
+    public static string SerializePlanEntries(IReadOnlyList<ToolExecutor.PlanEntry> entries)
+    {
+        var items = entries.Select((e, idx) => new { Id = (idx + 1).ToString(), Text = e.Text, Done = e.Done }).ToList();
+        int progress = entries.Count == 0 ? 0 : (int)(entries.Count(e => e.Done) * 100.0 / entries.Count);
+        return System.Text.Json.JsonSerializer.Serialize(new { Items = items, Progress = progress });
+    }
+
     /// <summary>
     /// P1.15 (Phase A) — the SINGLE dispatcher. Every supervisor decision is executed here:
     /// the durable half (decision ledger record + legal task-state transition) happens in the
@@ -667,4 +737,220 @@ public class AgentRuntime(
         int maxStalledTurns = 6)
         => Task.FromResult(AgentSupervisor.DecideAfterTurn(snapshot, maxCompletionRejections, maxStalledTurns));
 
+    /// <inheritdoc />
+    public async Task<RunResult> RunAsync(string taskId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(taskId))
+        {
+            throw new ArgumentException("TaskId cannot be null or empty.", nameof(taskId));
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            var existingRunId = GetActiveRunId(taskId) ?? string.Empty;
+            return new RunResult(
+                RunId: existingRunId,
+                TaskId: taskId,
+                Status: RunStatus.Cancelled,
+                TurnCount: 0,
+                Summary: null,
+                Error: "Execution was cancelled.");
+        }
+
+        var task = await _taskManager.GetTaskAsync(taskId);
+        if (task == null)
+        {
+            return new RunResult(
+                RunId: string.Empty,
+                TaskId: taskId,
+                Status: RunStatus.Failed,
+                TurnCount: 0,
+                Summary: null,
+                Error: $"Task '{taskId}' was not found.");
+        }
+
+        if (task.Status is TaskStatus.Completed or TaskStatus.Failed or TaskStatus.Cancelled)
+        {
+            var existingRunId = GetActiveRunId(taskId) ?? string.Empty;
+            var terminalRunStatus = task.Status == TaskStatus.Completed ? RunStatus.Completed
+                : task.Status == TaskStatus.Failed ? RunStatus.Failed
+                : RunStatus.Cancelled;
+            return new RunResult(
+                RunId: existingRunId,
+                TaskId: taskId,
+                Status: terminalRunStatus,
+                TurnCount: 0,
+                Summary: task.Summary,
+                Error: null);
+        }
+
+        if (task.Status is TaskStatus.Pending or TaskStatus.Paused or TaskStatus.Ready)
+        {
+            await TransitionTaskStateAsync(taskId, TaskStatus.Running);
+        }
+
+        var run = await EnsureRunAsync(taskId);
+        int maxAutonomousCycles = 1000;
+        int cycleCount = 0;
+        int consecutiveStalls = 0;
+        int consecutiveRejections = 0;
+
+        try
+        {
+            while (cycleCount < maxAutonomousCycles && !cancellationToken.IsCancellationRequested)
+            {
+                cycleCount++;
+
+                // 1. Refresh authoritative task and plan state
+                task = await _taskManager.GetTaskAsync(taskId);
+                if (task == null || task.Status is TaskStatus.Completed or TaskStatus.Failed or TaskStatus.Cancelled)
+                {
+                    break;
+                }
+
+                var planJson = await _taskManager.GetPlanAsync(taskId);
+                var plan = ParsePlanEntries(planJson);
+                var steps = TaskStepBuilder.Build(plan, taskId);
+                var currentStep = TaskStepBuilder.CurrentStep(steps);
+
+                // 2. Evaluate completion via CompletionEngine if provided, or built-in eligibility
+                if (_completionEngine != null)
+                {
+                    var runContext = new RunContext(
+                        TaskId: taskId,
+                        RunId: run.RunId,
+                        Plan: plan,
+                        CurrentEvidence: GetRunEvidence(taskId),
+                        Actions: await GetTaskActionsAsync(taskId, run.RunId));
+
+                    var completionDecision = await _completionEngine.EvaluateAsync(runContext, cancellationToken);
+                    if (completionDecision.IsComplete)
+                    {
+                        await CompleteTaskAsync(taskId, completionDecision.Reason);
+                        await EndRunAsync(taskId, RunStatus.Completed);
+                        return new RunResult(
+                            RunId: run.RunId,
+                            TaskId: taskId,
+                            Status: RunStatus.Completed,
+                            TurnCount: run.TurnCount,
+                            Summary: task.Summary ?? completionDecision.Reason);
+                    }
+                }
+
+                // 3. Build execution snapshot & supervisor decision
+                var snapshot = new TaskExecutionSnapshot(
+                    TaskId: taskId,
+                    TaskObjective: task.Objective,
+                    RunId: run.RunId,
+                    CurrentStep: currentStep,
+                    Plan: plan,
+                    PendingQueueItems: 0,
+                    Outcome: GenerationOutcome.CompletedTurn,
+                    StateDelta: StateDelta.Empty,
+                    CompletionRejections: consecutiveRejections,
+                    ConsecutiveStalledTurns: consecutiveStalls);
+
+                var decision = AgentSupervisor.DecideAfterTurn(snapshot, maxCompletionRejections: 3, maxStalledTurns: 6);
+
+                // 4. Dispatch directive and perform durable transitions
+                var directive = await DispatchAsync(decision, snapshot);
+
+                // 5. Handle terminal / pause directives
+                if (directive.Kind == DispatchDirectiveKind.SealCompletion)
+                {
+                    await EndRunAsync(taskId, RunStatus.Completed);
+                    return new RunResult(
+                        RunId: run.RunId,
+                        TaskId: taskId,
+                        Status: RunStatus.Completed,
+                        TurnCount: run.TurnCount,
+                        Summary: task.Summary ?? directive.Message);
+                }
+
+                if (directive.Kind == DispatchDirectiveKind.MarkFailed)
+                {
+                    await EndRunAsync(taskId, RunStatus.Failed);
+                    return new RunResult(
+                        RunId: run.RunId,
+                        TaskId: taskId,
+                        Status: RunStatus.Failed,
+                        TurnCount: run.TurnCount,
+                        Summary: task.Summary,
+                        Error: directive.Message);
+                }
+
+                if (directive.Kind == DispatchDirectiveKind.EndTurnNotice)
+                {
+                    await EndRunAsync(taskId, RunStatus.Paused);
+                    return new RunResult(
+                        RunId: run.RunId,
+                        TaskId: taskId,
+                        Status: RunStatus.Paused,
+                        TurnCount: run.TurnCount,
+                        Summary: task.Summary);
+                }
+
+                // 6. Execute action if ActionExecutor is present and step has action obligation
+                if (_actionExecutor != null && currentStep != null)
+                {
+                    var obligation = ActionObligation.FromStep(currentStep);
+                    var toolName = (obligation?.AllowedTools != null && obligation.AllowedTools.Count > 0)
+                        ? obligation.AllowedTools.First()
+                        : "run_command";
+
+                    var actionRequest = new ActionRequest(
+                        ActionId: ActionGate.ComputeActionId(new ToolCallRequest(toolName, new Dictionary<string, object>()), taskId, run.RunId, cycleCount),
+                        TaskId: taskId,
+                        RunId: run.RunId,
+                        StepId: currentStep.StepId,
+                        ToolName: toolName,
+                        Arguments: new Dictionary<string, object>());
+
+                    var actionId = RecordRunActionStart(
+                        taskId, run.RunId, currentStep.StepId, $"{run.RunId}#T{run.TurnCount}",
+                        new ToolCallRequest(toolName, new Dictionary<string, object>()),
+                        cycleCount);
+
+                    if (actionId != null)
+                    {
+                        var actionResult = await _actionExecutor.ExecuteAsync(actionRequest, cancellationToken);
+                        RecordRunActionComplete(
+                            actionId,
+                            actionResult.Success ? ActionExecutionStatus.Succeeded : ActionExecutionStatus.Failed,
+                            actionResult.OutputPreview,
+                            actionResult.Error);
+
+                        if (actionResult.Success)
+                        {
+                            var updatedPlan = plan.Select(p => p.Text == currentStep.Title ? new ToolExecutor.PlanEntry(p.Text, true) : p).ToList();
+                            await _taskManager.SavePlanAsync(taskId, SerializePlanEntries(updatedPlan));
+                        }
+                    }
+                }
+
+                // Bump run turn
+                run = await EnsureRunAsync(taskId);
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                await EndRunAsync(taskId, RunStatus.Cancelled);
+                return new RunResult(run.RunId, taskId, RunStatus.Cancelled, run.TurnCount, task?.Summary, "Execution was cancelled.");
+            }
+
+            var finalTask = await _taskManager.GetTaskAsync(taskId);
+            var finalStatus = finalTask?.Status == TaskStatus.Completed ? RunStatus.Completed
+                : finalTask?.Status == TaskStatus.Failed ? RunStatus.Failed
+                : RunStatus.Suspended;
+
+            await EndRunAsync(taskId, finalStatus);
+            return new RunResult(run.RunId, taskId, finalStatus, run.TurnCount, finalTask?.Summary);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogError(ex, "Uncaught error during autonomous run of task {TaskId}", taskId);
+            await EndRunAsync(taskId, RunStatus.Interrupted);
+            return new RunResult(run.RunId, taskId, RunStatus.Interrupted, run.TurnCount, task?.Summary, ex.Message);
+        }
+    }
 }

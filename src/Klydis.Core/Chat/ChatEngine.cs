@@ -662,12 +662,10 @@ public class ChatEngine(
     /// <summary>
     /// Stall watchdog threshold for the per-turn activity clock: if the turn produces NO
     /// stream events (tokens, tool-call boundaries, iteration progress) for this long, the
-    /// turn is cancelled and ends with a stall notice. This is a HANG guard, not a runtime
-    /// cap — legitimately long tool calls and slow re-prefills reset the clock, so it only
-    /// fires when the pipeline is genuinely parked (an await that never resumes leaves the
-    /// UI stuck on "Working…" forever; observed 2026-08-16 mid-auto-continuation).
+    /// turn is cancelled and ends with a stall notice. Defaults to 4 hours to accommodate
+    /// large reasoning models, extensive prompt evaluation, and CPU/RAM inference.
     /// </summary>
-    private static readonly TimeSpan TurnStallThreshold = TimeSpan.FromSeconds(300);
+    public TimeSpan TurnStallThreshold { get; set; } = TimeSpan.FromHours(4);
     /// <summary>
     /// Gets a snapshot of the conversation history. Returns a copy rather than a live view
     /// because the generation task mutates <c>_history</c> (Add/AddRange/Clear) while UI
@@ -1476,8 +1474,9 @@ public class ChatEngine(
             {
                 stallWatchdogFired = true;
                 logger.LogWarning(
-                    "Turn stall watchdog fired: no stream activity for {StallSeconds} seconds while the turn was running. Cancelling the turn so the UI can release the Working state.",
-                    (int)TurnStallThreshold.TotalSeconds);
+                    "Turn stall watchdog fired: no stream activity for {StallMinutes:F1} minutes (threshold: {ThresholdHours:F1}h) while the turn was running. Cancelling the turn.",
+                    (DateTime.UtcNow - lastTurnActivityUtc).TotalMinutes,
+                    TurnStallThreshold.TotalHours);
                 try { stallCts.Cancel(); } catch (ObjectDisposedException) { }
             }
         }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
@@ -2307,9 +2306,9 @@ public class ChatEngine(
 
         if (generationStalled)
         {
-            logger.LogWarning("Turn generation cancelled by the stall watchdog after {StallSeconds} seconds without stream activity.", (int)TurnStallThreshold.TotalSeconds);
+            logger.LogWarning("Turn generation cancelled by the stall watchdog after {StallMinutes:F1} minutes without stream activity.", TurnStallThreshold.TotalMinutes);
             yield return new ChatStreamEvent(ChatStreamEventType.Error,
-                "⚠ The model stopped responding (no output for several minutes). The turn was ended so the app can recover — send your message again to continue.");
+                $"⚠ The model stopped responding (no output for over {TurnStallThreshold.TotalHours:F1} hours). The turn was ended so the app can recover — send your message again to continue.");
             break;
         }
 
@@ -3725,13 +3724,15 @@ public class ChatEngine(
                                 repairStepText = "finish and verify the remaining work";
                             }
                         }
-                        var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response produced only text — no tool action, no file change, no state change. In autonomous task mode, text is not progress; only executed actions and changed task state count.\n" +
+                        var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response produced only text/questions — no tool action, no file change, no state change.\n" +
+                            "CRITICAL AUTONOMY DIRECTIVE: Do NOT ask clarifying questions, do NOT ask for brand/palette/budget details, and do NOT request confirmation before starting.\n" +
+                            "The user expects you to BUILD IMMEDIATELY. Pick modern, tasteful design choices and execute the next tool action (write_file, edit_file, run_command, or list_directory) NOW.\n" +
                             "CURRENT STEP: " + repairStepText + "\n" +
                             BuildAutonomousDirective(repairStepText) + "\n" +
-                            "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — do it.]";
+                            "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — execute a tool call immediately.]";
                         var noActionMsgObj = new ChatMessage(ChatRole.Runtime, noActionMsg);
                         AddToSessionHistory(activeHistory, noActionMsgObj, generatingSessionId);
-                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The model replied without performing any action — re-engaging it on the task…");
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The supervisor detected an inactive response — directing model to execute tools immediately…");
                         continue;
                     }
 

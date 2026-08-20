@@ -64,6 +64,8 @@ public static class WorkspaceBoundaryValidator
             string? path = FindPathArg(args);
             if (string.IsNullOrWhiteSpace(path)) return null;
 
+            path = NormalizePathForWorkspace(path, workspaceRoot);
+
             if (!IsWithinWorkspace(path, workspaceRoot, out string resolved, out string root))
             {
                 return $"path '{path}' resolves to '{resolved}', which is OUTSIDE the task workspace " +
@@ -75,6 +77,7 @@ public static class WorkspaceBoundaryValidator
             string? workingDir = FindWorkingDirArg(args);
             if (!string.IsNullOrWhiteSpace(workingDir))
             {
+                workingDir = NormalizePathForWorkspace(workingDir, workspaceRoot);
                 if (!IsWithinWorkspace(workingDir, workspaceRoot, out string resolved, out string root))
                 {
                     return $"working directory '{workingDir}' resolves to '{resolved}', which is OUTSIDE the task workspace " +
@@ -87,6 +90,30 @@ public static class WorkspaceBoundaryValidator
     }
 
     /// <summary>
+    /// Normalizes near-miss workspace prefixes (e.g. DEVELOPER Project(s) vs DEVELOPER PROJECTS).
+    /// </summary>
+    public static string NormalizePathForWorkspace(string requestedPath, string? workspaceRoot)
+    {
+        if (string.IsNullOrWhiteSpace(requestedPath) || string.IsNullOrWhiteSpace(workspaceRoot))
+            return requestedPath;
+
+        string cleanRoot = workspaceRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string rootName = Path.GetFileName(cleanRoot);
+        if (string.IsNullOrEmpty(rootName)) return requestedPath;
+
+        if (requestedPath.Contains("DEVELOPER Project", StringComparison.OrdinalIgnoreCase))
+        {
+            int idx = requestedPath.IndexOf(rootName, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+            {
+                string rel = requestedPath.Substring(idx + rootName.Length).TrimStart('/', '\\');
+                return Path.Combine(cleanRoot, rel);
+            }
+        }
+        return requestedPath;
+    }
+
+    /// <summary>
     /// Checks whether a given path is strictly within the workspace root.
     /// </summary>
     public static bool IsWithinWorkspace(string requestedPath, string workspaceRoot, out string resolvedPath, out string canonicalRoot)
@@ -96,6 +123,8 @@ public static class WorkspaceBoundaryValidator
 
         if (string.IsNullOrWhiteSpace(requestedPath) || string.IsNullOrWhiteSpace(workspaceRoot))
             return false;
+
+        requestedPath = NormalizePathForWorkspace(requestedPath, workspaceRoot);
 
         try
         {
