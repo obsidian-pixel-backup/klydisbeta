@@ -180,15 +180,30 @@ public partial class App : Application
             // Unresolvable working directory — keep the root null (permissive) and surface it.
             System.Diagnostics.Debug.WriteLine($"Failed to resolve workspace root from the process working directory; workspace enforcement is DISABLED: {ex}");
         }
+        services.AddSingleton<Klydis.Core.Tasks.ITaskEventBus, Klydis.Core.Tasks.TaskEventBus>();
+        services.AddSingleton<Klydis.Core.Tasks.IWorkspaceVersionManager, Klydis.Core.Tasks.WorkspaceVersionManager>();
+        services.AddSingleton<Klydis.Core.Tasks.ITaskWorkspaceManager>(sp => new Klydis.Core.Tasks.TaskWorkspaceManager(appWorkspaceRoot));
+        services.AddSingleton<Klydis.Core.Processes.IProcessManager, Klydis.Core.Processes.ProcessManager>();
+        services.AddSingleton<Klydis.Core.Processes.ITerminalSessionManager, Klydis.Core.Processes.TerminalSessionManager>();
+        services.AddSingleton<Klydis.Core.Tasks.ICompletionEngine, Klydis.Core.Tasks.CompletionEngine>();
+        services.AddSingleton<Klydis.Core.Tasks.IActionExecutor, Klydis.Core.Tasks.ActionExecutorAdapter>();
+        services.AddSingleton<Klydis.Core.Memory.IContextAssemblyPipeline, Klydis.Core.Memory.ContextAssemblyPipeline>();
+        services.AddSingleton<Klydis.Core.Tasks.IStateDeltaStagnationTracker, Klydis.Core.Tasks.StateDeltaStagnationTracker>();
+
         services.AddSingleton<Klydis.Core.Tasks.AgentRuntime>(sp =>
         {
             var runtime = new Klydis.Core.Tasks.AgentRuntime(
                 sp.GetRequiredService<Klydis.Core.Tasks.TaskManager>(),
                 sp.GetRequiredService<MessageStore>(),
+                sp.GetRequiredService<Klydis.Core.Tasks.IActionExecutor>(),
+                sp.GetRequiredService<Klydis.Core.Tasks.ICompletionEngine>(),
+                sp.GetService<Klydis.Core.Skills.ISkillRouter>(),
                 sp.GetService<ILogger<Klydis.Core.Tasks.AgentRuntime>>());
             runtime.WorkspaceRoot = appWorkspaceRoot;
             return runtime;
         });
+        services.AddSingleton<Klydis.Core.Tasks.IAgentRuntime>(sp => sp.GetRequiredService<Klydis.Core.Tasks.AgentRuntime>());
+
         services.AddSingleton<Klydis.Core.Learning.AdaptiveLearningService>();
         services.AddSingleton<Klydis.Core.Chat.CamoufoxManager>();
         services.AddSingleton<Klydis.Core.Chat.StealthBrowserService>();
@@ -198,6 +213,7 @@ public partial class App : Application
         services.AddSingleton<OffloadStrategy>();
         services.AddSingleton<Klydis.Core.Skills.SkillLibraryManager>();
         services.AddSingleton<Klydis.Core.Skills.DynamicSkillSelector>();
+        services.AddSingleton<Klydis.Core.Skills.ISkillRouter>(sp => sp.GetRequiredService<Klydis.Core.Skills.DynamicSkillSelector>());
         // RAG Services
         services.AddSingleton<Klydis.Core.RAG.IVectorEmbedder, Klydis.Core.RAG.LLamaVectorEmbedder>(sp =>
             new Klydis.Core.RAG.LLamaVectorEmbedder(dimension: 384, logger: sp.GetService<ILogger<Klydis.Core.RAG.LLamaVectorEmbedder>>()));
