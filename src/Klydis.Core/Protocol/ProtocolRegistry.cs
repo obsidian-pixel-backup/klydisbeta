@@ -87,12 +87,34 @@ public static class ProtocolRegistry
         };
 
     /// <summary>
-    /// The protocol adapter for a profile, or null when none is registered.
+    /// Resolves the safe protocol key for a profile, applying protocol confidence gating:
+    /// if protocol confidence is low (&lt; 0.50) and the protocol is unverified native,
+    /// it safely falls back to "generic-json" to prevent hallucinated tool dialect loops.
     /// </summary>
-    public static IModelProtocol? Resolve(ModelProfile profile)
+    public static string ResolveSafeProtocolKey(ModelProfile profile)
     {
         if (profile == null) throw new ArgumentNullException(nameof(profile));
-        string? key = ResolveProtocolKey(profile);
+
+        string? rawKey = ResolveProtocolKey(profile);
+        if (rawKey == null) return "generic-json";
+
+        // Protocol confidence gate: below 0.50 confidence on an experimental native protocol,
+        // safely fallback to structured generic-json schema.
+        if (profile.ProtocolConfidence < 0.50 && profile.ToolCalling <= CapabilityLevel.Experimental && rawKey != "generic-json")
+        {
+            return "generic-json";
+        }
+
+        return rawKey;
+    }
+
+    /// <summary>
+    /// The protocol adapter for a profile, or null when none is registered.
+    /// </summary>
+    public static IModelProtocol? Resolve(ModelProfile profile, bool enforceConfidenceGating = false)
+    {
+        if (profile == null) throw new ArgumentNullException(nameof(profile));
+        string? key = enforceConfidenceGating ? ResolveSafeProtocolKey(profile) : ResolveProtocolKey(profile);
         if (key == null) return null;
         Func<ModelProfile, IModelProtocol>? factory;
         lock (_sync)

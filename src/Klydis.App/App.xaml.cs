@@ -7,6 +7,10 @@ using Klydis.Core.Models;
 using Klydis.Core.Inference;
 using Klydis.Core.Chat;
 using Klydis.Core.Memory;
+using Klydis.Core.Capabilities;
+using Klydis.Core.Capabilities.Bridge;
+using Klydis.Core.Capabilities.Policy;
+using Klydis.Core.Epistemic;
 using Klydis.App.ViewModels;
 using Klydis.App.Services;
 
@@ -221,6 +225,45 @@ public partial class App : Application
         services.AddSingleton<Klydis.Core.RAG.DocumentIngestionEngine>();
         services.AddSingleton<Klydis.Core.RAG.HybridRetriever>();
 
+        // Machine Capabilities & Epistemic Subsystem
+        services.AddSingleton<ICapabilityRegistry>(sp =>
+        {
+            var systemProfiler = sp.GetService<SystemProfiler>();
+            var gpuProfiler = sp.GetService<GpuProfiler>();
+            var logger = sp.GetService<ILogger<CapabilityRegistry>>();
+            return CapabilityBootstrapper.CreateDefaultRegistry(systemProfiler, gpuProfiler, logger);
+        });
+        services.AddSingleton<CapabilityGraph>(sp =>
+        {
+            var registry = sp.GetRequiredService<ICapabilityRegistry>();
+            return CapabilityBootstrapper.CreateDefaultGraph(registry);
+        });
+        services.AddSingleton<FactLedger>(sp =>
+        {
+            var store = sp.GetRequiredService<MessageStore>();
+            var logger = sp.GetService<ILogger<FactLedger>>();
+            return new FactLedger(store, logger);
+        });
+        services.AddSingleton<IWorldModel, MachineWorldModel>(sp =>
+        {
+            var ledger = sp.GetRequiredService<FactLedger>();
+            var logger = sp.GetService<ILogger<MachineWorldModel>>();
+            return new MachineWorldModel(ledger, logger);
+        });
+        services.AddSingleton<IPolicyGate, CapabilityPolicyGate>(sp =>
+        {
+            var logger = sp.GetService<ILogger<CapabilityPolicyGate>>();
+            return new CapabilityPolicyGate(AuthorityMode.LocalFullControl, logger);
+        });
+        services.AddSingleton<CapabilityToolBridge>(sp =>
+        {
+            var registry = sp.GetRequiredService<ICapabilityRegistry>();
+            var worldModel = sp.GetRequiredService<IWorldModel>();
+            var policyGate = sp.GetRequiredService<IPolicyGate>();
+            var logger = sp.GetService<ILogger<CapabilityToolBridge>>();
+            return new CapabilityToolBridge(registry, worldModel, policyGate, logger);
+        });
+
         services.AddSingleton<ToolExecutor>(sp =>
         {
             var toolExecutor = new ToolExecutor(
@@ -244,6 +287,8 @@ public partial class App : Application
             // P0: same canonical workspace root as the runtime, so run_command defaults and
             // tool-output offload stay inside the project boundary.
             toolExecutor.WorkspaceRoot = appWorkspaceRoot;
+            toolExecutor.CapabilityRegistry = sp.GetRequiredService<ICapabilityRegistry>() as CapabilityRegistry;
+            toolExecutor.CapabilityToolBridge = sp.GetRequiredService<CapabilityToolBridge>();
             return toolExecutor;
         });
         services.AddSingleton<ChatEngine>(sp =>

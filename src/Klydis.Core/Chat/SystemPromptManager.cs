@@ -677,9 +677,9 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         sb.AppendLine($"- User Home Directory: {userProfile}");
         sb.AppendLine($"- User Account Name: {userName}");
         sb.AppendLine("- When referencing paths or creating files, use actual valid paths on this machine. Never hallucinate user directories.");
-        sb.AppendLine("- Epistemic Rule: You cannot answer environmental, hardware, CPU, RAM, disk, or network queries from internal inference. You MUST obtain real evidence via tools (e.g. run_command, system tools). If tools are unavailable or no evidence exists, state UNKNOWN.");
+        sb.AppendLine("- Epistemic Rule: You cannot answer environmental, hardware, CPU, RAM, GPU, disk, or network queries from internal inference. You MUST obtain real evidence via tools (system_report, system_cpu_metrics, system_gpu_metrics, system_memory_metrics, system_disk_metrics, system_os_info, system_processes, run_command). If tools are unavailable or no evidence exists, state UNKNOWN.");
         sb.AppendLine("- Epistemic Rule: Accuracy > Completeness > Brevity. Never simulate or invent facts.");
-        sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, run_command). Distinguish confirmed requirements from creative suggestions.");
+        sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, replace_lines, run_command). Distinguish confirmed requirements from creative suggestions.");
         sb.AppendLine();
     }
 }

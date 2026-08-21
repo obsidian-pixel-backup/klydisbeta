@@ -16,6 +16,8 @@ using Microsoft.Extensions.Logging;
 using System.Management;
 using Klydis.Core.Memory;
 using Klydis.Core.Workbench;
+using Klydis.Core.Capabilities;
+using Klydis.Core.Capabilities.Bridge;
 
 namespace Klydis.Core.Chat;
 
@@ -139,6 +141,8 @@ public class ToolExecutor(
     public Klydis.Core.RAG.HybridRetriever? HybridRetriever { get; set; } = hybridRetriever;
     public Klydis.Core.RAG.DocumentIngestionEngine? IngestionEngine { get; set; } = ingestionEngine;
     public Klydis.Core.Learning.AdaptiveLearningService? AdaptiveLearning { get; set; } = adaptiveLearning;
+    public CapabilityRegistry? CapabilityRegistry { get; set; }
+    public CapabilityToolBridge? CapabilityToolBridge { get; set; }
 
     /// <summary>
     /// Gets or sets the current risk level mode.
@@ -336,6 +340,39 @@ public class ToolExecutor(
             new("items", "string", "Newline-separated list of tasks (for action=create or add)", false),
             new("item", "string", "Single task to complete or remove — match by its number (e.g. '2') or by text", false),
             new("progress", "integer", "Optional overall completion percent 0-100", false)
+        }, false),
+        new ToolDefinition("system_report", "Returns a full comprehensive system diagnostic report covering CPU, GPU (NVML/WMI), RAM, Disks, Operating System, and Displays.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_cpu_metrics", "Returns detailed CPU hardware specs, core counts, clock frequency, and real-time CPU utilization.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_gpu_metrics", "Returns detailed NVIDIA/system GPU hardware metrics, VRAM usage, temperature, and compute capabilities.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_memory_metrics", "Returns real-time RAM usage, total physical memory, available memory, and process working set.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_disk_metrics", "Returns real-time disk storage status, available drives, free space, and capacity.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_os_info", "Returns host operating system details, version, machine architecture, and user context.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_processes", "Returns a list of currently running processes with PID, memory working set, and process count.", new List<ToolParameter>
+        {
+            new("top_n", "integer", "Optional maximum number of top processes by memory to return (default 25)", false),
+            new("filter", "string", "Optional name filter for process names", false)
+        }, false),
+        new ToolDefinition("desktop_launch", "Launches a desktop application or browser URL with optional arguments and target monitor placement.", new List<ToolParameter>
+        {
+            new("app", "string", "Application name or path (e.g. 'chrome', 'notepad', 'code', 'calc')", true),
+            new("arguments", "string", "Optional CLI arguments or target URL to pass to the application", false),
+            new("target", "string", "Optional URL or file target to open", false),
+            new("monitor", "integer", "Optional target monitor index (1, 2, 3...)", false)
+        }, false),
+        new ToolDefinition("replace_lines", "Replaces a specific 1-indexed inclusive line range [start_line, end_line] in a file with new content. Use for precise chunk edits when line numbers are known.", new List<ToolParameter>
+        {
+            new("path", "string", "Absolute path to the file", true),
+            new("start_line", "integer", "Starting line number (1-indexed, inclusive)", true),
+            new("end_line", "integer", "Ending line number (1-indexed, inclusive)", true),
+            new("new_content", "string", "Replacement text for the specified line range", true)
+        }, false),
+        new ToolDefinition("manage_process", "Manages long-running background processes (start, status, input, kill, list, remove) without hanging the chat turn.", new List<ToolParameter>
+        {
+            new("action", "string", "One of: start, status, input, kill, list, remove", true, new[] { "start", "status", "input", "kill", "list", "remove" }),
+            new("command", "string", "Command to execute (required for action=start)", false),
+            new("process_id", "string", "ID of the managed process (required for status, input, kill, remove)", false),
+            new("input", "string", "Input text to send to the process's standard input (for action=input)", false),
+            new("working_directory", "string", "Optional working directory for the process (for action=start)", false)
         }, false)
     };
 
@@ -360,43 +397,59 @@ public class ToolExecutor(
     public async Task<IList<ToolDefinition>> GetToolDefinitionsAsync()
     {
         var allTools = new List<ToolDefinition>(_tools);
-        if (messageStore == null) return allTools;
 
+        List<ToolDefinition>? customDefs = null;
         lock (_customToolsCacheLock)
         {
-            if (_customToolDefinitionsCache != null)
+            customDefs = _customToolDefinitionsCache;
+        }
+
+        if (customDefs == null && messageStore != null)
+        {
+            var customTools = await messageStore.GetCustomToolsAsync();
+            var defs = new List<ToolDefinition>(customTools.Count);
+
+            foreach (var ct in customTools)
             {
-                allTools.AddRange(_customToolDefinitionsCache);
-                return allTools;
+                var parameters = new List<ToolParameter>();
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(ct.ParametersJson))
+                    {
+                        parameters = JsonSerializer.Deserialize<List<ToolParameter>>(ct.ParametersJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<ToolParameter>();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to parse parameters for custom tool {ToolName}", ct.Name);
+                }
+
+                // Custom tools are now allowed by default, subject to risky request detection
+                defs.Add(new ToolDefinition(ct.Name, ct.Description, parameters, RequiresApproval: false));
+            }
+
+            lock (_customToolsCacheLock)
+            {
+                _customToolDefinitionsCache = defs;
+                customDefs = defs;
             }
         }
 
-        var customTools = await messageStore.GetCustomToolsAsync();
-        var customDefinitions = new List<ToolDefinition>(customTools.Count);
-
-        foreach (var ct in customTools)
+        if (customDefs != null)
         {
-            var parameters = new List<ToolParameter>();
-            try
+            allTools.AddRange(customDefs);
+        }
+
+        if (CapabilityRegistry != null)
+        {
+            var capDefs = CapabilityRegistry.ToToolDefinitions();
+            foreach (var cd in capDefs)
             {
-                if (!string.IsNullOrWhiteSpace(ct.ParametersJson))
+                if (!allTools.Any(t => t.Name.Equals(cd.Name, StringComparison.OrdinalIgnoreCase)))
                 {
-                    parameters = JsonSerializer.Deserialize<List<ToolParameter>>(ct.ParametersJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<ToolParameter>();
+                    allTools.Add(cd);
                 }
             }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to parse parameters for custom tool {ToolName}", ct.Name);
-            }
-
-            // Custom tools are now allowed by default, subject to risky request detection
-            customDefinitions.Add(new ToolDefinition(ct.Name, ct.Description, parameters, RequiresApproval: false));
-        }
-
-        lock (_customToolsCacheLock)
-        {
-            _customToolDefinitionsCache ??= customDefinitions;
-            allTools.AddRange(_customToolDefinitionsCache);
         }
 
         return allTools;
@@ -584,6 +637,18 @@ public class ToolExecutor(
                 "task_complete" => ExecuteTaskComplete(request),
                 "task_progress" => ExecuteTaskProgress(request),
                 "plan" => await ExecutePlanAsync(request, sessionId),
+                "system_report" => await GetSystemReportAsync(toolCt),
+                "system_cpu_metrics" => await GetSystemCpuMetricsAsync(toolCt),
+                "system_gpu_metrics" => await GetSystemGpuMetricsAsync(toolCt),
+                "system_memory_metrics" => await GetSystemMemoryMetricsAsync(toolCt),
+                "system_disk_metrics" => await GetSystemDiskMetricsAsync(toolCt),
+                "system_os_info" => await GetSystemOsInfoAsync(toolCt),
+                "system_processes" => await GetSystemProcessesAsync(request, toolCt),
+                "desktop_launch" => await DesktopLaunchAsync(request, toolCt),
+                "replace_lines" => await ReplaceLinesAsync(request, sessionId, toolCt),
+                "manage_process" => await ManageProcessAsync(request, toolCt),
+                _ when CapabilityToolBridge?.CanHandle(canonicalName) == true =>
+                    await CapabilityToolBridge.ExecuteAsync(canonicalName, request.Arguments, CurrentTaskId, CurrentRunId, toolCt),
                 _ => await ExecuteCustomToolAsync(request, toolCt)
             };
         }
@@ -1593,6 +1658,532 @@ public class ToolExecutor(
 
         var info = string.Join("\n", infoList);
         return Task.FromResult(new ToolResult("get_system_info", true, info, null));
+    }
+
+    private async Task<ToolResult> GetSystemReportAsync(CancellationToken ct)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("### Comprehensive System Diagnostic Report");
+        sb.AppendLine();
+
+        try
+        {
+            // 1. OS & Platform
+            sb.AppendLine($"**Operating System:** {Environment.OSVersion} ({(Environment.Is64BitOperatingSystem ? "64-bit" : "32-bit")})");
+            sb.AppendLine($"**Host / Machine Name:** {Environment.MachineName}");
+            sb.AppendLine($"**User / Context:** {Environment.UserName}");
+            sb.AppendLine($"**System Up Time:** {TimeSpan.FromMilliseconds(Environment.TickCount64):d\\.hh\\:mm\\:ss}");
+            sb.AppendLine();
+
+            // 2. CPU & Memory Metrics
+            var cpuTask = Task.Run(() =>
+            {
+                string name = "Unknown CPU";
+                int cores = Environment.ProcessorCount;
+                int logical = Environment.ProcessorCount;
+                try
+                {
+                    using var searcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor");
+                    foreach (var obj in searcher.Get())
+                    {
+                        name = obj["Name"]?.ToString()?.Trim() ?? name;
+                        cores = Convert.ToInt32(obj["NumberOfCores"] ?? cores);
+                        logical = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? logical);
+                        break;
+                    }
+                }
+                catch { }
+                return (Name: name, Cores: cores, Logical: logical);
+            }, ct);
+
+            var ramTask = Task.Run(() =>
+            {
+                double total = 0, free = 0;
+                try
+                {
+                    using var s1 = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem");
+                    foreach (var o in s1.Get()) { total = Convert.ToUInt64(o["TotalPhysicalMemory"] ?? 0) / (1024.0 * 1024 * 1024); break; }
+                    using var s2 = new ManagementObjectSearcher("SELECT FreePhysicalMemory FROM Win32_OperatingSystem");
+                    foreach (var o in s2.Get()) { free = Convert.ToUInt64(o["FreePhysicalMemory"] ?? 0) / (1024.0 * 1024); break; }
+                }
+                catch { }
+                return (Total: total, Free: free, Used: Math.Max(0, total - free));
+            }, ct);
+
+            var gpuTask = Task.Run(async () =>
+            {
+                var gpuProfiler = new Klydis.Core.Hardware.GpuProfiler();
+                return await gpuProfiler.GetGpuInfoAsync();
+            }, ct);
+
+            await Task.WhenAll(cpuTask, ramTask, gpuTask);
+
+            var cpu = await cpuTask;
+            sb.AppendLine($"**CPU:** {cpu.Name} ({cpu.Cores} Cores / {cpu.Logical} Logical Threads)");
+
+            var ram = await ramTask;
+            sb.AppendLine($"**RAM:** {ram.Used:0.0} GB used / {ram.Total:0.0} GB total ({ram.Free:0.0} GB free)");
+            sb.AppendLine($"**Klydis Working Set:** {Environment.WorkingSet / (1024 * 1024)} MB");
+            sb.AppendLine();
+
+            // 3. GPU Telemetry
+            var gpu = await gpuTask;
+            sb.AppendLine("#### GPU & Graphics Acceleration");
+            if (gpu != null)
+            {
+                sb.AppendLine($"* **Name:** {gpu.Name}");
+                sb.AppendLine($"* **VRAM:** {gpu.UsedVramMb} MB used / {gpu.TotalVramMb} MB total ({gpu.FreeVramMb} MB free)");
+                if (gpu.GpuUtilPercent > 0) sb.AppendLine($"* **GPU Core Utilization:** {gpu.GpuUtilPercent}%");
+                if (gpu.Temperature > 0) sb.AppendLine($"* **Temperature:** {gpu.Temperature}°C");
+                if (!string.IsNullOrEmpty(gpu.ComputeCapability)) sb.AppendLine($"* **Compute Capability:** {gpu.ComputeCapability}");
+                if (!string.IsNullOrEmpty(gpu.DriverVersion)) sb.AppendLine($"* **Driver Version:** {gpu.DriverVersion}");
+            }
+            else
+            {
+                sb.AppendLine("* **Name:** None detected / standard display adapter");
+            }
+            sb.AppendLine();
+
+            // 4. Disks & Storage
+            sb.AppendLine("#### Storage Drives");
+            foreach (var d in DriveInfo.GetDrives().Where(d => d.IsReady))
+            {
+                double totalGb = d.TotalSize / (1024.0 * 1024 * 1024);
+                double freeGb = d.TotalFreeSpace / (1024.0 * 1024 * 1024);
+                double pctUsed = totalGb > 0 ? ((totalGb - freeGb) / totalGb) * 100 : 0;
+                sb.AppendLine($"* **Drive {d.Name}** ({d.DriveFormat}): {freeGb:0.0} GB free of {totalGb:0.0} GB ({pctUsed:0.0}% used)");
+            }
+            sb.AppendLine();
+
+            // 5. Active Processes Snapshot
+            var procs = Process.GetProcesses();
+            sb.AppendLine($"**Active Processes:** {procs.Length} processes currently running");
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"\n[Telemetry query notice: {ex.Message}]");
+        }
+
+        return new ToolResult("system_report", true, sb.ToString().TrimEnd(), null);
+    }
+
+    private Task<ToolResult> GetSystemCpuMetricsAsync(CancellationToken ct)
+    {
+        try
+        {
+            string name = "Unknown CPU";
+            int cores = Environment.ProcessorCount;
+            int logical = Environment.ProcessorCount;
+            uint maxClockSpeed = 0;
+
+            using (var searcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed FROM Win32_Processor"))
+            {
+                foreach (var obj in searcher.Get())
+                {
+                    name = obj["Name"]?.ToString()?.Trim() ?? name;
+                    cores = Convert.ToInt32(obj["NumberOfCores"] ?? cores);
+                    logical = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? logical);
+                    maxClockSpeed = Convert.ToUInt32(obj["MaxClockSpeed"] ?? 0);
+                    break;
+                }
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"**CPU Model:** {name}");
+            sb.AppendLine($"**Cores / Logical Processors:** {cores} Cores, {logical} Threads");
+            if (maxClockSpeed > 0) sb.AppendLine($"**Base / Max Clock:** {maxClockSpeed} MHz");
+            sb.AppendLine($"**Logical Processor Count (Environment):** {Environment.ProcessorCount}");
+            sb.AppendLine($"**Current App Process Affinity Count:** {Environment.ProcessorCount}");
+
+            return Task.FromResult(new ToolResult("system_cpu_metrics", true, sb.ToString().TrimEnd(), null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new ToolResult("system_cpu_metrics", false, string.Empty, $"Failed to retrieve CPU metrics: {ex.Message}"));
+        }
+    }
+
+    private async Task<ToolResult> GetSystemGpuMetricsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var gpuProfiler = new Klydis.Core.Hardware.GpuProfiler();
+            var gpu = await gpuProfiler.GetGpuInfoAsync();
+
+            if (gpu == null)
+            {
+                return new ToolResult("system_gpu_metrics", true, "**GPU Device:** None detected or standard display adapter.", null);
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"**GPU Device:** {gpu.Name}");
+            sb.AppendLine($"**VRAM:** {gpu.UsedVramMb} MB used / {gpu.TotalVramMb} MB total ({gpu.FreeVramMb} MB free)");
+            if (gpu.GpuUtilPercent > 0) sb.AppendLine($"**GPU Utilization:** {gpu.GpuUtilPercent}%");
+            if (gpu.Temperature > 0) sb.AppendLine($"**Temperature:** {gpu.Temperature}°C");
+            if (!string.IsNullOrEmpty(gpu.ComputeCapability)) sb.AppendLine($"**Compute Capability:** {gpu.ComputeCapability}");
+            if (!string.IsNullOrEmpty(gpu.DriverVersion)) sb.AppendLine($"**Driver Version:** {gpu.DriverVersion}");
+
+            return new ToolResult("system_gpu_metrics", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_gpu_metrics", false, string.Empty, $"Failed to retrieve GPU metrics: {ex.Message}");
+        }
+    }
+
+    private Task<ToolResult> GetSystemMemoryMetricsAsync(CancellationToken ct)
+    {
+        try
+        {
+            double totalRamGb = 0;
+            double availableRamGb = 0;
+            using (var s1 = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem"))
+            {
+                foreach (var o in s1.Get())
+                {
+                    totalRamGb = Convert.ToUInt64(o["TotalPhysicalMemory"] ?? 0) / (1024.0 * 1024 * 1024);
+                    break;
+                }
+            }
+            using (var s2 = new ManagementObjectSearcher("SELECT FreePhysicalMemory FROM Win32_OperatingSystem"))
+            {
+                foreach (var o in s2.Get())
+                {
+                    availableRamGb = Convert.ToUInt64(o["FreePhysicalMemory"] ?? 0) / (1024.0 * 1024);
+                    break;
+                }
+            }
+
+            double usedRamGb = Math.Max(0, totalRamGb - availableRamGb);
+            double pctUsed = totalRamGb > 0 ? (usedRamGb / totalRamGb) * 100 : 0;
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"**Total Physical Memory:** {totalRamGb:0.00} GB");
+            sb.AppendLine($"**Available / Free Memory:** {availableRamGb:0.00} GB");
+            sb.AppendLine($"**Used Memory:** {usedRamGb:0.00} GB ({pctUsed:0.0}% used)");
+            sb.AppendLine($"**Process Working Set:** {Environment.WorkingSet / (1024 * 1024)} MB");
+
+            return Task.FromResult(new ToolResult("system_memory_metrics", true, sb.ToString().TrimEnd(), null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new ToolResult("system_memory_metrics", false, string.Empty, $"Failed to retrieve Memory metrics: {ex.Message}"));
+        }
+    }
+
+    private Task<ToolResult> GetSystemDiskMetricsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var drives = DriveInfo.GetDrives().Where(d => d.IsReady).ToList();
+            var sb = new StringBuilder();
+            sb.AppendLine("### Storage & Disk Metrics");
+            foreach (var d in drives)
+            {
+                double totalGb = d.TotalSize / (1024.0 * 1024 * 1024);
+                double freeGb = d.TotalFreeSpace / (1024.0 * 1024 * 1024);
+                double usedGb = totalGb - freeGb;
+                double pctUsed = totalGb > 0 ? (usedGb / totalGb) * 100 : 0;
+                sb.AppendLine($"* **Drive {d.Name}** [{d.DriveFormat}] {d.VolumeLabel}: {freeGb:0.0} GB free of {totalGb:0.0} GB ({pctUsed:0.0}% used)");
+            }
+
+            return Task.FromResult(new ToolResult("system_disk_metrics", true, sb.ToString().TrimEnd(), null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new ToolResult("system_disk_metrics", false, string.Empty, $"Failed to retrieve Disk metrics: {ex.Message}"));
+        }
+    }
+
+    private Task<ToolResult> GetSystemOsInfoAsync(CancellationToken ct)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"**Operating System:** {Environment.OSVersion}");
+            sb.AppendLine($"**Architecture:** {(Environment.Is64BitOperatingSystem ? "64-bit OS" : "32-bit OS")}, {(Environment.Is64BitProcess ? "64-bit Process" : "32-bit Process")}");
+            sb.AppendLine($"**Machine Name:** {Environment.MachineName}");
+            sb.AppendLine($"**User Domain / Name:** {Environment.UserDomainName}\\{Environment.UserName}");
+            sb.AppendLine($"**System Directory:** {Environment.SystemDirectory}");
+            sb.AppendLine($"**CLR Runtime Version:** {Environment.Version}");
+            sb.AppendLine($"**System Up Time:** {TimeSpan.FromMilliseconds(Environment.TickCount64):d\\.hh\\:mm\\:ss}");
+
+            return Task.FromResult(new ToolResult("system_os_info", true, sb.ToString().TrimEnd(), null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new ToolResult("system_os_info", false, string.Empty, $"Failed to retrieve OS info: {ex.Message}"));
+        }
+    }
+
+    private Task<ToolResult> GetSystemProcessesAsync(ToolCallRequest request, CancellationToken ct)
+    {
+        try
+        {
+            int topN = 25;
+            if (request.Arguments != null && request.Arguments.TryGetValue("top_n", out var topObj))
+            {
+                var unwrapped = UnwrapJsonElement(topObj);
+                if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int n) && n > 0) topN = n;
+            }
+
+            string? filter = GetStringArg(request.Arguments, "filter");
+
+            var allProcs = Process.GetProcesses();
+            var query = allProcs.AsEnumerable();
+
+            if (!string.IsNullOrWhiteSpace(filter))
+            {
+                query = query.Where(p => p.ProcessName.Contains(filter, StringComparison.OrdinalIgnoreCase));
+            }
+
+            var sorted = query
+                .OrderByDescending(p =>
+                {
+                    try { return p.WorkingSet64; } catch { return 0; }
+                })
+                .Take(topN)
+                .ToList();
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"Total Running Processes: {allProcs.Length}");
+            sb.AppendLine($"Showing Top {sorted.Count} Processes (by Memory Working Set):");
+            sb.AppendLine();
+            sb.AppendLine("| PID | Process Name | Working Set (MB) |");
+            sb.AppendLine("|---|---|---|");
+
+            foreach (var p in sorted)
+            {
+                long memMb = 0;
+                try { memMb = p.WorkingSet64 / (1024 * 1024); } catch { }
+                sb.AppendLine($"| {p.Id} | {p.ProcessName} | {memMb} MB |");
+            }
+
+            return Task.FromResult(new ToolResult("system_processes", true, sb.ToString().TrimEnd(), null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new ToolResult("system_processes", false, string.Empty, $"Failed to enumerate processes: {ex.Message}"));
+        }
+    }
+
+    private Task<ToolResult> DesktopLaunchAsync(ToolCallRequest request, CancellationToken ct)
+    {
+        var app = GetStringArg(request.Arguments, "app");
+        if (string.IsNullOrWhiteSpace(app)) return Task.FromResult(InvalidCall(request.Name, "app is required"));
+
+        var args = GetStringArg(request.Arguments, "arguments");
+        var target = GetStringArg(request.Arguments, "target");
+        int monitor = 1;
+        if (request.Arguments != null && request.Arguments.TryGetValue("monitor", out var monObj))
+        {
+            var unwrapped = UnwrapJsonElement(monObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int m) && m > 0) monitor = m;
+        }
+
+        try
+        {
+            string executable = app;
+            string commandArgs = args ?? string.Empty;
+
+            if (app.Equals("chrome", StringComparison.OrdinalIgnoreCase) ||
+                app.Equals("google chrome", StringComparison.OrdinalIgnoreCase) ||
+                app.Equals("browser", StringComparison.OrdinalIgnoreCase))
+            {
+                executable = "chrome.exe";
+                if (!string.IsNullOrEmpty(target))
+                {
+                    commandArgs = target;
+                }
+            }
+            else if (app.Equals("notepad", StringComparison.OrdinalIgnoreCase))
+            {
+                executable = "notepad.exe";
+                if (!string.IsNullOrEmpty(target)) commandArgs = target;
+            }
+            else if (app.Equals("calc", StringComparison.OrdinalIgnoreCase) || app.Equals("calculator", StringComparison.OrdinalIgnoreCase))
+            {
+                executable = "calc.exe";
+            }
+            else if (app.Equals("code", StringComparison.OrdinalIgnoreCase) || app.Equals("vscode", StringComparison.OrdinalIgnoreCase))
+            {
+                executable = "code";
+                if (!string.IsNullOrEmpty(target)) commandArgs = target;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = executable,
+                Arguments = commandArgs,
+                UseShellExecute = true
+            };
+
+            var proc = Process.Start(psi);
+            string monitorNotice = monitor > 1 ? $" (targeted monitor {monitor})" : string.Empty;
+            return Task.FromResult(new ToolResult("desktop_launch", true,
+                $"Successfully launched '{executable}' {commandArgs}{monitorNotice}. (PID: {proc?.Id ?? 0})", null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new ToolResult("desktop_launch", false, string.Empty, $"Failed to launch '{app}': {ex.Message}"));
+        }
+    }
+
+    private async Task<ToolResult> ReplaceLinesAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
+    {
+        var path = GetStringArg(request.Arguments, "path");
+        var newContent = GetStringArg(request.Arguments, "new_content");
+        if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Path is required");
+        if (newContent == null) return InvalidCall(request.Name, "new_content is required");
+        var commandLike = CommandLikePathResult(request, path);
+        if (commandLike != null) return commandLike;
+        if (!File.Exists(path)) return new ToolResult(request.Name, false, string.Empty, $"File not found: {path}");
+
+        int startLine = 1;
+        int endLine = 1;
+        if (request.Arguments != null && request.Arguments.TryGetValue("start_line", out var slObj))
+        {
+            var unwrapped = UnwrapJsonElement(slObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int sl)) startLine = sl;
+        }
+        if (request.Arguments != null && request.Arguments.TryGetValue("end_line", out var elObj))
+        {
+            var unwrapped = UnwrapJsonElement(elObj);
+            if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int el)) endLine = el;
+        }
+
+        if (startLine < 1) return InvalidCall(request.Name, "start_line must be >= 1 (1-indexed)");
+        if (endLine < startLine) return InvalidCall(request.Name, $"end_line ({endLine}) must be >= start_line ({startLine})");
+
+        string beforeContent;
+        try
+        {
+            beforeContent = await File.ReadAllTextAsync(path, ct);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult(request.Name, false, string.Empty, $"Failed to read {path}: {ex.Message}");
+        }
+
+        var lines = beforeContent.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None).ToList();
+        if (startLine > lines.Count)
+        {
+            return new ToolResult(request.Name, false, string.Empty,
+                $"start_line ({startLine}) exceeds file line count ({lines.Count}).");
+        }
+
+        int clampedEnd = Math.Min(endLine, lines.Count);
+        int removeCount = clampedEnd - startLine + 1;
+
+        var replacementLines = newContent.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+
+        lines.RemoveRange(startLine - 1, removeCount);
+        lines.InsertRange(startLine - 1, replacementLines);
+
+        string afterContent = string.Join(beforeContent.Contains("\r\n") ? "\r\n" : "\n", lines);
+
+        await File.WriteAllTextAsync(path, afterContent, ct);
+        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, afterContent);
+
+        return new ToolResult(request.Name, true,
+            $"Successfully replaced lines {startLine}-{clampedEnd} ({removeCount} line(s) replaced with {replacementLines.Length} line(s)).", null);
+    }
+
+    private Task<ToolResult> ManageProcessAsync(ToolCallRequest request, CancellationToken ct)
+    {
+        var action = GetStringArg(request.Arguments, "action")?.ToLowerInvariant();
+        if (string.IsNullOrEmpty(action)) return Task.FromResult(InvalidCall(request.Name, "action is required ('start', 'status', 'input', 'kill', 'list', 'remove')"));
+
+        var pm = Klydis.Core.Processes.ProcessManager.Default;
+
+        switch (action)
+        {
+            case "start":
+            {
+                var command = GetStringArg(request.Arguments, "command");
+                if (string.IsNullOrWhiteSpace(command)) return Task.FromResult(InvalidCall(request.Name, "command is required for action 'start'"));
+                var workingDir = GetStringArg(request.Arguments, "working_directory") ?? WorkspaceRoot;
+                var processId = GetStringArg(request.Arguments, "process_id");
+
+                var report = pm.StartProcess(new Klydis.Core.Processes.ProcessStartOptions
+                {
+                    Command = command,
+                    WorkingDirectory = workingDir,
+                    ProcessId = processId,
+                    WorkspaceRoot = WorkspaceRoot
+                });
+
+                return Task.FromResult(new ToolResult(request.Name, true,
+                    $"Process started.\nProcess ID: {report.ProcessId}\nPID: {report.NativePid}\nCommand: {report.Command}\nRunning: {report.IsRunning}", null));
+            }
+            case "status":
+            {
+                var processId = GetStringArg(request.Arguments, "process_id");
+                if (string.IsNullOrWhiteSpace(processId)) return Task.FromResult(InvalidCall(request.Name, "process_id is required for action 'status'"));
+
+                var report = pm.GetStatus(processId, includeFullOutput: false);
+                if (report == null) return Task.FromResult(new ToolResult(request.Name, false, string.Empty, $"Process '{processId}' not found."));
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"Process ID: {report.ProcessId} (PID: {report.NativePid ?? -1})");
+                sb.AppendLine($"Command: {report.Command}");
+                sb.AppendLine($"Running: {report.IsRunning} | Elapsed: {report.Elapsed:mm\\:ss}");
+                if (report.ExitCode.HasValue) sb.AppendLine($"Exit Code: {report.ExitCode.Value}");
+                if (!string.IsNullOrEmpty(report.StdoutDelta))
+                {
+                    sb.AppendLine("--- STDOUT (New) ---");
+                    sb.AppendLine(report.StdoutDelta);
+                }
+                if (!string.IsNullOrEmpty(report.StderrDelta))
+                {
+                    sb.AppendLine("--- STDERR (New) ---");
+                    sb.AppendLine(report.StderrDelta);
+                }
+
+                return Task.FromResult(new ToolResult(request.Name, true, sb.ToString().TrimEnd(), null));
+            }
+            case "input":
+            {
+                var processId = GetStringArg(request.Arguments, "process_id");
+                var input = GetStringArg(request.Arguments, "input");
+                if (string.IsNullOrWhiteSpace(processId)) return Task.FromResult(InvalidCall(request.Name, "process_id is required for action 'input'"));
+                if (input == null) return Task.FromResult(InvalidCall(request.Name, "input is required for action 'input'"));
+
+                bool sent = pm.SendInput(processId, input, addNewline: true);
+                return Task.FromResult(new ToolResult(request.Name, sent, sent ? $"Input sent to process '{processId}'." : $"Failed to send input: process '{processId}' not found or not running.", null));
+            }
+            case "kill":
+            {
+                var processId = GetStringArg(request.Arguments, "process_id");
+                if (string.IsNullOrWhiteSpace(processId)) return Task.FromResult(InvalidCall(request.Name, "process_id is required for action 'kill'"));
+
+                bool killed = pm.KillProcess(processId, entireTree: true);
+                return Task.FromResult(new ToolResult(request.Name, killed, killed ? $"Process '{processId}' killed." : $"Failed to kill process '{processId}'.", null));
+            }
+            case "list":
+            {
+                var list = pm.ListProcesses();
+                if (list.Count == 0) return Task.FromResult(new ToolResult(request.Name, true, "No managed background processes currently active.", null));
+
+                var sb = new StringBuilder();
+                sb.AppendLine("Active Managed Background Processes:");
+                foreach (var p in list)
+                {
+                    sb.AppendLine($"  - ID: {p.ProcessId} | PID: {p.NativePid} | Status: {(p.IsRunning ? "RUNNING" : $"EXITED({p.ExitCode})")} | Elapsed: {p.Elapsed:mm\\:ss} | Command: {p.Command}");
+                }
+                return Task.FromResult(new ToolResult(request.Name, true, sb.ToString().TrimEnd(), null));
+            }
+            case "remove":
+            {
+                var processId = GetStringArg(request.Arguments, "process_id");
+                if (string.IsNullOrWhiteSpace(processId)) return Task.FromResult(InvalidCall(request.Name, "process_id is required for action 'remove'"));
+
+                bool removed = pm.RemoveProcess(processId);
+                return Task.FromResult(new ToolResult(request.Name, removed, removed ? $"Process '{processId}' removed." : $"Process '{processId}' not found.", null));
+            }
+            default:
+                return Task.FromResult(InvalidCall(request.Name, $"Unknown action '{action}'. Use start, status, input, kill, list, or remove."));
+        }
     }
 #pragma warning restore CA1416
 

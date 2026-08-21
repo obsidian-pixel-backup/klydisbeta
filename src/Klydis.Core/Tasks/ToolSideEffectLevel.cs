@@ -37,7 +37,9 @@ public static class ToolSideEffectClassifier
     private static readonly HashSet<string> ReadOnlyTools = new(StringComparer.OrdinalIgnoreCase)
     {
         "read_file", "view_file", "list_directory", "list_dir", "search_files", "grep_search",
-        "get_system_info", "search_web", "crawl_url", "check_message_queue", "retrieve_memory",
+        "get_system_info", "system_report", "system_cpu_metrics", "system_gpu_metrics", "system_memory_metrics",
+        "system_disk_metrics", "system_os_info", "system_processes",
+        "search_web", "crawl_url", "check_message_queue", "retrieve_memory",
         "list_skills", "search_skills", "get_skill_details", "search_rag", "list_rag_collections",
         "recall_lessons", "list_custom_tools", "get_custom_tool"
     };

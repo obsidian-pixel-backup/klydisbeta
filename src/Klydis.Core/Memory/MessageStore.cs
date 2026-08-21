@@ -134,6 +134,23 @@ public sealed record ExecutionEventRow(
 );
 
 /// <summary>
+/// A durable epistemic fact entry in the Fact Ledger with volatility TTL.
+/// </summary>
+public sealed record FactLedgerRow(
+    string FactId,
+    string Domain,
+    string EntityKey,
+    string PropertyName,
+    string ValueJson,
+    string SourceCapability,
+    double Confidence,
+    DateTime CreatedAtUtc,
+    DateTime ExpiresAtUtc,
+    bool IsInvalidated,
+    string? InvalidationReason
+);
+
+/// <summary>
 /// SQLite-based persistence for chat sessions and messages.
 /// </summary>
 public class MessageStore
@@ -493,7 +510,22 @@ public class MessageStore
                 token_count INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_generations_turn ON generations(turn_id, started_at);
+            -- Fact Ledger: Epistemic facts with physical volatility TTLs
+            CREATE TABLE IF NOT EXISTS fact_ledger (
+                fact_id TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                property_name TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                source_capability TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                created_at_utc TEXT NOT NULL,
+                expires_at_utc TEXT NOT NULL,
+                is_invalidated INTEGER NOT NULL DEFAULT 0,
+                invalidation_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_lookup ON fact_ledger(domain, entity_key, expires_at_utc, is_invalidated);
+            CREATE INDEX IF NOT EXISTS idx_fact_domain ON fact_ledger(domain, is_invalidated);
 
             -- FTS5 Virtual Table for full-text search
             CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
@@ -2423,6 +2455,175 @@ public class MessageStore
 
     private static DateTime ParseUtc(string s)
         => DateTime.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+
+    #endregion
+
+    #region Fact Ledger
+
+    /// <summary>
+    /// Inserts or replaces a fact in the durable Fact Ledger table.
+    /// </summary>
+    public async Task UpsertFactAsync(FactLedgerRow fact)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT INTO fact_ledger (
+                fact_id, domain, entity_key, property_name, value_json,
+                source_capability, confidence, created_at_utc, expires_at_utc,
+                is_invalidated, invalidation_reason
+            ) VALUES (
+                @fact_id, @domain, @entity_key, @property_name, @value_json,
+                @source_capability, @confidence, @created_at_utc, @expires_at_utc,
+                @is_invalidated, @invalidation_reason
+            )
+            ON CONFLICT(fact_id) DO UPDATE SET
+                value_json = excluded.value_json,
+                source_capability = excluded.source_capability,
+                confidence = excluded.confidence,
+                created_at_utc = excluded.created_at_utc,
+                expires_at_utc = excluded.expires_at_utc,
+                is_invalidated = excluded.is_invalidated,
+                invalidation_reason = excluded.invalidation_reason;
+        ";
+        command.Parameters.AddWithValue("@fact_id", fact.FactId);
+        command.Parameters.AddWithValue("@domain", fact.Domain);
+        command.Parameters.AddWithValue("@entity_key", fact.EntityKey);
+        command.Parameters.AddWithValue("@property_name", fact.PropertyName);
+        command.Parameters.AddWithValue("@value_json", fact.ValueJson);
+        command.Parameters.AddWithValue("@source_capability", fact.SourceCapability);
+        command.Parameters.AddWithValue("@confidence", fact.Confidence);
+        command.Parameters.AddWithValue("@created_at_utc", fact.CreatedAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@expires_at_utc", fact.ExpiresAtUtc.ToString("o"));
+        command.Parameters.AddWithValue("@is_invalidated", fact.IsInvalidated ? 1 : 0);
+        command.Parameters.AddWithValue("@invalidation_reason", (object?)fact.InvalidationReason ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Gets a specific fact by domain, entity, and property if not invalidated.
+    /// </summary>
+    public async Task<FactLedgerRow?> GetFactAsync(string domain, string entityKey, string propertyName)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT fact_id, domain, entity_key, property_name, value_json, source_capability,
+                   confidence, created_at_utc, expires_at_utc, is_invalidated, invalidation_reason
+            FROM fact_ledger
+            WHERE domain = @domain AND entity_key = @entity_key AND property_name = @property_name
+              AND is_invalidated = 0
+            ORDER BY created_at_utc DESC
+            LIMIT 1;
+        ";
+        command.Parameters.AddWithValue("@domain", domain);
+        command.Parameters.AddWithValue("@entity_key", entityKey);
+        command.Parameters.AddWithValue("@property_name", propertyName);
+        await using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
+        {
+            return ReadFactRow(reader);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Gets all active unexpired facts for a domain.
+    /// </summary>
+    public async Task<List<FactLedgerRow>> GetActiveDomainFactsAsync(string domain, DateTime? nowUtc = null)
+    {
+        var now = (nowUtc ?? DateTime.UtcNow).ToString("o");
+        var list = new List<FactLedgerRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT fact_id, domain, entity_key, property_name, value_json, source_capability,
+                   confidence, created_at_utc, expires_at_utc, is_invalidated, invalidation_reason
+            FROM fact_ledger
+            WHERE domain = @domain AND is_invalidated = 0 AND expires_at_utc > @now
+            ORDER BY entity_key, property_name;
+        ";
+        command.Parameters.AddWithValue("@domain", domain);
+        command.Parameters.AddWithValue("@now", now);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            list.Add(ReadFactRow(reader));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// Invalidates facts in a domain and optionally a specific entity key.
+    /// </summary>
+    public async Task InvalidateFactsAsync(string domain, string? entityKey = null, string? reason = null)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        if (string.IsNullOrEmpty(entityKey))
+        {
+            command.CommandText = @"
+                UPDATE fact_ledger
+                SET is_invalidated = 1, invalidation_reason = @reason
+                WHERE domain = @domain AND is_invalidated = 0;
+            ";
+        }
+        else
+        {
+            command.CommandText = @"
+                UPDATE fact_ledger
+                SET is_invalidated = 1, invalidation_reason = @reason
+                WHERE domain = @domain AND entity_key = @entity_key AND is_invalidated = 0;
+            ";
+            command.Parameters.AddWithValue("@entity_key", entityKey);
+        }
+        command.Parameters.AddWithValue("@domain", domain);
+        command.Parameters.AddWithValue("@reason", (object?)reason ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Gets all active unexpired facts across all domains.
+    /// </summary>
+    public async Task<List<FactLedgerRow>> GetAllActiveFactsAsync(DateTime? nowUtc = null)
+    {
+        var now = (nowUtc ?? DateTime.UtcNow).ToString("o");
+        var list = new List<FactLedgerRow>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT fact_id, domain, entity_key, property_name, value_json, source_capability,
+                   confidence, created_at_utc, expires_at_utc, is_invalidated, invalidation_reason
+            FROM fact_ledger
+            WHERE is_invalidated = 0 AND expires_at_utc > @now
+            ORDER BY domain, entity_key, property_name;
+        ";
+        command.Parameters.AddWithValue("@now", now);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            list.Add(ReadFactRow(reader));
+        }
+        return list;
+    }
+
+    private static FactLedgerRow ReadFactRow(Microsoft.Data.Sqlite.SqliteDataReader reader)
+    {
+        int Ord(string name) => reader.GetOrdinal(name);
+        return new FactLedgerRow(
+            reader.GetString(Ord("fact_id")),
+            reader.GetString(Ord("domain")),
+            reader.GetString(Ord("entity_key")),
+            reader.GetString(Ord("property_name")),
+            reader.GetString(Ord("value_json")),
+            reader.GetString(Ord("source_capability")),
+            reader.GetDouble(Ord("confidence")),
+            ParseUtc(reader.GetString(Ord("created_at_utc"))),
+            ParseUtc(reader.GetString(Ord("expires_at_utc"))),
+            reader.GetInt32(Ord("is_invalidated")) != 0,
+            reader.IsDBNull(Ord("invalidation_reason")) ? null : reader.GetString(Ord("invalidation_reason"))
+        );
+    }
 
     #endregion
 }

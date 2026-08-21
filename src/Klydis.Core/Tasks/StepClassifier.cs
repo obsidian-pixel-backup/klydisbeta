@@ -219,7 +219,7 @@ public static class StepClassifier
         if (InspectionMarkers.Any(t.Contains))
         {
             return Make(StepActionKind.Inspect,
-                new[] { "list_directory", "read_file", "search_files" },
+                new[] { "list_directory", "read_file", "search_files", "get_system_info", "system_report", "system_cpu_metrics", "system_gpu_metrics", "system_memory_metrics", "system_disk_metrics", "system_os_info", "system_processes" },
                 skills: new[] { "workspace-navigation" },
                 artifacts: Array.Empty<string>(),
                 criteria: new[] { "Workspace inspected", "Findings factual (no invented contents)" },

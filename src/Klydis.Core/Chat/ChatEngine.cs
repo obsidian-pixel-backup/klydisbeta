@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Klydis.Core.Inference;
 using Klydis.Core.Inference.Telemetry;
 using Klydis.Core.Tasks;
+using Klydis.Core.Orchestration;
 
 namespace Klydis.Core.Chat;
 
@@ -970,6 +971,31 @@ public class ChatEngine(
             IsGenerating = true;
             _recentTools.Clear();
 
+            string generatingSessionId = CurrentSessionId;
+
+            // ===== DETERMINISTIC DIRECT ACTION FAST-PATH =====
+            // Recognize obvious system telemetry and desktop operational queries ("CPU load", "GPU load", "OS version",
+            // "full system report", "open chrome") and execute them immediately with zero LLM reasoning latency
+            // or capability hallucination risk.
+            var directRoute = DirectActionRouter.TryRoute(userMessage);
+            if (directRoute != null)
+            {
+                var directUserMsg = new ChatMessage(ChatRole.User, userMessage);
+                var activeHist = _sessionHistories.GetOrAdd(generatingSessionId, _ => new List<ChatMessage>(_history));
+                AddToSessionHistory(activeHist, directUserMsg, generatingSessionId);
+                await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
+
+                var directResult = await DirectActionRouter.ExecuteAsync(directRoute, toolExecutor, generatingSessionId, ct);
+                yield return new ChatStreamEvent(ChatStreamEventType.Token, directResult.FormattedResponse);
+
+                var directAssistantMsg = new ChatMessage(ChatRole.Assistant, directResult.FormattedResponse);
+                AddToSessionHistory(activeHist, directAssistantMsg, generatingSessionId);
+                await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, directResult.FormattedResponse, 0, null);
+
+                yield return new ChatStreamEvent(ChatStreamEventType.StreamEnd, "");
+                yield break;
+            }
+
         // ===== INTERACTION-MODE BOUNDARY =====
         // Decide BEFORE task resolution whether this message is ordinary conversation or
         // executable work. Conversation turns (greetings, small talk, explanations) must
@@ -1007,8 +1033,6 @@ public class ChatEngine(
         // belongs to). Cleared in the finally below so direct tool invocations outside a turn
         // never inherit a stale owner.
         toolExecutor.CurrentTaskUserMessage = userMessage;
-
-        string generatingSessionId = CurrentSessionId;
 
         // Task resolution: classify this user message (NEW / CONTINUE / STEER / REOPEN)
         // BEFORE the model runs and persist the decision. The task the message belongs to
@@ -1592,6 +1616,24 @@ public class ChatEngine(
             ? $"\n\nLong-term Memory / World State (summarized HISTORICAL context from earlier in this conversation):\n{session.WorldState}\n" +
               $"The World State above is background history ONLY — it is not a list of active tasks. Do NOT resume, continue, or re-attempt anything described in it unless the user's latest message explicitly asks you to."
             : "";
+
+        if (toolExecutor.CapabilityToolBridge?.WorldModel != null)
+        {
+            try
+            {
+                var machineFactsSummary = await toolExecutor.CapabilityToolBridge.WorldModel.SummarizeStateAsync(ct);
+                if (!string.IsNullOrWhiteSpace(machineFactsSummary))
+                {
+                    worldStateHeader = string.IsNullOrWhiteSpace(worldStateHeader)
+                        ? $"\n\n{machineFactsSummary}\n"
+                        : $"{worldStateHeader}\n\n{machineFactsSummary}\n";
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Failed to query verified machine facts from WorldModel for prompt injection.");
+            }
+        }
 
         if (MessageQueue != null && toolExecutor.MessageQueue == null)
         {
@@ -2399,7 +2441,6 @@ public class ChatEngine(
                     loopCorrection = BuildSelfCorrectionInstruction(loopInfo.Reason, selfCorrectionsThisTurn, mode, loopStepText);
                     NoteLesson($"loop_detector_{loopInfo.Reason}",
                         $"Model entered a degenerate '{loopInfo.Reason}' loop; escalating corrective instruction injected (correction {selfCorrectionsThisTurn} of {MaxSelfCorrectionsPerTurn}).");
-                    yield return new ChatStreamEvent(ChatStreamEventType.Error, $"⚠ {DescribeLoop(loopInfo.Reason)} detected — discarding looped output and self-correcting…");
                 }
                 else if (!rescueTriggered)
                 {
@@ -2423,7 +2464,6 @@ public class ChatEngine(
                     {
                         selfCorrectionsThisTurn++;
                         loopCorrection = "[SYSTEM — REPETITION DETECTED] You are repeating previous outputs without advancing state. Take a completely different action, inspect available evidence, or report UNKNOWN.";
-                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Cross-turn repetition detected — self-correcting…");
                     }
                 }
             }
@@ -3682,6 +3722,15 @@ public class ChatEngine(
                     logger.LogWarning("Model produced {Reason}. Injecting self-correction (correction {Count} of {Max} this turn).",
                         wasThinkingOnly ? "internal reasoning but no visible answer" : "an empty visible response",
                         selfCorrectionsThisTurn, MaxSelfCorrectionsPerTurn);
+
+                    if (wasThinkingOnly)
+                    {
+                        // Critical fix: The model already performed its thinking pass.
+                        // Disabling isQwenThinkingModel prevents the prompt template from appending "<think>\n" AGAIN,
+                        // which would trap the model in a perpetual reasoning loop across all retry attempts.
+                        isQwenThinkingModel = false;
+                    }
+
                     // Step-aware correction (P1.8): an empty generation (typically a qwen
                     // thinking model that only reasoned and never closed its think block) needs
                     // to know WHAT to produce, not just that it produced nothing — otherwise it
@@ -3692,10 +3741,11 @@ public class ChatEngine(
                         : string.Empty;
                     // The channel warning matters for qwen thinking models: they reason inside
                     // the open think block and can emit ZERO visible text while having actually
-                    // produced the deliverable internally. The correction must tell them to
-                    // REPEAT the deliverable as visible text — visible text is the only thing
-                    // that reaches the user.
-                    var emptyCorrection = "[System Self-Correction: Your previous response was EMPTY — you produced no actual visible content (reasoning alone does not count). Close your reasoning and produce the required output now." + emptyStepDirective + " If you produced the deliverable only inside your thinking, WRITE IT OUT as visible reply text now — visible text is the only thing that reaches the user. Do not just close tags or emit whitespace.]";
+                    // produced the deliverable internally. The correction tells them to
+                    // produce visible text directly without opening another think block.
+                    var emptyCorrection = wasThinkingOnly
+                        ? "[System Self-Correction: Your previous response was EMPTY — you produced internal reasoning but no visible answer (reasoning alone does not count). Close your reasoning and produce the required output directly now without <think> tags." + emptyStepDirective + " If you produced the deliverable inside your thinking, WRITE IT OUT as visible reply text now — visible text is the only thing that reaches the user.]"
+                        : "[System Self-Correction: Your previous response was EMPTY — you produced no actual visible content (reasoning alone does not count). Close your reasoning and produce the required output now." + emptyStepDirective + " If you produced the deliverable only inside your thinking, WRITE IT OUT as visible reply text now — visible text is the only thing that reaches the user. Do not just close tags or emit whitespace.]";
                     var emptyMsgObj = new ChatMessage(ChatRole.Runtime, emptyCorrection);
                     AddToSessionHistory(activeHistory, emptyMsgObj, generatingSessionId);
                     // Engine-internal correction: in-memory only (see IsEngineInjectedMessage).
@@ -3717,7 +3767,7 @@ public class ChatEngine(
                     sysPromptMsg = rescueSysMsg;
                     logger.LogWarning("Empty-response corrections exhausted ({Max}). Switching to rescue mode: plain direct answer without tools or thinking blocks.", MaxSelfCorrectionsPerTurn);
                     NoteLesson("rescue_mode_empty", "Rescue mode triggered after repeated failures to produce visible output; plain direct answer forced.");
-                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model keeps failing to produce a visible answer — one final attempt with a plain direct answer…");
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Model produced internal reasoning but keeps failing to produce a visible answer — one final attempt with a plain direct answer…");
                     continue;
                 }
                 else
@@ -3820,7 +3870,7 @@ public class ChatEngine(
         {
             logger.LogWarning("Turn ended with no visible output across {Iterations} iterations (all corrections/rescue attempts failed).", iterationCount);
             yield return new ChatStreamEvent(ChatStreamEventType.Error,
-                "⚠ The model produced no visible response after exhausting self-correction and rescue attempts. Please try rephrasing your request or adjusting the generation settings.");
+                "⚠ The model produced internal reasoning but no visible response after exhausting self-correction and rescue attempts. Please try rephrasing your request or adjusting the generation settings.");
         }
 
         yield return new ChatStreamEvent(ChatStreamEventType.StreamEnd, "");
