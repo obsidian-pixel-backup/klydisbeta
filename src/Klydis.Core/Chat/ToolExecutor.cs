@@ -1777,8 +1777,9 @@ public class ToolExecutor(
             int cores = Environment.ProcessorCount;
             int logical = Environment.ProcessorCount;
             uint maxClockSpeed = 0;
+            ushort? loadPercentage = null;
 
-            using (var searcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed FROM Win32_Processor"))
+            using (var searcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, LoadPercentage FROM Win32_Processor"))
             {
                 foreach (var obj in searcher.Get())
                 {
@@ -1786,6 +1787,10 @@ public class ToolExecutor(
                     cores = Convert.ToInt32(obj["NumberOfCores"] ?? cores);
                     logical = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? logical);
                     maxClockSpeed = Convert.ToUInt32(obj["MaxClockSpeed"] ?? 0);
+                    if (obj["LoadPercentage"] != null)
+                    {
+                        loadPercentage = Convert.ToUInt16(obj["LoadPercentage"]);
+                    }
                     break;
                 }
             }
@@ -1793,6 +1798,7 @@ public class ToolExecutor(
             var sb = new StringBuilder();
             sb.AppendLine($"**CPU Model:** {name}");
             sb.AppendLine($"**Cores / Logical Processors:** {cores} Cores, {logical} Threads");
+            if (loadPercentage.HasValue) sb.AppendLine($"**Current CPU Utilization:** {loadPercentage.Value}%");
             if (maxClockSpeed > 0) sb.AppendLine($"**Base / Max Clock:** {maxClockSpeed} MHz");
             sb.AppendLine($"**Logical Processor Count (Environment):** {Environment.ProcessorCount}");
             sb.AppendLine($"**Current App Process Affinity Count:** {Environment.ProcessorCount}");

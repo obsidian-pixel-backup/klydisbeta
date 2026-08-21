@@ -67,6 +67,62 @@ public static class DeterministicIntentResolver
     }
 
     /// <summary>
+    /// Detects whether the user query is compound, multi-part, multi-line, multi-intent,
+    /// or contains instructions/tasks that require LLM reasoning and agent task execution.
+    /// </summary>
+    public static bool IsCompoundOrMultiTaskQuery(string? rawMessage, string? normalizedText)
+    {
+        if (string.IsNullOrWhiteSpace(rawMessage)) return false;
+
+        // 1. Multi-line input (line breaks denote multi-step tasks, scripts, or itemized lists)
+        if (rawMessage.Contains('\n') || rawMessage.Contains('\r'))
+        {
+            return true;
+        }
+
+        string raw = rawMessage.Trim();
+        string norm = normalizedText ?? Normalize(raw);
+
+        // 2. Numbered lists or bulleted items (e.g., "1. check cpu 2. check gpu", "- item 1", "* task", "(1)", "[1]")
+        if (Regex.IsMatch(raw, @"(?:\b\d+[\.\)]\s+|\b\([a-zA-Z0-9]+\)\s+|^\s*[-*•]\s+)", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        // 3. Multi-clause / conjunction separators (e.g. "and also", "and then", "as well as", "along with", semicolons)
+        if (raw.Contains(';') ||
+            Regex.IsMatch(norm, @"\b(?:and\s+also|and\s+then|as\s+well\s+as|plus|additionally|along\s+with)\b", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        // 4. Multi-domain detection: if multiple telemetry or operational domains are mentioned in one query
+        int domainCount = 0;
+        if (Regex.IsMatch(norm, @"\b(?:cpu|processor|core\s*count)\b", RegexOptions.IgnoreCase)) domainCount++;
+        if (Regex.IsMatch(norm, @"\b(?:gpu|vram|graphics\s*card|video\s*card|nvidia|geforce|rtx|radeon)\b", RegexOptions.IgnoreCase)) domainCount++;
+        if (Regex.IsMatch(norm, @"\b(?:ram|memory|system\s*memory|physical\s*memory)\b", RegexOptions.IgnoreCase) &&
+            !norm.Contains("vram") && !norm.Contains("gpu memory") && !norm.Contains("video memory")) domainCount++;
+        if (Regex.IsMatch(norm, @"\b(?:disk|storage|hard\s*drive|ssd|hdd|drives)\b", RegexOptions.IgnoreCase)) domainCount++;
+        if (Regex.IsMatch(norm, @"\b(?:os|operating\s*system|windows\s*version|windows\s*edition)\b", RegexOptions.IgnoreCase)) domainCount++;
+        if (Regex.IsMatch(norm, @"\b(?:processes|process\s*list|running\s*tasks|tasklist|running\s*apps|active\s*processes)\b", RegexOptions.IgnoreCase)) domainCount++;
+        if (Regex.IsMatch(norm, @"\b(?:network|ip\s*address|ping|wifi|ethernet|bandwidth)\b", RegexOptions.IgnoreCase)) domainCount++;
+
+        // Full system reports ("system report", "hardware specs") are an exception that queries all at once via system_report
+        if (domainCount >= 2 && !IsSystemReportIntent(norm))
+        {
+            return true;
+        }
+
+        // 5. Explicit instruction / explanation / reasoning keywords
+        if (Regex.IsMatch(norm, @"\b(?:why|how\s+to|explain|code|script|program|build|fix|refactor|benchmark|test\s+all|test\s+your|compare)\b", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Evaluates user message against multi-signal entity and intent matchers.
     /// </summary>
     public static DeterministicIntentResult Resolve(string? message)
@@ -78,6 +134,12 @@ public static class DeterministicIntentResolver
 
         string rawClean = message.Trim().TrimEnd('.', '?', '!', '\r', '\n');
         string normalized = Normalize(message);
+
+        // Guard against compound, multi-line, multi-intent, or complex queries
+        if (IsCompoundOrMultiTaskQuery(message, normalized))
+        {
+            return new DeterministicIntentResult(null, 0.0, normalized, null);
+        }
 
         // 1. App Launch Intent
         var appRoute = TryResolveAppLaunch(rawClean, normalized);

@@ -60,19 +60,19 @@ public static class DirectActionRouter
          DirectActionKind.SystemReport, "system_report", "Full hardware report"),
 
         // 2. CPU Metrics
-        (new Regex(@"(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\bcpu\b\s+(?:load|usage|utilization|metrics|specs|frequency|clock|speed)", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        (new Regex(@"^(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\bcpu\b\s+(?:load|usage|utilization|metrics|specs|frequency|clock|speed)$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.CpuMetrics, "system_cpu_metrics", "CPU utilization metrics"),
         (new Regex(@"^(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?processor\s+(?:load|usage|utilization)$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.CpuMetrics, "system_cpu_metrics", "Processor utilization metrics"),
 
         // 3. GPU Metrics (matched before RAM so 'vram' is routed to GPU)
-        (new Regex(@"(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\b(?:gpu|vram|graphics(?:\s+card)?)\b\s+(?:load|usage|utilization|metrics|temperature|temp|specs)", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        (new Regex(@"^(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\b(?:gpu|vram|graphics(?:\s+card)?)\b\s+(?:load|usage|utilization|metrics|temperature|temp|specs)$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.GpuMetrics, "system_gpu_metrics", "GPU utilization and telemetry"),
         (new Regex(@"^(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\b(?:gpu|vram|graphics(?:\s+card)?)\b(?:\s+(?:temperature|temp|vram|specs|status))?$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.GpuMetrics, "system_gpu_metrics", "GPU status and telemetry"),
 
         // 4. Memory / RAM Metrics
-        (new Regex(@"(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\b(?:ram|memory)\b\s+(?:usage|load|status|free|available|total|metrics|stats)", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        (new Regex(@"^(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\b(?:ram|memory)\b\s+(?:usage|load|status|free|available|total|metrics|stats)$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.MemoryMetrics, "system_memory_metrics", "Memory and RAM utilization"),
         (new Regex(@"^(?:how\s+much\s+)?\b(?:ram|memory)\b(?:\s+(?:is\s+)?(?:used|free|available|total|installed))?", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.MemoryMetrics, "system_memory_metrics", "Memory availability"),
@@ -80,13 +80,13 @@ public static class DirectActionRouter
          DirectActionKind.MemoryMetrics, "system_memory_metrics", "Memory status"),
 
         // 5. Disk / Storage Metrics
-        (new Regex(@"(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\b(?:disk|storage|drive|hard\s+drive)\b\s+(?:space|usage|load|status|free|available|drives|info|information)", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        (new Regex(@"^(?:what\s+is\s+(?:my\s+|the\s+)?(?:current\s+)?)?\b(?:disk|storage|drive|hard\s+drive)\b\s+(?:space|usage|load|status|free|available|drives|info|information)$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.DiskMetrics, "system_disk_metrics", "Disk and storage status"),
         (new Regex(@"^(?:how\s+much\s+)?\b(?:storage|drive|hard\s+drive|disk)\b\s+(?:space|info|status)(?:\s+(?:is\s+)?(?:free|left|available))?", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.DiskMetrics, "system_disk_metrics", "Storage space status"),
 
         // 6. OS / Host Info
-        (new Regex(@"(?:what\s+(?:os|operating\s+system)\s+(?:is\s+(?:the\s+|this\s+|my\s+)?machine\s+running(?:\s+on)?|am\s+i\s+running|is\s+installed|version))", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        (new Regex(@"^(?:what\s+(?:os|operating\s+system)\s+(?:is\s+(?:the\s+|this\s+|my\s+)?machine\s+running(?:\s+on)?|am\s+i\s+running|is\s+installed|version))$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.OsInfo, "system_os_info", "Operating system information"),
         (new Regex(@"^(?:what\s+is\s+(?:my\s+|the\s+)?)?(?:os|windows)\s+version$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.OsInfo, "system_os_info", "Operating system version"),
@@ -94,7 +94,7 @@ public static class DirectActionRouter
          DirectActionKind.OsInfo, "system_os_info", "Operating system confirmation"),
 
         // 7. Running Processes
-        (new Regex(@"(?:how\s+many|what)\s+processes\s+(?:are\s+(?:currently\s+)?running|exist)", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        (new Regex(@"^(?:how\s+many|what)\s+processes\s+(?:are\s+(?:currently\s+)?running|exist)$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.ProcessList, "system_processes", "Running process list"),
         (new Regex(@"^(?:show|list|get)\s+(?:running\s+)?processes$", RegexOptions.IgnoreCase | RegexOptions.Compiled),
          DirectActionKind.ProcessList, "system_processes", "Running process enumeration"),
@@ -116,14 +116,21 @@ public static class DirectActionRouter
     {
         if (string.IsNullOrWhiteSpace(message)) return null;
 
+        string clean = message.Trim().TrimEnd('.', '?', '!', '\r', '\n');
+        string normalized = DeterministicIntentResolver.Normalize(message);
+
+        // Guard against compound / multi-task requests before any routing (resolver or fallback route table)
+        if (DeterministicIntentResolver.IsCompoundOrMultiTaskQuery(message, normalized))
+        {
+            return null;
+        }
+
         // 1. Primary: Multi-signal Deterministic Intent Resolver
         var resolved = DeterministicIntentResolver.Resolve(message);
         if (resolved.Route != null && resolved.Confidence >= 0.90)
         {
             return resolved.Route;
         }
-
-        string clean = message.Trim().TrimEnd('.', '?', '!', '\r', '\n');
 
         foreach (var (pattern, kind, toolName, desc) in RouteTable)
         {
