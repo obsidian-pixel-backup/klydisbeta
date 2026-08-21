@@ -319,6 +319,11 @@ public class ChatEngine(
     public string? CurrentTaskObjective { get; private set; }
 
     /// <summary>
+    /// The active agent runtime instance, if configured.
+    /// </summary>
+    public Klydis.Core.Tasks.AgentRuntime? AgentRuntime => _runtime;
+
+    /// <summary>
     /// Calculates the rolling compression threshold: when HISTORY tokens reach this, older
     /// context is summarized into WorldState. The threshold is a fraction of the budget that
     /// is actually AVAILABLE for history — total context minus the response headroom, the

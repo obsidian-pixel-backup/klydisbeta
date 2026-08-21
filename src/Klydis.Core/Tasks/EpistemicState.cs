@@ -171,6 +171,12 @@ public sealed class EpistemicLedger
     }
 
     /// <summary>
+    /// Gets all currently tracked authoritative facts.
+    /// </summary>
+    public IReadOnlyList<EpistemicEntry> GetAllFacts()
+        => _facts.Values.Where(f => f.Freshness == EpistemicFreshness.Current).ToList();
+
+    /// <summary>
     /// Resolves the value for a key. If no authoritative fact exists, returns "UNKNOWN" instead of allowing speculation.
     /// </summary>
     public string ResolveValueOrUnknown(string key)

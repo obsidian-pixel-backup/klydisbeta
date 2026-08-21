@@ -196,6 +196,12 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _hasPlan;
 
+    [ObservableProperty]
+    private string _epistemicSummary = string.Empty;
+
+    [ObservableProperty]
+    private string _budgetSummary = string.Empty;
+
     public ObservableCollection<PlanItemVm> PlanItems { get; } = new();
 
     public ObservableCollection<WorkspaceFileItem> WorkspaceFiles { get; } = new();
@@ -372,6 +378,22 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         PlanStatusText = entries.Count == 0
             ? "No plan yet — when the model works on a task it establishes a todo list with the 'plan' tool."
             : $"{doneCount} of {entries.Count} complete · {pct:F0}%";
+
+        string? taskId = _owner?.CurrentTaskId;
+        if (!string.IsNullOrEmpty(taskId))
+        {
+            var epistemic = _owner?.AgentRuntime?.GetEpistemicLedger(taskId);
+            if (epistemic != null)
+            {
+                var facts = epistemic.GetAllFacts();
+                int verified = facts.Count(f => f.Authority >= Klydis.Core.Tasks.EpistemicAuthority.Verified);
+                EpistemicSummary = $"Facts: {verified} verified · {facts.Count} total";
+            }
+        }
+        else
+        {
+            EpistemicSummary = string.Empty;
+        }
     }
 
     #region Session data (Files / Changes)

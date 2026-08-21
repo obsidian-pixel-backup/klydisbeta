@@ -124,7 +124,8 @@ public sealed class ExecutionEvidenceLedger
                         Freshness: EpistemicFreshness.Current,
                         TimestampUtc: row.TimestampUtc,
                         WorkspaceVersion: row.WorkspaceVersion,
-                        StepId: row.StepId));
+                        Subject: row.Subject,
+                        EvidenceProof: row.StepId));
 
                     if (row.WorkspaceVersion > ledger.WorkspaceVersion)
                     {
@@ -159,8 +160,7 @@ public sealed class ExecutionEvidenceLedger
 
             var epistemicSource = stamped.Kind switch
             {
-                EvidenceKind.UserFact => EpistemicSource.UserFact,
-                EvidenceKind.BuildPassed or EvidenceKind.TestPassed or EvidenceKind.VerificationPassed => EpistemicSource.VerifiedEvidence,
+                EvidenceKind.BuildPassed or EvidenceKind.TestPassed or EvidenceKind.AssertionPassed or EvidenceKind.RequirementSatisfied => EpistemicSource.VerifiedEvidence,
                 _ => EpistemicSource.RuntimeTool
             };
             ledger.Epistemic.RecordFact(new EpistemicEntry(
@@ -171,7 +171,8 @@ public sealed class ExecutionEvidenceLedger
                 Freshness: EpistemicFreshness.Current,
                 TimestampUtc: stamped.TimestampUtc,
                 WorkspaceVersion: stamped.WorkspaceVersion,
-                StepId: stamped.StepId));
+                Subject: stamped.Subject,
+                EvidenceProof: stamped.StepId));
 
             if (_store == null) return;
             try

@@ -260,6 +260,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// (Changes, Files, Preview, Terminal) to the ACTIVE task — never session-wide state.
     /// </summary>
     public string? CurrentTaskId => _chatEngine?.CurrentTaskId;
+    public Klydis.Core.Tasks.AgentRuntime? AgentRuntime => _chatEngine?.AgentRuntime;
 
     public ChatViewModel(
         ChatEngine chatEngine,

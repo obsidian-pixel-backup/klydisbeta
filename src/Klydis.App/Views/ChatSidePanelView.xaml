@@ -428,6 +428,9 @@
                         <ProgressBar Height="4" Minimum="0" Maximum="100" Margin="0,6,0,0" BorderThickness="0"
                                      Background="{DynamicResource BackgroundTertiary}" Foreground="{DynamicResource AccentPrimaryBrush}"
                                      Value="{Binding SidePanel.PlanProgressPercent}"/>
+                        <TextBlock Text="{Binding SidePanel.EpistemicSummary}" FontSize="9.5" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,4,0,0"
+                                   Visibility="{Binding SidePanel.EpistemicSummary, Converter={StaticResource StringToVisibilityConverter}, FallbackValue=Collapsed}"/>
                     </StackPanel>
                 </Border>
 
