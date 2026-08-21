@@ -320,6 +320,22 @@ namespace Klydis.Core.RAG
 
         public int GetTotalChunkCount() => _memoryCache.Count;
 
+        public IReadOnlyList<VectorChunkRecord> GetAllChunks(string? collectionIdFilter = null)
+        {
+            var candidates = _memoryCache.Values.AsEnumerable();
+            if (!string.IsNullOrEmpty(collectionIdFilter))
+            {
+                candidates = candidates.Where(c => c.CollectionId == collectionIdFilter);
+            }
+            return candidates.ToList();
+        }
+
+        public VectorChunkRecord? GetChunk(long id)
+        {
+            _memoryCache.TryGetValue(id, out var chunk);
+            return chunk;
+        }
+
         private static byte[] FloatArrayToByteArray(float[] floats)
         {
             byte[] bytes = new byte[floats.Length * sizeof(float)];

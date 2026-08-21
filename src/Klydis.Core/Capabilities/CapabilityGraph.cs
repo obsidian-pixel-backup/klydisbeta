@@ -61,6 +61,40 @@ public sealed class CapabilityGraph
     }
 
     /// <summary>
+    /// Resolves transitive capability closure including all prerequisites.
+    /// (e.g. "desktop.window.move" -> "desktop.windows.enumerate", "desktop.displays.enumerate").
+    /// </summary>
+    public IReadOnlyList<string> ResolveClosure(IEnumerable<string> capabilityIds)
+    {
+        ArgumentNullException.ThrowIfNull(capabilityIds);
+        var closure = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<string>();
+
+        foreach (var id in capabilityIds)
+        {
+            if (!string.IsNullOrWhiteSpace(id) && closure.Add(id.Trim()))
+            {
+                queue.Enqueue(id.Trim());
+            }
+        }
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            var prereqs = GetPrerequisites(current);
+            foreach (var prereq in prereqs)
+            {
+                if (!string.IsNullOrWhiteSpace(prereq) && closure.Add(prereq.Trim()))
+                {
+                    queue.Enqueue(prereq.Trim());
+                }
+            }
+        }
+
+        return closure.ToList();
+    }
+
+    /// <summary>
     /// Discovers relevant capabilities given a natural language search query or keywords.
     /// </summary>
     public IReadOnlyList<CapabilityDescription> Discover(string query)

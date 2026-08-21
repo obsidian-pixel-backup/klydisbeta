@@ -607,13 +607,9 @@ public class ChatEngine(
     }
 
     /// <summary>
-    /// Seeds a baseline plan once per user message. Seeded when the session has no plan, or
-    /// when the existing plan belongs to a PREVIOUS task and the new message reads as a new
-    /// task (actionable + substantial) — the harness then replaces the obsolete checklist with
-    /// a fresh scaffold stamped to the new message. Short steering messages ("change the
-    /// color to blue") leave the existing plan untouched so a mid-task steer keeps its
-    /// checklist; a genuine steer is still re-adopted as the current task's plan the moment
-    /// the model mutates it via the 'plan' tool.
+    /// Ensures plan state is properly initialized for a new user message without injecting substantive tasks.
+    /// Obsolete completed plans from prior tasks are cleared so the new task starts fresh with zero tasks,
+    /// and the model generates the execution plan from scratch governed by the runtime schema.
     /// </summary>
     private async Task SeedInitialPlanIfNeededAsync(string sessionId, string userMessage)
     {
@@ -622,24 +618,16 @@ public class ChatEngine(
             if (!IsActionableTaskRequest(userMessage)) return;
 
             var existing = toolExecutor.GetSessionPlanEntries(sessionId);
-            // Domain-aware initial plan (workbench spec §2): a landing-page request gets real
-            // section-by-section steps, not the old generic four-item scaffold.
-            var steps = InitialPlanGenerator.Generate(userMessage);
-            if (existing.Count == 0)
-            {
-                await toolExecutor.SeedSessionPlanAsync(sessionId, steps);
-                return;
-            }
-
             string? owner = toolExecutor.GetSessionPlanOwner(sessionId);
-            if (!string.IsNullOrEmpty(owner) && owner != userMessage)
+
+            if (existing.Count > 0 && !string.IsNullOrEmpty(owner) && owner != userMessage)
             {
                 bool hasUnfinishedItems = existing.Any(e => !e.Done);
                 if (!hasUnfinishedItems)
                 {
                     logger.LogInformation(
-                        "Replacing completed plan from a previous task with a fresh harness-seeded plan for the current message.");
-                    await toolExecutor.SeedSessionPlanAsync(sessionId, steps);
+                        "Clearing completed plan from a previous task; fresh task begins with 0 tasks for model planning.");
+                    await toolExecutor.SeedSessionPlanAsync(sessionId, Array.Empty<string>());
                 }
                 else
                 {
@@ -649,9 +637,7 @@ public class ChatEngine(
         }
         catch (Exception ex)
         {
-            // Seeding must never break a turn — a missing scaffold is strictly better than a
-            // failed send. The model can still establish a plan itself via the 'plan' tool.
-            logger.LogDebug(ex, "Failed to seed initial plan for session {SessionId}.", sessionId);
+            logger.LogDebug(ex, "Failed to initialize plan state for session {SessionId}.", sessionId);
         }
     }
 
@@ -931,18 +917,20 @@ public class ChatEngine(
     }
 
     /// <summary>
+    /// <summary>
     /// Streams a response for the user message, handling tool calls automatically.
     /// </summary>
     public async IAsyncEnumerable<ChatStreamEvent> StreamResponseAsync(
         string userMessage, 
         [EnumeratorCancellation] CancellationToken ct,
         string? skillContext = null,
-        bool? isGoalMode = null)
+        bool? isGoalMode = null,
+        string? sessionId = null)
     {
         await _turnGate.WaitAsync(ct);
         try
         {
-            await foreach (var evt in StreamResponseCoreAsync(userMessage, ct, skillContext, isGoalMode))
+            await foreach (var evt in StreamResponseCoreAsync(userMessage, ct, skillContext, isGoalMode, sessionId))
             {
                 yield return evt;
             }
@@ -963,7 +951,8 @@ public class ChatEngine(
         string userMessage,
         [EnumeratorCancellation] CancellationToken ct,
         string? skillContext = null,
-        bool? isGoalMode = null)
+        bool? isGoalMode = null,
+        string? sessionId = null)
     {
         IAsyncEnumerator<ChatStreamEvent>? enumerator = null;
         try
@@ -971,7 +960,7 @@ public class ChatEngine(
             IsGenerating = true;
             _recentTools.Clear();
 
-            string generatingSessionId = CurrentSessionId;
+            string generatingSessionId = !string.IsNullOrWhiteSpace(sessionId) ? sessionId : CurrentSessionId;
 
             // ===== DETERMINISTIC DIRECT ACTION FAST-PATH =====
             // Recognize obvious system telemetry and desktop operational queries ("CPU load", "GPU load", "OS version",
@@ -1294,7 +1283,8 @@ public class ChatEngine(
             : promptEngine.GetStopTokens(templateType);
         var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
-        var tools = toolsDisabled ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
+        var allAvailableTools = toolsDisabled ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
+        var tools = toolsDisabled ? (IReadOnlyList<ToolDefinition>)Array.Empty<ToolDefinition>() : ToolScoper.ScopeTools(allAvailableTools.ToList(), maxTools: 12);
         // P1.8: the FULL schema is kept for the qwen-prelude/grammar gate below; the schema the
         // model actually sees is sliced per-iteration to the current step's allowed set.
         var fullToolsSchema = toolsDisabled ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
@@ -1661,7 +1651,14 @@ public class ChatEngine(
         var queueNotice = (pendingQueue != null && pendingQueue.Count > 0)
             ? "\n\n[PENDING QUEUED USER MESSAGES AVAILABLE]\n" +
               "You have pending queued message(s) from the user waiting in the queue:\n" +
-              string.Join("\n", pendingQueue.Select(m => $"- Queue ID: {m.Id} | Mode: {m.Mode} | Content: \"{m.Content}\"")) +
+              string.Join("\n", pendingQueue.Select(m =>
+              {
+                  string attSummary = m.Attachments.Count > 0
+                      ? $" | Attachments ({m.Attachments.Count}): [{string.Join(", ", m.Attachments.Select(a => $"{a.Type}: {a.FileName}"))}]"
+                      : "";
+                  string contentDisplay = string.IsNullOrWhiteSpace(m.Content) && m.Attachments.Count > 0 ? "[No text message - attachments provided]" : m.Content;
+                  return $"- Queue ID: {m.Id} | Mode: {m.Mode} | Content: \"{contentDisplay}\"{attSummary}";
+              })) +
               "\nWhen you reach an optimal point during your reasoning or execution task to incorporate a queued message, call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to retrieve and steer using that message." +
               (planBelongsToPreviousTask
                   ? "\nCaution: some of these queued messages may relate to your PREVIOUS task. Your LATEST message defines the CURRENT task — do not let old queued items override it. Incorporate them only if they still apply to the current task."
@@ -1860,9 +1857,10 @@ public class ChatEngine(
         // prompt is rebuilt on EVERY loop iteration, so the model always sees its own
         // checklist (with [x] checkmarks) and its reported progress — this is what closes the
         // goal-execution feedback loop: plan → execute → update plan → re-plan → … → complete.
+        IReadOnlyList<string> currentPlan = Array.Empty<string>();
         try
         {
-            var currentPlan = toolExecutor.GetSessionPlan(generatingSessionId);
+            currentPlan = toolExecutor.GetSessionPlan(generatingSessionId);
             // Conversation turns have no plan: even a previous task's checklist must not leak
             // into a greeting's prompt (it would re-raise the old task as work).
             if (!toolsDisabled && currentPlan.Count > 0)
@@ -1948,6 +1946,15 @@ public class ChatEngine(
                     sysPrompt = sysPrompt.TrimEnd() + obsoleteHeader;
                 }
             }
+            else if (isGoalMode && !toolsDisabled && currentPlan.Count == 0)
+            {
+                var availableCapabilities = Klydis.Core.Capabilities.CapabilityBootstrapper.CreateDefaultRegistry().GetAll().Select(c => c.Id).ToList();
+                var planningDirective = PromptInvariantEngine.BuildPlanningPromptDirective(
+                    objective: currentUserMessage ?? "Current Goal",
+                    availableCapabilities: availableCapabilities,
+                    worldState: null);
+                sysPrompt = sysPrompt.TrimEnd() + "\n\n" + planningDirective;
+            }
         }
         catch (Exception ex)
         {
@@ -1966,7 +1973,9 @@ public class ChatEngine(
             // once per iteration above; when it cannot be read, fall back to the generic
             // directive.
             string nextStepText = currentObligationForTurn?.Title
-                ?? "no open plan step — verify the result and call 'task_complete'";
+                ?? (currentPlan.Count == 0
+                    ? "Generate the initial execution plan from scratch using the 'plan' tool for this objective"
+                    : "no open plan step — verify the result and call 'task_complete'");
 
             bool contractProducesText = currentObligationForTurn != null &&
                 currentObligationForTurn.ExpectedActionKind is
@@ -3182,7 +3191,14 @@ public class ChatEngine(
                     var currentPendingQueue = MessageQueue?.GetPending(generatingSessionId, CurrentTaskId);
                     if (currentPendingQueue != null && currentPendingQueue.Count > 0)
                     {
-                        var queueSummaries = string.Join("; ", currentPendingQueue.Select(m => $"[ID: {m.Id}, Mode: {m.Mode}]: \"{m.Content}\""));
+                        var queueSummaries = string.Join("; ", currentPendingQueue.Select(m =>
+                        {
+                            string attSummary = m.Attachments.Count > 0
+                                ? $" ({m.Attachments.Count} attachment(s): {string.Join(", ", m.Attachments.Select(a => $"{a.Type}: {a.FileName}"))})"
+                                : "";
+                            string contentDisplay = string.IsNullOrWhiteSpace(m.Content) && m.Attachments.Count > 0 ? "[No text message]" : m.Content;
+                            return $"[ID: {m.Id}, Mode: {m.Mode}]: \"{contentDisplay}\"{attSummary}";
+                        }));
                         toolOutput += $"\n\n[SYSTEM NOTIFICATION: You have {currentPendingQueue.Count} pending queued message(s) waiting: {queueSummaries}. Call tool 'incorporate_queued_message' with argument {{\"queue_id\": \"<ID>\"}} to inspect and incorporate them into your workflow.]";
                     }
 
@@ -3337,6 +3353,33 @@ public class ChatEngine(
                     visibleResponse.Trim().Length >= MinTextDeliverableLength;
                 bool noActionProducedThisTurn = isGoalMode && !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
                     (refusalLike || (openStepsRemain && (!stepProducesText || !substantiveDeliverable)));
+
+                // Capability Contradiction & Response Validation Gate
+                var executedToolsThisTurn = turnState.Build().Entries
+                    .Where(e => e.Kind == Klydis.Core.Tasks.StateDeltaKind.ToolExecuted)
+                    .Select(e => e.Detail)
+                    .ToList();
+
+                var responseValidation = ResponseValidator.ValidateResponse(
+                    visibleResponse,
+                    executedToolsThisTurn,
+                    tools.Select(t => t.Name),
+                    toolExecutor.CapabilityRegistry);
+
+                if (!responseValidation.IsValid &&
+                    responseValidation.ViolationType == "CapabilityContradiction" &&
+                    !toolsDisabled &&
+                    noActionRepairsThisTurn < MaxNoActionRepairs)
+                {
+                    noActionRepairsThisTurn++;
+                    logger.LogWarning("Capability contradiction detected in response ({Violation}): {Instruction}",
+                        responseValidation.ViolationType, responseValidation.CorrectiveInstruction);
+                    NoteLesson("capability_contradiction", responseValidation.CorrectiveInstruction ?? "Capability contradiction detected.");
+                    var correctiveMsg = new ChatMessage(ChatRole.Tool, responseValidation.CorrectiveInstruction!, "system");
+                    AddToSessionHistory(activeHistory, correctiveMsg, generatingSessionId);
+                    yield return new ChatStreamEvent(ChatStreamEventType.Error, $"⚠ {responseValidation.CorrectiveInstruction}");
+                    continue;
+                }
 
                 // Supervisor: classify the generation outcome and execute the runtime's
                 // decision through the SINGLE dispatcher (P1.15). The decision is owned by

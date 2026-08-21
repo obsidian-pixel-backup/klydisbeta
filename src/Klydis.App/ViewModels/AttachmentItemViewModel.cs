@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows.Media.Imaging;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Klydis.Core.Chat;
 
 namespace Klydis.App.ViewModels;
 
@@ -46,6 +47,53 @@ public partial class AttachmentItemViewModel : ObservableObject
     private void Remove()
     {
         OnRemoveRequested?.Invoke(this);
+    }
+
+    public QueuedMessageAttachment ToQueuedAttachment()
+    {
+        return new QueuedMessageAttachment
+        {
+            Id = Id,
+            FileName = FileName,
+            FilePath = FilePath,
+            Type = Type.ToString(),
+            SizeDisplay = SizeDisplay,
+            Content = Content
+        };
+    }
+
+    public static AttachmentItemViewModel FromQueuedAttachment(QueuedMessageAttachment qa)
+    {
+        if (!Enum.TryParse<AttachmentType>(qa.Type, true, out var type))
+        {
+            type = AttachmentType.File;
+        }
+
+        string icon = type switch
+        {
+            AttachmentType.Image => "🖼️",
+            AttachmentType.Screenshot => "📷",
+            AttachmentType.Audio => "🎙️",
+            AttachmentType.TextContext => "📝",
+            _ => "📄"
+        };
+
+        BitmapSource? thumb = null;
+        if ((type == AttachmentType.Image || type == AttachmentType.Screenshot) && !string.IsNullOrEmpty(qa.FilePath) && File.Exists(qa.FilePath))
+        {
+            thumb = LoadThumbnail(qa.FilePath);
+        }
+
+        return new AttachmentItemViewModel
+        {
+            FileName = qa.FileName,
+            FilePath = qa.FilePath,
+            Type = type,
+            SizeDisplay = qa.SizeDisplay,
+            Content = qa.Content,
+            IconSymbol = icon,
+            Thumbnail = thumb
+        };
     }
 
     public static AttachmentItemViewModel FromFile(string path)

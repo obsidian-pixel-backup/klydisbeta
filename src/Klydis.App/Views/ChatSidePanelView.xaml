@@ -339,30 +339,56 @@
                                             BorderBrush="{DynamicResource BorderBrush}"
                                             BorderThickness="1" CornerRadius="6" Margin="0,0,0,6" Padding="6,5">
                                         <Grid>
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                                            <StackPanel Orientation="Vertical"
                                                         Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
-                                                <Button Style="{DynamicResource GhostButton}"
-                                                        Command="{Binding DataContext.ToggleQueueItemModeCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                        CommandParameter="{Binding}"
-                                                        ToolTip="Toggle between Steer and Direct Send" Margin="0,0,6,0" Padding="0">
-                                                    <Border x:Name="ModeBadgeBorder" Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="5,1.5">
-                                                        <TextBlock x:Name="ModeText" Text="{Binding ModeBadgeText}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                                    </Border>
-                                                </Button>
-                                                <TextBlock Text="{Binding Content}" TextTrimming="CharacterEllipsis" FontSize="11"
-                                                           Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding Content}" MaxWidth="170"/>
-                                                <Button Style="{DynamicResource GhostButton}"
-                                                        Command="{Binding DataContext.SendQueuedItemNowCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                        CommandParameter="{Binding}" ToolTip="Send now" Margin="6,0,0,0" Padding="2,0" VerticalAlignment="Center">
-                                                    <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                                </Button>
-                                                <Button Style="{DynamicResource GhostButton}" Command="{Binding BeginEditCommand}"
-                                                        ToolTip="Edit queued message" Margin="6,0,0,0" Padding="2,0">
-                                                    <TextBlock Text="✎" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
-                                                </Button>
-                                                <Button Style="{DynamicResource QueueItemCloseButton}"
-                                                        Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                        CommandParameter="{Binding}" Margin="4,0,0,0" ToolTip="Cancel / remove" VerticalAlignment="Center"/>
+                                                <DockPanel LastChildFill="True">
+                                                    <Button DockPanel.Dock="Left" Style="{DynamicResource GhostButton}"
+                                                            Command="{Binding DataContext.ToggleQueueItemModeCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                            CommandParameter="{Binding}"
+                                                            ToolTip="Toggle between Steer and Direct Send" Margin="0,0,6,0" Padding="0">
+                                                        <Border x:Name="ModeBadgeBorder" Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="5,1.5">
+                                                            <TextBlock x:Name="ModeText" Text="{Binding ModeBadgeText}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                                        </Border>
+                                                    </Button>
+                                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                                        <Button Style="{DynamicResource GhostButton}"
+                                                                Command="{Binding DataContext.SendQueuedItemNowCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                CommandParameter="{Binding}" ToolTip="Send now" Margin="4,0,0,0" Padding="2,0" VerticalAlignment="Center">
+                                                            <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                                        </Button>
+                                                        <Button Style="{DynamicResource GhostButton}" Command="{Binding BeginEditCommand}"
+                                                                ToolTip="Edit queued message" Margin="4,0,0,0" Padding="2,0" VerticalAlignment="Center">
+                                                            <TextBlock Text="✎" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                        </Button>
+                                                        <Button Style="{DynamicResource QueueItemCloseButton}"
+                                                                Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                                CommandParameter="{Binding}" Margin="4,0,0,0" ToolTip="Cancel / remove" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                    <TextBlock Text="{Binding DisplayText}" TextTrimming="CharacterEllipsis" FontSize="11"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding DisplayText}"/>
+                                                </DockPanel>
+
+                                                <!-- Attachment badges/chips if message has attachments -->
+                                                <ItemsControl ItemsSource="{Binding Attachments}" Margin="0,4,0,0"
+                                                              Visibility="{Binding HasAttachments, Converter={StaticResource BoolToVisConverter}}">
+                                                    <ItemsControl.ItemsPanel>
+                                                        <ItemsPanelTemplate>
+                                                            <WrapPanel Orientation="Horizontal"/>
+                                                        </ItemsPanelTemplate>
+                                                    </ItemsControl.ItemsPanel>
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border Background="{DynamicResource SurfaceElevatedBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                                                    BorderThickness="1" CornerRadius="4" Margin="0,2,4,2" Padding="4,2"
+                                                                    ToolTip="{Binding FilePath}">
+                                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                                    <TextBlock Text="{Binding IconSymbol}" FontSize="10" Margin="0,0,3,0" VerticalAlignment="Center"/>
+                                                                    <TextBlock Text="{Binding FileName}" FontSize="10" Foreground="{DynamicResource TextSecondaryBrush}" MaxWidth="120" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                                                </StackPanel>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
                                             </StackPanel>
                                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
                                                         Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisConverter}}">

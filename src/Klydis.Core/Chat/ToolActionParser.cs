@@ -121,7 +121,10 @@ public static class ToolActionParser
             "i am an internal", "i'm an internal", "i am only", "i'm only",
             "i am a text-only", "i'm a text-only", "text-only agent", "text only agent",
             "i am not able to", "i'm not able to", "i cannot", "i can't",
-            "i am unable", "i'm unable", "cannot proceed", "can't proceed"
+            "i am unable", "i'm unable", "cannot proceed", "can't proceed",
+            // Filler commitments / stalling with no action.
+            "i'll get started", "i will get started", "get started on that", "get right on that",
+            "working on it right away", "on that right away", "on it right away"
         };
         foreach (var m in markers)
         {

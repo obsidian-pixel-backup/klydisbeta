@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
@@ -282,7 +283,8 @@ public class MessageStore
                 created_at TEXT NOT NULL,
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 position INTEGER NOT NULL DEFAULT 0,
-                task_id TEXT
+                task_id TEXT,
+                attachments_json TEXT
             );
 
             -- Durable tasks: the unit of agentic work inside a session. A conversation
@@ -599,6 +601,18 @@ public class MessageStore
         {
             await using var alterCmd = connection.CreateCommand();
             alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN task_id TEXT;";
+            await alterCmd.ExecuteNonQueryAsync();
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        {
+            // Column already exists, ignore
+        }
+
+        // Contextual attachments on queued messages (images, screenshots, text snippets, files, audio)
+        try
+        {
+            await using var alterCmd = connection.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN attachments_json TEXT;";
             await alterCmd.ExecuteNonQueryAsync();
         }
         catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
@@ -1585,10 +1599,14 @@ public class MessageStore
     {
         await using var connection = await CreateConnectionAsync();
 
+        string? attachmentsJson = msg.Attachments != null && msg.Attachments.Count > 0
+            ? JsonSerializer.Serialize(msg.Attachments)
+            : null;
+
         await using var command = connection.CreateCommand();
         command.CommandText = @"
-            INSERT OR REPLACE INTO queued_messages (id, session_id, content, mode, status, created_at, attempt_count, position, task_id)
-            VALUES (@id, @sessionId, @content, @mode, @status, @createdAt, @attemptCount, @position, @taskId);
+            INSERT OR REPLACE INTO queued_messages (id, session_id, content, mode, status, created_at, attempt_count, position, task_id, attachments_json)
+            VALUES (@id, @sessionId, @content, @mode, @status, @createdAt, @attemptCount, @position, @taskId, @attachmentsJson);
         ";
         command.Parameters.AddWithValue("@id", msg.Id.ToString());
         command.Parameters.AddWithValue("@sessionId", msg.SessionId);
@@ -1599,6 +1617,7 @@ public class MessageStore
         command.Parameters.AddWithValue("@attemptCount", msg.AttemptCount);
         command.Parameters.AddWithValue("@position", msg.Position);
         command.Parameters.AddWithValue("@taskId", (object?)msg.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@attachmentsJson", (object?)attachmentsJson ?? DBNull.Value);
 
         await command.ExecuteNonQueryAsync();
     }
@@ -1629,11 +1648,28 @@ public class MessageStore
         await using var connection = await CreateConnectionAsync();
 
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, session_id, content, mode, status, created_at, attempt_count, position, task_id FROM queued_messages ORDER BY position ASC, created_at ASC;";
+        command.CommandText = "SELECT id, session_id, content, mode, status, created_at, attempt_count, position, task_id, attachments_json FROM queued_messages ORDER BY position ASC, created_at ASC;";
 
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            List<QueuedMessageAttachment> attachments = new();
+            if (!reader.IsDBNull(9))
+            {
+                var json = reader.GetString(9);
+                if (!string.IsNullOrWhiteSpace(json))
+                {
+                    try
+                    {
+                        attachments = JsonSerializer.Deserialize<List<QueuedMessageAttachment>>(json) ?? new();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Failed to deserialize queued message attachments for {Id}.", reader.GetString(0));
+                    }
+                }
+            }
+
             result.Add(new QueuedMessage
             {
                 Id = Guid.Parse(reader.GetString(0)),
@@ -1644,7 +1680,8 @@ public class MessageStore
                 CreatedAt = DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
                 AttemptCount = reader.GetInt32(6),
                 Position = reader.GetInt32(7),
-                TaskId = reader.IsDBNull(8) ? null : reader.GetString(8)
+                TaskId = reader.IsDBNull(8) ? null : reader.GetString(8),
+                Attachments = attachments
             });
         }
 

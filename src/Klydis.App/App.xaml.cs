@@ -203,7 +203,9 @@ public partial class App : Application
                 sp.GetRequiredService<Klydis.Core.Tasks.ICompletionEngine>(),
                 sp.GetService<Klydis.Core.Skills.ISkillRouter>(),
                 sp.GetService<ILogger<Klydis.Core.Tasks.AgentRuntime>>());
-            runtime.WorkspaceRoot = appWorkspaceRoot;
+            // Unbounded system access: runtime.WorkspaceRoot is null so the Action Gate
+            // allows the agent full system access to any directory on the machine.
+            runtime.WorkspaceRoot = null;
             return runtime;
         });
         services.AddSingleton<Klydis.Core.Tasks.IAgentRuntime>(sp => sp.GetRequiredService<Klydis.Core.Tasks.AgentRuntime>());
@@ -214,9 +216,16 @@ public partial class App : Application
         services.AddSingleton<ModelPool>();
         services.AddSingleton<GpuProfiler>();
         services.AddSingleton<SystemProfiler>();
-        services.AddSingleton<OffloadStrategy>();
         services.AddSingleton<Klydis.Core.Skills.SkillLibraryManager>();
-        services.AddSingleton<Klydis.Core.Skills.DynamicSkillSelector>();
+        services.AddSingleton<Klydis.Core.Skills.SkillIndex>();
+        services.AddSingleton<Klydis.Core.Skills.SkillReranker>();
+        services.AddSingleton<Klydis.Core.Skills.SkillLeaseManager>();
+        services.AddSingleton<Klydis.Core.Skills.DynamicSkillSelector>(sp =>
+            new Klydis.Core.Skills.DynamicSkillSelector(
+                sp.GetRequiredService<Klydis.Core.Skills.SkillLibraryManager>(),
+                sp.GetService<Klydis.Core.Skills.SkillIndex>(),
+                sp.GetService<Klydis.Core.Skills.SkillReranker>(),
+                sp.GetService<ILogger<Klydis.Core.Skills.DynamicSkillSelector>>()));
         services.AddSingleton<Klydis.Core.Skills.ISkillRouter>(sp => sp.GetRequiredService<Klydis.Core.Skills.DynamicSkillSelector>());
         // RAG Services
         services.AddSingleton<Klydis.Core.RAG.IVectorEmbedder, Klydis.Core.RAG.LLamaVectorEmbedder>(sp =>

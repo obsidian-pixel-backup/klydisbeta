@@ -376,7 +376,7 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         PlanProgressPercent = pct;
         HasPlan = entries.Count > 0;
         PlanStatusText = entries.Count == 0
-            ? "No plan yet — when the model works on a task it establishes a todo list with the 'plan' tool."
+            ? "No plan yet — the model generates an execution plan for the objective."
             : $"{doneCount} of {entries.Count} complete · {pct:F0}%";
 
         string? taskId = _owner?.CurrentTaskId;

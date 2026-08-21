@@ -334,11 +334,13 @@ public class ToolExecutor(
             new("percent", "integer", "Estimated percentage of goal completion (0-100)", true),
             new("status", "string", "Brief description of current progress and next steps", true)
         }, false),
-        new ToolDefinition("plan", "Maintains the agent's todo list for the current task or goal. The plan is persisted for this chat and re-injected into your context every turn, so it is the authoritative checklist you keep updating. Use action 'create' with a newline-separated 'items' list to establish the plan, 'add' to append tasks, 'complete' to mark a task done (match by its number or text), 'remove' to delete a task, 'show' to review the current plan, and 'clear' to reset it.", new List<ToolParameter>
+        new ToolDefinition("plan", "Maintains the agent's execution plan and todo list for the current goal. The plan is governed by the runtime schema, persisted, and re-injected into your context every turn. Use action 'create'/'set_plan' with 'items' or 'tasks' to establish the concrete plan from scratch, 'add' to append tasks, 'patch' to mutate tasks/dependencies/revisions, 'complete' to mark a task done (match by number, ID, or text), 'remove' to delete a task, 'show' to review the current plan, and 'clear' to reset it.", new List<ToolParameter>
         {
-            new("action", "string", "One of: create, add, complete, remove, show, clear (defaults to 'show' if omitted, 'create' if items provided, or 'complete' if item provided)", false, new[] { "create", "add", "complete", "remove", "show", "clear" }),
-            new("items", "string", "Newline-separated list of tasks (for action=create or add)", false),
-            new("item", "string", "Single task to complete or remove — match by its number (e.g. '2') or by text", false),
+            new("action", "string", "One of: create, add, complete, remove, patch, show, clear (defaults to 'show' if omitted, 'create' if items/tasks provided, or 'complete' if item provided)", false, new[] { "create", "add", "complete", "remove", "patch", "show", "clear", "set_plan" }),
+            new("items", "string", "Newline-separated list of tasks or JSON task list (for action=create or add)", false),
+            new("tasks", "object", "Structured task list or array (for action=create or set_plan)", false),
+            new("item", "string", "Single task to complete or remove — match by its ID, number (e.g. '2'), or text", false),
+            new("patch", "object", "Structured PlanPatch object or operation details (for action=patch)", false),
             new("progress", "integer", "Optional overall completion percent 0-100", false)
         }, false),
         new ToolDefinition("system_report", "Returns a full comprehensive system diagnostic report covering CPU, GPU (NVML/WMI), RAM, Disks, Operating System, and Displays.", new List<ToolParameter>(), false),
@@ -466,7 +468,7 @@ public class ToolExecutor(
     /// <summary>
     /// Formats tools as a JSON schema for the prompt.
     /// </summary>
-    public string FormatToolsForPrompt(IList<ToolDefinition> tools)
+    public string FormatToolsForPrompt(IEnumerable<ToolDefinition> tools)
     {
         var schema = tools.Select(t => new
         {
@@ -2853,7 +2855,21 @@ public class ToolExecutor(
         foreach (var msg in pending)
         {
             sb.AppendLine($"- Queue ID: {msg.Id} | Mode: {msg.Mode} | Status: {msg.Status} | Created: {msg.CreatedAt:HH:mm:ss}");
-            sb.AppendLine($"  Content: \"{msg.Content}\"");
+            string contentDisplay = string.IsNullOrWhiteSpace(msg.Content) && msg.Attachments.Count > 0 ? "[No text message - attachments provided]" : msg.Content;
+            sb.AppendLine($"  Content: \"{contentDisplay}\"");
+            if (msg.Attachments.Count > 0)
+            {
+                sb.AppendLine($"  Attachments ({msg.Attachments.Count}):");
+                foreach (var att in msg.Attachments)
+                {
+                    sb.AppendLine($"    - [{att.Type}] {att.FileName} ({att.FilePath}) {att.SizeDisplay}");
+                    if (!string.IsNullOrEmpty(att.Content) && (att.Type == "TextContext" || att.Type == "File"))
+                    {
+                        string snippet = att.Content.Length > 120 ? att.Content.Substring(0, 120) + "..." : att.Content;
+                        sb.AppendLine($"      Preview: {snippet.Replace("\r", " ").Replace("\n", " ")}");
+                    }
+                }
+            }
         }
         sb.AppendLine("\nTo incorporate any of these messages into your active execution context, call tool 'incorporate_queued_message' with argument {\"queue_id\": \"<ID>\"}.");
 
@@ -2895,7 +2911,40 @@ public class ToolExecutor(
         }
 
         MessageQueue.MarkStatus(msg.Id, QueuedMessageStatus.Incorporated);
-        string resultText = $"Successfully incorporated queued steering message [ID: {msg.Id} | Mode: {msg.Mode}]: \"{msg.Content}\"";
+        var sb = new StringBuilder();
+        sb.AppendLine($"Successfully incorporated queued steering message [ID: {msg.Id} | Mode: {msg.Mode}]:");
+        if (!string.IsNullOrWhiteSpace(msg.Content))
+        {
+            sb.AppendLine(msg.Content);
+        }
+        if (msg.Attachments.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Contextual Attachments:");
+            foreach (var att in msg.Attachments)
+            {
+                if (att.Type == "TextContext" || (att.Type == "File" && !string.IsNullOrEmpty(att.Content)))
+                {
+                    sb.AppendLine($"--- Attached Context: {att.FileName} ---");
+                    sb.AppendLine(att.Content);
+                    sb.AppendLine("----------------------------------------");
+                    sb.AppendLine();
+                }
+                else if (att.Type == "Image" || att.Type == "Screenshot")
+                {
+                    sb.AppendLine($"[Attached Image/Screenshot: {att.FileName} ({att.FilePath})]");
+                }
+                else if (att.Type == "Audio")
+                {
+                    sb.AppendLine($"[Attached Audio Clip: {att.FileName} ({att.FilePath})]");
+                }
+                else
+                {
+                    sb.AppendLine($"[Attached File: {att.FileName} ({att.FilePath}) - {att.SizeDisplay}]");
+                }
+            }
+        }
+        string resultText = sb.ToString().TrimEnd();
         return Task.FromResult(new ToolResult("incorporate_queued_message", true, resultText, null));
     }
 
@@ -3481,10 +3530,10 @@ public class ToolExecutor(
     // The plan is PERSISTED to the session store on every mutation (SaveSessionPlanAsync) and
     // lazily restored on first access after a restart, so a long-horizon task's todo list
     // survives app restarts and model switches instead of starting from zero.
-    private sealed record PlanTask(string Text, bool Done);
-    private sealed record PlanSnapshot(List<PlanTask>? Items, int Progress, string? OwnerUserMessage = null);
+    private sealed record SessionPlanTask(string Text, bool Done);
+    private sealed record PlanSnapshot(List<SessionPlanTask>? Items, int Progress, string? OwnerUserMessage = null);
 
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<PlanTask>> _sessionPlans = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<SessionPlanTask>> _sessionPlans = new();
     // P1: plan lists are mutated by tool executions and read by the UI (every 2s) and by
     // prompt builds — one lock guards every mutation and snapshot read.
     private readonly object _sessionPlanLock = new();
@@ -3540,7 +3589,7 @@ public class ToolExecutor(
     {
         string key = sessionId ?? string.Empty;
         EnsureSessionPlanLoaded(key);
-        var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
+        var plan = _sessionPlans.GetOrAdd(key, _ => new List<SessionPlanTask>());
         // P1: guard the mutation — the UI and prompt builds read this list concurrently.
         lock (_sessionPlanLock)
         {
@@ -3549,7 +3598,7 @@ public class ToolExecutor(
             {
                 if (!string.IsNullOrWhiteSpace(item))
                 {
-                    plan.Add(new PlanTask(item.Trim(), false));
+                    plan.Add(new SessionPlanTask(item.Trim(), false));
                 }
             }
         }
@@ -3925,14 +3974,16 @@ public class ToolExecutor(
     {
         string key = sessionId ?? string.Empty;
         EnsureSessionPlanLoaded(key);
-        var plan = _sessionPlans.GetOrAdd(key, _ => new List<PlanTask>());
+        var plan = _sessionPlans.GetOrAdd(key, _ => new List<SessionPlanTask>());
 
         string? rawAction = GetStringArg(request.Arguments, "action");
         string action;
         if (string.IsNullOrWhiteSpace(rawAction))
         {
-            if (!string.IsNullOrWhiteSpace(GetStringArg(request.Arguments, "items")))
+            if (request.Arguments != null && (request.Arguments.ContainsKey("items") || request.Arguments.ContainsKey("tasks") || request.Arguments.ContainsKey("plan")))
                 action = plan.Count == 0 ? "create" : "add";
+            else if (request.Arguments != null && (request.Arguments.ContainsKey("patch") || request.Arguments.ContainsKey("operation")))
+                action = "patch";
             else if (!string.IsNullOrWhiteSpace(GetStringArg(request.Arguments, "item")))
                 action = "complete";
             else
@@ -3943,69 +3994,91 @@ public class ToolExecutor(
             action = rawAction.Trim().ToLowerInvariant();
         }
 
-        // P1: the plan list is read concurrently by the UI and prompt builds; mutations and
-        // the persistence snapshot are taken under the lock. The SQLite await happens AFTER
-        // the lock is released.
         bool planMutated = false;
         PlanSnapshot? snapshot = null;
+        string qualityNotice = string.Empty;
+
         lock (_sessionPlanLock)
         {
-        switch (action)
-        {
-            case "create":
-                plan.Clear();
-                goto case "add";
-            case "add":
-                foreach (var line in SplitPlanItems(GetStringArg(request.Arguments, "items")))
-                {
-                    plan.Add(new PlanTask(line, false));
-                }
-                planMutated = true;
-                break;
-            case "complete":
-                MarkPlanItems(request, plan, done: true);
-                planMutated = true;
-                break;
-            case "remove":
-                MarkPlanItems(request, plan, done: false, remove: true);
-                planMutated = true;
-                break;
-            case "clear":
-                plan.Clear();
-                _sessionPlanProgress.TryRemove(sessionId ?? string.Empty, out _);
-                planMutated = true;
-                break;
-            case "show":
-            default:
-                break;
-        }
-
-        // The plan now belongs to the task in the user message currently executing. Stamped on
-        // every mutation (including checking off an item), so a plan the model re-engages on a
-        // later message is adopted as that message's task plan — and one it never touches again
-        // stays bound to the message that created it.
-        if (planMutated)
-        {
-            _sessionPlanOwner[key] = CurrentTaskUserMessage ?? string.Empty;
-        }
-
-        if (request.Arguments != null && request.Arguments.TryGetValue("progress", out var progObj))
-        {
-            var raw = ToolExecutor.UnwrapJsonElement(progObj)?.ToString();
-            if (int.TryParse(raw, out int pct))
+            switch (action)
             {
-                _sessionPlanProgress[key] = Math.Clamp(pct, 0, 100);
+                case "set_plan":
+                case "create":
+                    plan.Clear();
+                    goto case "add";
+                case "add":
+                    object? itemsObj = null;
+                    if (request.Arguments != null)
+                    {
+                        if (!request.Arguments.TryGetValue("items", out itemsObj))
+                        {
+                            if (!request.Arguments.TryGetValue("tasks", out itemsObj))
+                            {
+                                request.Arguments.TryGetValue("plan", out itemsObj);
+                            }
+                        }
+                    }
+                    foreach (var line in SplitPlanItems(itemsObj))
+                    {
+                        plan.Add(new SessionPlanTask(line, false));
+                    }
+                    planMutated = true;
+                    break;
+                case "patch":
+                    ApplyPlanPatch(request, plan);
+                    planMutated = true;
+                    break;
+                case "complete":
+                    MarkPlanItems(request, plan, done: true);
+                    planMutated = true;
+                    break;
+                case "remove":
+                    MarkPlanItems(request, plan, done: false, remove: true);
+                    planMutated = true;
+                    break;
+                case "clear":
+                    plan.Clear();
+                    _sessionPlanProgress.TryRemove(sessionId ?? string.Empty, out _);
+                    planMutated = true;
+                    break;
+                case "show":
+                default:
+                    break;
             }
+
+            if (planMutated)
+            {
+                _sessionPlanOwner[key] = CurrentTaskUserMessage ?? string.Empty;
+            }
+
+            if (request.Arguments != null && request.Arguments.TryGetValue("progress", out var progObj))
+            {
+                var raw = ToolExecutor.UnwrapJsonElement(progObj)?.ToString();
+                if (int.TryParse(raw, out int pct))
+                {
+                    _sessionPlanProgress[key] = Math.Clamp(pct, 0, 100);
+                }
+            }
+
+            snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key), GetSessionPlanOwner(key));
         }
 
-        snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key), GetSessionPlanOwner(key));
+        if (planMutated && plan.Count > 0 && (action == "create" || action == "set_plan"))
+        {
+            try
+            {
+                var executionPlan = new Klydis.Core.Tasks.ExecutionPlan(
+                    CurrentTaskUserMessage ?? "Current Goal",
+                    plan.Select((p, idx) => new Klydis.Core.Tasks.PlanTask($"T{idx + 1}", p.Text, status: p.Done ? Klydis.Core.Tasks.TaskStepStatus.Completed : Klydis.Core.Tasks.TaskStepStatus.Ready)).ToList());
+                var quality = new Klydis.Core.Tasks.PlanQualityValidator().Evaluate(executionPlan);
+                if (!quality.IsAcceptable && quality.RejectionReason != null)
+                {
+                    qualityNotice = $"\n[PLAN QUALITY NOTICE]: {quality.RejectionReason}";
+                }
+            }
+            catch { }
         }
 
-        // Checkpoint: persist the plan + progress + owner so the todo list (and its task
-        // boundary) survives restarts and model switches (long-horizon tasks keep their
-        // step-level plan across sessions). Mirrored to the current task's record so the
-        // checklist follows the TASK — switching to a new task never inherits it, and
-        // reopening a task restores its plan.
         try
         {
             string json = System.Text.Json.JsonSerializer.Serialize(snapshot!);
@@ -4018,11 +4091,6 @@ public class ToolExecutor(
         }
         catch (Exception ex)
         {
-            // P0: the tool result must NOT report success when the durable plan write failed.
-            // "Model believes plan changed; memory believes plan changed; database still holds
-            // the old plan" is a divergence recovery would silently undo. Rethrow — the
-            // executor converts this into a FAILED tool result, so the model sees the write
-            // did not commit and the durable state machine stays authoritative.
             logger.LogError(ex, "Failed to persist session plan for {SessionId}; the plan change was NOT durable — the plan tool call is failed.", sessionId);
             throw;
         }
@@ -4031,12 +4099,58 @@ public class ToolExecutor(
         string body = formatted.Count > 0 ? string.Join("\n", formatted) : "(plan is empty)";
         int progress = GetSessionPlanProgress(sessionId ?? string.Empty);
         string progressLine = progress >= 0 ? $"\nOverall progress: {progress}%" : string.Empty;
-        return new ToolResult("plan", true, $"[PLAN {action.ToUpperInvariant()} — current todo list:]\n{body}{progressLine}", null);
+        return new ToolResult("plan", true, $"[PLAN {action.ToUpperInvariant()} — current todo list:]\n{body}{progressLine}{qualityNotice}", null);
     }
 
-    private static void MarkPlanItems(ToolCallRequest request, List<PlanTask> plan, bool done, bool remove = false)
+    private static void ApplyPlanPatch(ToolCallRequest request, List<SessionPlanTask> plan)
     {
-        string item = (GetStringArg(request.Arguments, "item") ?? string.Empty).Trim();
+        string? opStr = GetStringArg(request.Arguments, "operation")
+            ?? GetStringArg(request.Arguments, "op");
+        string? targetId = GetStringArg(request.Arguments, "target_task_id")
+            ?? GetStringArg(request.Arguments, "item")
+            ?? GetStringArg(request.Arguments, "id");
+        string? itemText = GetStringArg(request.Arguments, "task")
+            ?? GetStringArg(request.Arguments, "text")
+            ?? GetStringArg(request.Arguments, "description");
+
+        string op = (opStr ?? string.Empty).ToLowerInvariant();
+        if (op.Contains("complete") || op == "done")
+        {
+            MarkPlanItems(request, plan, done: true);
+        }
+        else if (op.Contains("remove") || op == "delete")
+        {
+            MarkPlanItems(request, plan, done: false, remove: true);
+        }
+        else if (op.Contains("add") || op == "insert")
+        {
+            if (!string.IsNullOrWhiteSpace(itemText))
+            {
+                plan.Add(new SessionPlanTask(itemText.Trim(), false));
+            }
+        }
+        else if (op.Contains("update") || op == "replace")
+        {
+            if (!string.IsNullOrWhiteSpace(targetId) && !string.IsNullOrWhiteSpace(itemText))
+            {
+                for (int i = 0; i < plan.Count; i++)
+                {
+                    if (plan[i].Text.Contains(targetId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        plan[i] = plan[i] with { Text = itemText.Trim() };
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    private static void MarkPlanItems(ToolCallRequest request, List<SessionPlanTask> plan, bool done, bool remove = false)
+    {
+        string item = (GetStringArg(request.Arguments, "item")
+            ?? GetStringArg(request.Arguments, "target_task_id")
+            ?? GetStringArg(request.Arguments, "id")
+            ?? string.Empty).Trim();
         if (item.Length == 0) return;
 
         // Match by number first ("2" or "2. rest of text"), then by text containment.
@@ -4068,10 +4182,51 @@ public class ToolExecutor(
         }
     }
 
-    private static IEnumerable<string> SplitPlanItems(string? raw)
+    private static IEnumerable<string> SplitPlanItems(object? raw)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return Enumerable.Empty<string>();
-        return raw.Split(new[] { '\n', ';' }, StringSplitOptions.RemoveEmptyEntries)
+        if (raw == null) return Enumerable.Empty<string>();
+        if (raw is System.Text.Json.JsonElement elem)
+        {
+            if (elem.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var list = new List<string>();
+                foreach (var item in elem.EnumerateArray())
+                {
+                    if (item.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        var s = item.GetString()?.Trim();
+                        if (!string.IsNullOrEmpty(s)) list.Add(s);
+                    }
+                    else if (item.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        if (item.TryGetProperty("description", out var d) ||
+                            item.TryGetProperty("title", out d) ||
+                            item.TryGetProperty("text", out d))
+                        {
+                            var s = d.GetString()?.Trim();
+                            if (!string.IsNullOrEmpty(s)) list.Add(s);
+                        }
+                    }
+                }
+                return list;
+            }
+            if (elem.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                return SplitPlanItems(elem.GetString());
+            }
+        }
+        string? text = raw.ToString();
+        if (string.IsNullOrWhiteSpace(text)) return Enumerable.Empty<string>();
+        if (text.TrimStart().StartsWith("["))
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(text);
+                return SplitPlanItems(doc.RootElement);
+            }
+            catch { }
+        }
+        return text.Split(new[] { '\n', ';' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(l => l.Trim())
             .Where(l => l.Length > 0);
     }

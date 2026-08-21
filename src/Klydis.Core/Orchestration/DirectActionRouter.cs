@@ -115,6 +115,14 @@ public static class DirectActionRouter
     public static DirectActionRoute? TryRoute(string? message)
     {
         if (string.IsNullOrWhiteSpace(message)) return null;
+
+        // 1. Primary: Multi-signal Deterministic Intent Resolver
+        var resolved = DeterministicIntentResolver.Resolve(message);
+        if (resolved.Route != null && resolved.Confidence >= 0.90)
+        {
+            return resolved.Route;
+        }
+
         string clean = message.Trim().TrimEnd('.', '?', '!', '\r', '\n');
 
         foreach (var (pattern, kind, toolName, desc) in RouteTable)

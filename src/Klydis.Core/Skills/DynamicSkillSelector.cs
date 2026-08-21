@@ -13,11 +13,20 @@ namespace Klydis.Core.Skills;
 public class DynamicSkillSelector : ISkillRouter
 {
     private readonly SkillLibraryManager _libraryManager;
+    private readonly SkillIndex? _skillIndex;
+    private readonly SkillReranker? _reranker;
     private readonly ILogger<DynamicSkillSelector>? _logger;
+    private bool _isIndexed;
 
-    public DynamicSkillSelector(SkillLibraryManager libraryManager, ILogger<DynamicSkillSelector>? logger = null)
+    public DynamicSkillSelector(
+        SkillLibraryManager libraryManager,
+        SkillIndex? skillIndex = null,
+        SkillReranker? reranker = null,
+        ILogger<DynamicSkillSelector>? logger = null)
     {
         _libraryManager = libraryManager;
+        _skillIndex = skillIndex;
+        _reranker = reranker;
         _logger = logger;
     }
 
@@ -220,6 +229,98 @@ public class DynamicSkillSelector : ISkillRouter
             ReasoningExplanation = explanationSb.ToString().Trim(),
             FormattedPromptInjection = promptSb.ToString()
         };
+    }
+
+    public async Task EnsureIndexedAsync(CancellationToken ct = default)
+    {
+        if (_isIndexed || _skillIndex == null) return;
+        var skills = _libraryManager.GetEnabledSkills();
+        var manifests = skills.Select(SkillManifestParser.FromSkill);
+        await _skillIndex.IndexRangeAsync(manifests, ct);
+        _isIndexed = true;
+    }
+
+    /// <summary>
+    /// Executes two-stage retrieve-and-rerank skill resolution when SkillIndex and SkillReranker are available.
+    /// </summary>
+    public async Task<SkillReasoningResult> ReasonAndSelectSkillsAsync(string userPrompt, int maxSkillsToSelect = 3, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(userPrompt))
+        {
+            return new SkillReasoningResult
+            {
+                DetectedComplexity = SkillComplexity.Simple,
+                ReasoningExplanation = "Empty prompt. No skills activated.",
+                FormattedPromptInjection = string.Empty
+            };
+        }
+
+        var enabledSkills = _libraryManager.GetEnabledSkills();
+        if (enabledSkills.Count == 0)
+        {
+            return new SkillReasoningResult
+            {
+                DetectedComplexity = SkillComplexity.Simple,
+                ReasoningExplanation = "No enabled skills available in library.",
+                FormattedPromptInjection = string.Empty
+            };
+        }
+
+        var complexity = AssessTaskComplexity(userPrompt);
+
+        if (_skillIndex != null && _reranker != null)
+        {
+            await EnsureIndexedAsync(ct);
+            var candidates = await _skillIndex.SearchCandidatesAsync(userPrompt, topK: 15, ct);
+            var ranked = _reranker.Rerank(userPrompt, candidates);
+
+            var selected = new List<Skill>();
+            foreach (var sc in ranked)
+            {
+                if (sc.FinalScore >= 0.35 && selected.Count < maxSkillsToSelect)
+                {
+                    var found = enabledSkills.FirstOrDefault(s => string.Equals(s.Id, sc.Record.Manifest.SkillId, StringComparison.OrdinalIgnoreCase));
+                    if (found != null)
+                    {
+                        selected.Add(found);
+                    }
+                }
+            }
+
+            if (selected.Count > 0)
+            {
+                var explanationSb = new StringBuilder();
+                explanationSb.AppendLine($"🧠 **Skill Brain Assessment (Two-Stage Reranked)**");
+                explanationSb.AppendLine($"• Task Complexity: `{complexity}`");
+                explanationSb.AppendLine($"• Activated Skills ({selected.Count}):");
+                foreach (var sk in selected)
+                {
+                    var sc = ranked.FirstOrDefault(r => string.Equals(r.Record.Manifest.SkillId, sk.Id, StringComparison.OrdinalIgnoreCase));
+                    explanationSb.AppendLine($"  - **{sk.Name}** ({sk.Category}) [Final score: {sc?.FinalScore ?? 0:F2}]");
+                }
+
+                var promptSb = new StringBuilder();
+                promptSb.AppendLine("\n\n<system_active_skills>");
+                promptSb.AppendLine("You are equipped with the following active skills and specialized domain knowledge for this task. Follow their directives and workflows:");
+
+                foreach (var skill in selected)
+                {
+                    promptSb.AppendLine($"\n--- SKILL: {skill.Name} ({skill.Category}) ---");
+                    promptSb.AppendLine(skill.PromptInstruction.Trim());
+                }
+                promptSb.AppendLine("</system_active_skills>\n");
+
+                return new SkillReasoningResult
+                {
+                    DetectedComplexity = complexity,
+                    SelectedSkills = selected,
+                    ReasoningExplanation = explanationSb.ToString().Trim(),
+                    FormattedPromptInjection = promptSb.ToString()
+                };
+            }
+        }
+
+        return ReasonAndSelectSkills(userPrompt, maxSkillsToSelect);
     }
 
     private static SkillComplexity AssessTaskComplexity(string prompt)

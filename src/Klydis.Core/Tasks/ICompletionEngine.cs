@@ -14,7 +14,9 @@ public sealed record RunContext(
     string? RunId,
     IReadOnlyList<ToolExecutor.PlanEntry>? Plan,
     IReadOnlyList<EvidenceLedgerEntry>? CurrentEvidence = null,
-    IReadOnlyList<TaskActionRecord>? Actions = null);
+    IReadOnlyList<TaskActionRecord>? Actions = null,
+    ExecutionPlan? ExecutionPlan = null,
+    CompletionCriteria? CompletionCriteria = null);
 
 /// <summary>
 /// Deterministic decision regarding task completion eligibility.

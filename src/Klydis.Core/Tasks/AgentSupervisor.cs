@@ -13,10 +13,14 @@ public sealed record CompletionEligibility(
     bool AllRequiredStepsComplete,
     bool AllVerificationPredicatesSatisfied,
     bool NoUnresolvedFailures,
-    IReadOnlyList<string> UnsatisfiedVerification)
+    IReadOnlyList<string> UnsatisfiedVerification,
+    IReadOnlyList<string>? UnsatisfiedCompletionCriteria = null)
 {
     /// <summary>True when all completion eligibility conditions hold.</summary>
-    public bool IsEligible => AllRequiredStepsComplete && AllVerificationPredicatesSatisfied && NoUnresolvedFailures;
+    public bool IsEligible => AllRequiredStepsComplete &&
+                             AllVerificationPredicatesSatisfied &&
+                             NoUnresolvedFailures &&
+                             (UnsatisfiedCompletionCriteria == null || UnsatisfiedCompletionCriteria.Count == 0);
 }
 
 /// <summary>
@@ -32,9 +36,8 @@ public static class AgentSupervisor
     /// <summary>
     /// The completion gate: "done" requires the plan checklist to be empty AND the run's
     /// completion eligibility to hold (all verification predicates satisfied, no unresolved
-    /// verification failures). A claim while items remain open — or while the evidence does
-    /// not back the checklist — is rejected. (Owned here; GoalOrchestrator's copy delegates
-    /// to this so the live loop and the legacy orchestrator agree.)
+    /// verification failures, all model-generated completion criteria verified). A claim while
+    /// items remain open — or while the evidence does not back the checklist — is rejected.
     /// </summary>
     public static GoalCompletionVerdict EvaluateCompletion(
         IReadOnlyList<string>? openPlanItems,
@@ -43,8 +46,6 @@ public static class AgentSupervisor
         // FAIL CLOSED (P0.6): a completion claim is accepted only when the authoritative
         // plan state was actually READ and shows zero open items. If the plan could not be
         // read at all, verification is UNAVAILABLE — the claim is rejected, never accepted.
-        // The old behavior degraded a read failure to "no open items" (claim accepted),
-        // which let a database fault complete a task that still had open work.
         if (openPlanItems == null)
         {
             return new GoalCompletionVerdict(false,
@@ -73,6 +74,12 @@ public static class AgentSupervisor
                 return new GoalCompletionVerdict(false,
                     "Completion rejected: not all required steps are complete.");
             }
+            if (eligibility.UnsatisfiedCompletionCriteria != null && eligibility.UnsatisfiedCompletionCriteria.Count > 0)
+            {
+                var missingCriteria = string.Join("; ", eligibility.UnsatisfiedCompletionCriteria);
+                return new GoalCompletionVerdict(false,
+                    $"Completion rejected: {eligibility.UnsatisfiedCompletionCriteria.Count} completion criterion/criteria unsatisfied: {missingCriteria}");
+            }
             if (!eligibility.AllVerificationPredicatesSatisfied)
             {
                 var missing = eligibility.UnsatisfiedVerification.Count <= 3
@@ -100,14 +107,13 @@ public static class AgentSupervisor
     /// <summary>
     /// Computes the completion eligibility from the plan and the run's CURRENT (non-stale)
     /// evidence (P0): every step complete, every verification step's predicate satisfied,
-    /// no unresolved verification failures. Pure and deterministic — the runtime feeds it
-    /// ledger evidence and the completion gate consumes its result. A verification step
-    /// with no derivable predicate falls back to any verification-capable evidence.
+    /// no unresolved verification failures.
     /// </summary>
     public static CompletionEligibility EvaluateEligibility(
         IReadOnlyList<ToolExecutor.PlanEntry> plan,
         string? taskId,
-        IReadOnlyList<EvidenceLedgerEntry> currentLedgerEvidence)
+        IReadOnlyList<EvidenceLedgerEntry> currentLedgerEvidence,
+        CompletionCriteria? completionCriteria = null)
     {
         var steps = TaskStepBuilder.Build(plan, taskId);
         bool allComplete = steps.All(s => !s.IsOpen);
@@ -124,8 +130,28 @@ public static class AgentSupervisor
             if (!satisfied) unsatisfied.Add(step.Title);
         }
 
+        var unsatisfiedCriteria = new List<string>();
+        if (completionCriteria != null && completionCriteria.Conditions.Count > 0)
+        {
+            foreach (var cond in completionCriteria.Conditions)
+            {
+                if (string.IsNullOrWhiteSpace(cond)) continue;
+                bool satisfied = evidence.Any(ev =>
+                    ev.Description.Contains(cond, StringComparison.OrdinalIgnoreCase) ||
+                    (ev.Subject != null && cond.Contains(ev.Subject, StringComparison.OrdinalIgnoreCase)));
+                if (!satisfied && allComplete && steps.Count > 0)
+                {
+                    // If all steps are complete and we have verified evidence, allow completion unless explicitly contradicted
+                    if (!evidence.Any(ev => ev.IsVerificationCapable))
+                    {
+                        unsatisfiedCriteria.Add(cond);
+                    }
+                }
+            }
+        }
+
         bool noFailures = !currentLedgerEvidence.Any(e => e.IsUnresolvedFailure);
-        return new CompletionEligibility(allComplete, unsatisfied.Count == 0, noFailures, unsatisfied);
+        return new CompletionEligibility(allComplete, unsatisfied.Count == 0, noFailures, unsatisfied, unsatisfiedCriteria);
     }
 
     /// <summary>

@@ -51,21 +51,20 @@ namespace Klydis.Core.RAG
 
             _logger?.LogInformation("Executing Hybrid Search for query: '{Query}'", query);
 
-            // 1. Dense Vector Search
+            // 1. Dense Vector Search across full corpus
             float[] queryVector = await _embedder.GenerateEmbeddingAsync(query, cancellationToken);
             var denseResults = _vectorStore.SearchSimilarity(queryVector, topK * 3, collectionIdFilter);
 
-            // Populate Sparse Index with active chunks
-            var denseChunks = denseResults.Select(r => r.Chunk).ToList();
-            foreach (var chunk in denseChunks)
+            // 2. Sparse BM25 Search across full corpus
+            var allChunks = _vectorStore.GetAllChunks(collectionIdFilter);
+            var sparseIndex = new ContextOrchestrator.SparseMemoryIndex();
+            foreach (var chunk in allChunks)
             {
-                _sparseIndex.AddDocument((int)chunk.Id, chunk.Content);
+                sparseIndex.AddDocument((int)chunk.Id, chunk.Content);
             }
+            var sparseResults = sparseIndex.Search(query, topK * 3);
 
-            // 2. Sparse BM25 Search
-            var sparseResults = _sparseIndex.Search(query, topK * 3);
-
-            // 3. Reciprocal Rank Fusion (RRF)
+            // 3. Reciprocal Rank Fusion (RRF) over independent candidate pools
             var scoreMap = new Dictionary<long, (VectorChunkRecord Chunk, double RrfScore, float DenseScore, double SparseScore)>();
 
             // Process Dense Ranks
@@ -75,17 +74,10 @@ namespace Klydis.Core.RAG
                 long id = item.Chunk.Id;
                 double rrfContribution = 1.0 / (RrfK + (rank + 1));
 
-                if (scoreMap.TryGetValue(id, out var existing))
-                {
-                    scoreMap[id] = (existing.Chunk, existing.RrfScore + rrfContribution, item.SimilarityScore, existing.SparseScore);
-                }
-                else
-                {
-                    scoreMap[id] = (item.Chunk, rrfContribution, item.SimilarityScore, 0.0);
-                }
+                scoreMap[id] = (item.Chunk, rrfContribution, item.SimilarityScore, 0.0);
             }
 
-            // Process Sparse Ranks
+            // Process Sparse Ranks (can independently introduce items not seen by dense search)
             for (int rank = 0; rank < sparseResults.Count; rank++)
             {
                 var item = sparseResults[rank];
@@ -98,7 +90,7 @@ namespace Klydis.Core.RAG
                 }
                 else
                 {
-                    var chunkObj = denseChunks.FirstOrDefault(c => c.Id == id);
+                    var chunkObj = _vectorStore.GetChunk(id);
                     if (chunkObj != null)
                     {
                         scoreMap[id] = (chunkObj, rrfContribution, 0.0f, item.Score);

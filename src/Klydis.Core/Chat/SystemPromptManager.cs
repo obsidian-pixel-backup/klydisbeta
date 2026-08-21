@@ -323,7 +323,7 @@ public class SystemPromptManager
         sb.AppendLine();
         sb.AppendLine("### QUEUED MESSAGES & STEERING STRATEGY");
         sb.AppendLine("- Pending queued user messages are ANNOUNCED to you directly when they exist (see the queue notice in this prompt) — you do NOT need to poll for them.");
-        sb.AppendLine("- When such a notice appears, call tool 'incorporate_queued_message' with argument {\"queue_id\": \"<ID>\"} to retrieve and steer using the user's queued commands or context.");
+        sb.AppendLine("- When such a notice appears, call tool 'incorporate_queued_message' with argument {\"queue_id\": \"<ID>\"} to retrieve and steer using the user's queued commands, attached images, screenshots, or context files.");
         sb.AppendLine();
         sb.AppendLine("### RAG VECTOR SEARCH & WORKSPACE RETRIEVAL STRATEGY");
         sb.AppendLine("- Use 'search_rag' to search indexed project files, workspace code, and document collections when answering questions about indexed projects or codebases.");
@@ -396,19 +396,19 @@ public class SystemPromptManager
         {
         sb.AppendLine();
         sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
-        sb.AppendLine("- The runtime OWNS task state: the plan, step transitions, tool execution, verification and completion are harness responsibilities. You do NOT create the plan from scratch, track progress, or decide when the task is complete.");
-        sb.AppendLine("- You own only the CURRENT STEP. Read the CURRENT ACTION CONTRACT at the end of the system prompt and produce exactly ONE valid action for it — nothing more.");
-        sb.AppendLine("- Do NOT plan the steps, do NOT establish a todo list, do NOT check items off, and do NOT call 'plan' unless the current step is itself a planning step or the plan is wrong.");
+        sb.AppendLine("- The runtime enforces the plan schema, execution state machine, and evidence verification; you own the substantive execution plan. Create the plan from scratch appropriate to the objective, required capabilities, and world state.");
+        sb.AppendLine("- Execute tasks purposefully. Use the 'plan' tool to establish the initial execution plan or update tasks via plan operations when new evidence or observations warrant.");
+        sb.AppendLine("- Only create tasks that materially contribute to achieving the objective. Avoid generic workflow templates (e.g. standard 'Analyze -> Research -> Implement -> Test').");
         sb.AppendLine("- Do NOT search the web, crawl pages, or run commands unless the current step's allowed tools include them. The runtime enforces the allowed set either way.");
-        sb.AppendLine("- When the goal is finished and verified, signal it with 'task_complete' — the runtime gate rejects premature completion claims, so never call it early.");
+        sb.AppendLine("- When the goal is finished and verified against completion criteria, signal it with 'task_complete' — the runtime gate rejects premature completion claims, so never call it early.");
         sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
         sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
         } // end TASK EXECUTION (Autonomous only)
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
-        sb.AppendLine("- Your chat has a live workbench panel the user watches: PLAN (your todo list), FILES (every file you touch), CHANGES (your activity log), PREVIEW (renderable files you produce), NOTES (user-pinned instructions), and QUEUE (pending user messages).");
-        sb.AppendLine("- TODO LIST: The harness seeds the plan for actionable requests — you see it live in the PLAN tab. The runtime OWNS the checklist and advances it from your executed actions; you do NOT check items off yourself. Do NOT create a parallel plan or expand it before the design step exists.");
+        sb.AppendLine("- Your chat has a live workbench panel the user watches: PLAN (your active execution plan), FILES (every file you touch), CHANGES (your activity log), PREVIEW (renderable files you produce), NOTES (user-pinned instructions), and QUEUE (pending user messages).");
+        sb.AppendLine("- PLAN TAB: Displays your active execution plan and task graph live. The runtime tracks execution states and verifies completion criteria backed by real evidence.");
         sb.AppendLine("- ARTIFACTS: Any file you write with 'write_file' appears in the PREVIEW tab, and HTML/Markdown/JSON files are rendered live for the user. When a deliverable can be a file — a page, dashboard, report, config, script, or doc — WRITE IT TO A FILE so the user can view it in the panel, then summarize it concisely in chat.");
         sb.AppendLine("- WORK RECORD: Every tool call you make in this chat is recorded in FILES/CHANGES. Keep your actions on-goal and relevant to the current session — that record is what the user sees of your work. Do not touch unrelated files or wander into other projects.");
         sb.AppendLine("- USER NOTES: Instructions the user pins in the NOTES tab reach you as 'USER NOTES FOR THIS CHAT' and take precedence over ordinary conversation — re-read them whenever they are present and obey them.");
@@ -531,18 +531,18 @@ public class SystemPromptManager
         {
         sb.AppendLine();
         sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
-        sb.AppendLine("- The runtime OWNS task state: the plan, step transitions, tool execution, verification and completion are harness responsibilities. You do NOT create the plan from scratch, track progress, or decide when the task is complete.");
-        sb.AppendLine("- You own only the CURRENT STEP. Read the CURRENT ACTION CONTRACT at the end of the system prompt and produce exactly ONE valid action for it — nothing more.");
-        sb.AppendLine("- Do NOT plan the steps, do NOT establish a todo list, do NOT check items off, and do NOT call 'plan' unless the current step is itself a planning step or the plan is wrong.");
+        sb.AppendLine("- The runtime enforces the plan schema, execution state machine, and evidence verification; you own the substantive execution plan. Create the plan from scratch appropriate to the objective, required capabilities, and world state.");
+        sb.AppendLine("- Execute tasks purposefully. Use the 'plan' tool to establish the initial execution plan or update tasks via plan operations when new evidence or observations warrant.");
+        sb.AppendLine("- Only create tasks that materially contribute to achieving the objective. Avoid generic workflow templates (e.g. standard 'Analyze -> Research -> Implement -> Test').");
         sb.AppendLine("- Do NOT search the web, crawl pages, or run commands unless the current step's allowed tools include them. The runtime enforces the allowed set either way.");
-        sb.AppendLine("- When the goal is finished and verified, signal it with 'task_complete' — the runtime gate rejects premature completion claims, so never call it early.");
+        sb.AppendLine("- When the goal is finished and verified against completion criteria, signal it with 'task_complete' — the runtime gate rejects premature completion claims, so never call it early.");
         sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
         sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
         } // end TASK EXECUTION (Autonomous only)
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
-        sb.AppendLine("- The harness seeds your todo list (shown live in the PLAN tab) and tracks progress from your executed actions — do not check items off yourself and do not create a parallel plan.");
+        sb.AppendLine("- The PLAN tab displays your active execution plan and task graph live. The runtime tracks execution states and verifies completion criteria backed by real evidence.");
         sb.AppendLine("- Files you write appear in the PREVIEW tab — HTML/Markdown/JSON render live for the user. If a deliverable can be a file (page, dashboard, report, script, doc), write it to disk so the user can preview it, then summarize in chat.");
         sb.AppendLine("- All your tool calls in this chat are tracked in FILES/CHANGES: keep actions on-goal and relevant to this session only.");
         sb.AppendLine("- User-pinned NOTES reach you as 'USER NOTES FOR THIS CHAT' and take precedence — obey them.");
@@ -671,11 +671,14 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         string osName = Environment.OSVersion.ToString();
 
         sb.AppendLine();
-        sb.AppendLine("### HOST ENVIRONMENT & WORKSPACE CONTEXT");
+        sb.AppendLine("### HOST ENVIRONMENT & ACTION-SPACE CONTRACT");
+        sb.AppendLine($"- LOCAL_MACHINE_ACCESS = AVAILABLE (Host: {osName}, Elev: Standard/Admin)");
         sb.AppendLine($"- Operating System: {osName} (PowerShell & Cmd available via run_command)");
         sb.AppendLine($"- Active Workspace Root: {currentDir}");
         sb.AppendLine($"- User Home Directory: {userProfile}");
         sb.AppendLine($"- User Account Name: {userName}");
+        sb.AppendLine("- You have active, verified access to local machine capabilities, hardware telemetry, filesystem, and processes.");
+        sb.AppendLine("- PROHIBITED: NEVER claim 'I cannot access your local machine/hardware' or 'as an AI I do not have access'. You MUST execute the corresponding tool.");
         sb.AppendLine("- When referencing paths or creating files, use actual valid paths on this machine. Never hallucinate user directories.");
         sb.AppendLine("- Epistemic Rule: You cannot answer environmental, hardware, CPU, RAM, GPU, disk, or network queries from internal inference. You MUST obtain real evidence via tools (system_report, system_cpu_metrics, system_gpu_metrics, system_memory_metrics, system_disk_metrics, system_os_info, system_processes, run_command). If tools are unavailable or no evidence exists, state UNKNOWN.");
         sb.AppendLine("- Epistemic Rule: Accuracy > Completeness > Brevity. Never simulate or invent facts.");

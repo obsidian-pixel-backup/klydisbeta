@@ -36,6 +36,19 @@ public enum QueuedMessageStatus
 }
 
 /// <summary>
+/// Represents an attached file, image, screenshot, audio snippet, or text context snippet associated with a queued message.
+/// </summary>
+public record QueuedMessageAttachment
+{
+    public string Id { get; init; } = Guid.NewGuid().ToString("N");
+    public string FileName { get; init; } = string.Empty;
+    public string FilePath { get; init; } = string.Empty;
+    public string Type { get; init; } = "File"; // File, Image, Screenshot, Audio, TextContext
+    public string SizeDisplay { get; init; } = string.Empty;
+    public string Content { get; init; } = string.Empty;
+}
+
+/// <summary>
 /// Represents a message waiting in the model processing queue. The stable <see cref="Id"/>
 /// doubles as the idempotency key: a re-delivered message (after a crash) can be identified
 /// and its duplicate execution skipped. <see cref="AttemptCount"/> is the lease signal —
@@ -47,6 +60,7 @@ public record QueuedMessage
     public Guid Id { get; init; } = Guid.NewGuid();
     public string SessionId { get; init; } = string.Empty;
     public string Content { get; init; } = string.Empty;
+    public List<QueuedMessageAttachment> Attachments { get; init; } = new();
     public QueuedMessageMode Mode { get; init; } = QueuedMessageMode.Steer;
     public QueuedMessageStatus Status { get; set; } = QueuedMessageStatus.Queued;
     public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
@@ -139,19 +153,27 @@ public class ModelMessageQueue
     public event EventHandler? QueueChanged;
 
     /// <summary>
-    /// Enqueues a new message for processing or steering.
+    /// Enqueues a new message for processing or steering, optionally with contextual attachments.
     /// </summary>
-    public QueuedMessage Enqueue(string sessionId, string content, QueuedMessageMode mode = QueuedMessageMode.Steer, string? taskId = null)
+    public QueuedMessage Enqueue(
+        string sessionId,
+        string content,
+        IEnumerable<QueuedMessageAttachment>? attachments = null,
+        QueuedMessageMode mode = QueuedMessageMode.Steer,
+        string? taskId = null)
     {
-        if (string.IsNullOrWhiteSpace(content))
-            throw new ArgumentException("Queued content cannot be empty.", nameof(content));
+        var attachmentList = attachments?.ToList() ?? new List<QueuedMessageAttachment>();
+
+        if (string.IsNullOrWhiteSpace(content) && attachmentList.Count == 0)
+            throw new ArgumentException("Queued message must contain text content or at least one contextual attachment.", nameof(content));
 
         EnsureLoaded();
 
         var msg = new QueuedMessage
         {
             SessionId = sessionId ?? string.Empty,
-            Content = content,
+            Content = content ?? string.Empty,
+            Attachments = attachmentList,
             Mode = mode,
             Status = QueuedMessageStatus.Queued,
             CreatedAt = DateTime.UtcNow,
@@ -169,6 +191,12 @@ public class ModelMessageQueue
         QueueChanged?.Invoke(this, EventArgs.Empty);
         return msg;
     }
+
+    /// <summary>
+    /// Convenience overload for enqueuing text-only messages without attachments.
+    /// </summary>
+    public QueuedMessage Enqueue(string sessionId, string content, QueuedMessageMode mode, string? taskId = null)
+        => Enqueue(sessionId, content, attachments: null, mode: mode, taskId: taskId);
 
     /// <summary>
     /// Best-effort durable write. Local SQLite writes are fast and sync-over-async is safe

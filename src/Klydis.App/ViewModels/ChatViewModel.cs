@@ -1282,7 +1282,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 if (_skillSelector != null && InteractionClassifier.Classify(promptMessagePayload) != InteractionMode.Conversation)
                 {
                     var brainIndex = _skillSelector.GenerateBrainIndex();
-                    var skillReasoning = _skillSelector.ReasonAndSelectSkills(promptMessagePayload);
+                    var skillReasoning = await _skillSelector.ReasonAndSelectSkillsAsync(promptMessagePayload, ct: localGenerationCts.Token);
                     
                     var sb = new StringBuilder();
                     if (!string.IsNullOrWhiteSpace(brainIndex))
@@ -1692,7 +1692,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 try
                 {
                     await Task.Delay(100);
-                    await SendMessageForTextAsync(nextItem.Content);
+                    var attachments = nextItem.Attachments?.Select(AttachmentItemViewModel.FromQueuedAttachment).ToList();
+                    await SendMessageForTextAsync(nextItem.Content, attachments);
                     // Turn completed — the message was durably stored and processed (this
                     // includes user-cancelled turns: the message was already delivered to the
                     // transcript). ACK now.
@@ -1802,13 +1803,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void EnqueueMessage()
     {
-        if (string.IsNullOrWhiteSpace(InputText)) return;
+        if (string.IsNullOrWhiteSpace(InputText) && PendingAttachments.Count == 0) return;
         var text = InputText;
         InputText = string.Empty;
+        var attachments = PendingAttachments.Select(a => a.ToQueuedAttachment()).ToList();
+        PendingAttachments.Clear();
         var sessionId = SelectedSession?.Id ?? string.Empty;
         // Stamp the item with the session's current task so the engine only offers the
         // CURRENT task's queued messages to the model (task-scoped queue isolation).
-        _messageQueue?.Enqueue(sessionId, text, SelectedQueueMode, _chatEngine?.CurrentTaskId);
+        _messageQueue?.Enqueue(sessionId, text, attachments, SelectedQueueMode, _chatEngine?.CurrentTaskId);
         ProcessNextQueuedMessageIfAvailable();
     }
 
@@ -1869,15 +1872,16 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private async Task SendQueuedItemNowAsync(QueuedMessageViewModel? item)
     {
-        if (item == null || string.IsNullOrWhiteSpace(item.Content)) return;
+        if (item == null || (string.IsNullOrWhiteSpace(item.Content) && !item.HasAttachments)) return;
         if (!IsModelReady) return; // cannot send without a loaded model — leave it queued
 
         var content = item.Content;
+        var attachments = item.Attachments.ToList();
         // Remove first so the item can never be double-sent or re-picked by the auto-process path.
         _messageQueue?.Remove(item.Id);
 
         await CancelActiveGenerationIfNeededAsync();
-        await SendMessageForTextAsync(content);
+        await SendMessageForTextAsync(content, attachments);
     }
 
     /// <summary>
@@ -1904,7 +1908,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         foreach (var msg in pending)
         {
             await CancelActiveGenerationIfNeededAsync();
-            await SendMessageForTextAsync(msg.Content);
+            var attachments = msg.Attachments?.Select(AttachmentItemViewModel.FromQueuedAttachment).ToList();
+            await SendMessageForTextAsync(msg.Content, attachments);
         }
     }
 
@@ -1917,14 +1922,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void SaveQueuedItemEdit(QueuedMessageViewModel? item)
     {
-        if (item == null || string.IsNullOrWhiteSpace(item.EditText)) return;
+        if (item == null || (string.IsNullOrWhiteSpace(item.EditText) && !item.HasAttachments)) return;
 
         var sessionId = item.SessionId;
         var mode = item.Mode;
-        var newText = item.EditText.Trim();
+        var newText = item.EditText?.Trim() ?? string.Empty;
+        var attachments = item.Attachments.Select(a => a.ToQueuedAttachment()).ToList();
 
         _messageQueue?.Remove(item.Id);
-        _messageQueue?.Enqueue(sessionId, newText, mode, _chatEngine?.CurrentTaskId);
+        _messageQueue?.Enqueue(sessionId, newText, attachments, mode, _chatEngine?.CurrentTaskId);
     }
 
     [RelayCommand]

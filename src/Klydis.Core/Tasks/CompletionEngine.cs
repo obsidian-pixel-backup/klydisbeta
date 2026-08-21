@@ -8,8 +8,8 @@ using Klydis.Core.Chat;
 namespace Klydis.Core.Tasks;
 
 /// <summary>
-/// Concrete implementation of <see cref="ICompletionEngine"/> that uses deterministic supervisor rules
-/// and evidence ledger validation to evaluate whether a task is complete.
+/// Concrete implementation of <see cref="ICompletionEngine"/> that uses deterministic supervisor rules,
+/// model-generated completion criteria verification, and evidence ledger validation to evaluate whether a task is complete.
 /// </summary>
 public sealed class CompletionEngine : ICompletionEngine
 {
@@ -25,8 +25,9 @@ public sealed class CompletionEngine : ICompletionEngine
 
         var plan = context.Plan ?? Array.Empty<ToolExecutor.PlanEntry>();
         var evidence = context.CurrentEvidence ?? Array.Empty<EvidenceLedgerEntry>();
+        var criteria = context.CompletionCriteria ?? context.ExecutionPlan?.Completion;
 
-        var eligibility = AgentSupervisor.EvaluateEligibility(plan, context.TaskId, evidence);
+        var eligibility = AgentSupervisor.EvaluateEligibility(plan, context.TaskId, evidence, criteria);
         var openItems = plan.Where(p => !p.Done).Select(p => p.Text).ToList();
         var verdict = AgentSupervisor.EvaluateCompletion(openItems, eligibility);
 
