@@ -15,7 +15,7 @@ namespace Klydis.Core.Models;
 /// </summary>
 public class ModelRegistry
 {
-    private readonly ILogger<ModelRegistry> _logger;
+    private readonly ILogger<ModelRegistry>? _logger;
     private readonly string _registryFilePath;
     private readonly string _modelsDirectory;
     private readonly SemaphoreSlim _lock = new(1, 1);
@@ -35,8 +35,8 @@ public class ModelRegistry
     /// <summary>
     /// Initializes a new instance of the <see cref="ModelRegistry"/> class.
     /// </summary>
-    /// <param name="logger">The logger instance.</param>
-    public ModelRegistry(ILogger<ModelRegistry> logger)
+    /// <param name="logger">Optional logger instance.</param>
+    public ModelRegistry(ILogger<ModelRegistry>? logger = null)
         : this(logger, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".klydis", "models"))
     {
     }
@@ -45,7 +45,7 @@ public class ModelRegistry
     /// Test seam: points the registry at an arbitrary models directory instead of the user's
     /// real ~/.klydis/models.
     /// </summary>
-    internal ModelRegistry(ILogger<ModelRegistry> logger, string modelsDirectory)
+    internal ModelRegistry(ILogger<ModelRegistry>? logger, string modelsDirectory)
     {
         _logger = logger;
         _modelsDirectory = modelsDirectory;
@@ -86,7 +86,7 @@ public class ModelRegistry
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to load model registry.");
+            _logger?.LogError(ex, "Failed to load model registry.");
             _models = new ConcurrentDictionary<string, ModelInfo>();
         }
         finally
@@ -121,7 +121,7 @@ public class ModelRegistry
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to save model registry.");
+            _logger?.LogError(ex, "Failed to save model registry.");
         }
     }
 
@@ -140,7 +140,7 @@ public class ModelRegistry
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to add active download record for {FileName}", record.FileName);
+            _logger?.LogError(ex, "Failed to add active download record for {FileName}", record.FileName);
         }
         finally
         {
@@ -165,7 +165,7 @@ public class ModelRegistry
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to remove active download record for {FileName}", fileName);
+            _logger?.LogError(ex, "Failed to remove active download record for {FileName}", fileName);
         }
         finally
         {
@@ -209,7 +209,7 @@ public class ModelRegistry
                 .ToList();
             if (fresh.Count != list.Count)
             {
-                _logger.LogInformation("Dropping {Count} stale active-download record(s) older than {Days} days.",
+                _logger?.LogInformation("Dropping {Count} stale active-download record(s) older than {Days} days.",
                     list.Count - fresh.Count, ActiveDownloadMaxAge.TotalDays);
                 await File.WriteAllTextAsync(path, JsonSerializer.Serialize(fresh, new JsonSerializerOptions { WriteIndented = true }));
             }
@@ -217,7 +217,7 @@ public class ModelRegistry
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to read active downloads.");
+            _logger?.LogError(ex, "Failed to read active downloads.");
             return new List<ActiveDownloadRecord>();
         }
     }
@@ -285,7 +285,7 @@ public class ModelRegistry
         await _lock.WaitAsync();
         try
         {
-            _logger.LogInformation("Syncing model registry with disk...");
+            _logger?.LogInformation("Syncing model registry with disk...");
 
             bool changed = false;
 
@@ -312,7 +312,7 @@ public class ModelRegistry
                 {
                     if (duplicateModel.Id != bestModel.Id)
                     {
-                        _logger.LogInformation("Removing duplicate model registration for path {Path} (ID: {Id})", duplicateModel.FilePath, duplicateModel.Id);
+                        _logger?.LogInformation("Removing duplicate model registration for path {Path} (ID: {Id})", duplicateModel.FilePath, duplicateModel.Id);
                         if (_models.TryRemove(duplicateModel.Id, out _))
                         {
                             changed = true;
@@ -339,7 +339,7 @@ public class ModelRegistry
                     var existingModel = _models.Values.FirstOrDefault(m => m.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
                     if (existingModel == null)
                     {
-                        _logger.LogInformation("Found new GGUF file: {File}", file);
+                        _logger?.LogInformation("Found new GGUF file: {File}", file);
                         await RegisterDiscoveredModelAsync(file);
                         changed = true;
                     }
@@ -353,7 +353,7 @@ public class ModelRegistry
 
             foreach (var missingModel in modelsToRemove)
             {
-                _logger.LogInformation("Removing missing model from registry: {Id}", missingModel.Id);
+                _logger?.LogInformation("Removing missing model from registry: {Id}", missingModel.Id);
                 if (_models.TryRemove(missingModel.Id, out _))
                 {
                     changed = true;
@@ -366,7 +366,7 @@ public class ModelRegistry
                 RegistryChanged?.Invoke();
             }
             
-            _logger.LogInformation("Sync complete.");
+            _logger?.LogInformation("Sync complete.");
         }
         finally
         {
@@ -386,7 +386,7 @@ public class ModelRegistry
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to parse GGUF metadata for {File}. Model will be loaded without metadata.", filePath);
+                _logger?.LogWarning(ex, "Failed to parse GGUF metadata for {File}. Model will be loaded without metadata.", filePath);
             }
             
             
@@ -417,7 +417,7 @@ public class ModelRegistry
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error registering discovered model {File}", filePath);
+            _logger?.LogError(ex, "Error registering discovered model {File}", filePath);
         }
     }
 

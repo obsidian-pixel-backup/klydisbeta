@@ -121,6 +121,13 @@ public partial class App : Application
         catch (Exception ex)
         {
             Console.WriteLine("ERROR: " + ex.ToString());
+            Klydis.Core.Diagnostics.CrashLog.WriteFatal(ex, "App.OnStartup (MainWindow)");
+            try
+            {
+                var logger = ServiceProvider?.GetService<ILogger<App>>();
+                logger?.LogError(ex, "Failed to resolve or display MainWindow during OnStartup.");
+            }
+            catch { }
             Current.Shutdown();
         }
     }
@@ -139,6 +146,7 @@ public partial class App : Application
         // Core Services
         services.AddSingleton<ThemeService>();
         services.AddSingleton<INativeResourceDisposer, NativeResourceDisposer>();
+        services.AddSingleton<OffloadStrategy>();
         services.AddSingleton<SpeculativeDecodingService>();
         services.AddSingleton<InferenceEngine>(sp =>
         {

@@ -157,15 +157,15 @@ public sealed record FactLedgerRow(
 public class MessageStore
 {
     private readonly string _connectionString;
-    private readonly ILogger<MessageStore> _logger;
+    private readonly ILogger<MessageStore>? _logger;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MessageStore"/> class.
     /// </summary>
-    /// <param name="logger">The logger instance.</param>
+    /// <param name="logger">Optional logger instance.</param>
     /// <param name="dbPathOverride">Optional explicit SQLite database path (used by tests to keep
     /// the database hermetic and avoid touching the real user-profile database).</param>
-    public MessageStore(ILogger<MessageStore> logger, string? dbPathOverride = null)
+    public MessageStore(ILogger<MessageStore>? logger = null, string? dbPathOverride = null)
     {
         _logger = logger;
         
@@ -179,6 +179,13 @@ public class MessageStore
         // SqliteConnection instances this store creates, instead of opening/closing a native
         // handle for every operation.
         _connectionString = $"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared;Pooling=True";
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="MessageStore"/> class with an explicit database path.
+    /// </summary>
+    public MessageStore(string dbPathOverride) : this(null, dbPathOverride)
+    {
     }
 
     /// <summary>
@@ -204,7 +211,7 @@ public class MessageStore
     /// </summary>
     public async Task InitializeAsync()
     {
-        _logger.LogInformation("Initializing MessageStore SQLite database.");
+        _logger?.LogInformation("Initializing MessageStore SQLite database.");
         
         await using var connection = await CreateConnectionAsync();
         
@@ -213,6 +220,7 @@ public class MessageStore
         pragmaCommand.CommandText = "PRAGMA journal_mode=WAL;";
         await pragmaCommand.ExecuteNonQueryAsync();
 
+        // 1. Create all base tables if they do not exist (without indexes to prevent failure on legacy databases)
         await using var createCmd = connection.CreateCommand();
         createCmd.CommandText = @"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -269,11 +277,6 @@ public class MessageStore
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
-            -- Durable model message queue: steering/direct-send messages must survive
-            -- process restarts so a terminated model turn never loses queued work. The
-            -- stable id doubles as the idempotency key (a re-delivered message can be
-            -- detected and skipped); attempt_count is the lease signal incremented on
-            -- each claim, mirroring at-least-once delivery semantics.
             CREATE TABLE IF NOT EXISTS queued_messages (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -287,11 +290,6 @@ public class MessageStore
                 attachments_json TEXT
             );
 
-            -- Durable tasks: the unit of agentic work inside a session. A conversation
-            -- contains many tasks; execution state (plan, queue, artifacts, completion)
-            -- attaches to the task, so a new task in the same chat never inherits an old
-            -- task's checklist, and a superseded task remains resumable. task_id is the
-            -- stable identity every plan/queue read keys off.
             CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -302,12 +300,7 @@ public class MessageStore
                 plan_json TEXT,
                 summary TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id, created_at);
 
-            -- Execution runs: one continuous attempt at a task. The durable anchor of the
-            -- Task → Run → Step → Turn → Generation hierarchy, so a restart can reconstruct
-            -- which run was executing and how far it got (the checkpoint/recovery phase reads
-            -- this before considering event sourcing).
             CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -316,11 +309,7 @@ public class MessageStore
                 ended_at TEXT,
                 turn_count INTEGER NOT NULL DEFAULT 0
             );
-            CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id, started_at);
 
-            -- Factual file-change log (workbench): captured around file-mutating tools so the
-            -- Changes tab shows REAL filesystem diffs (before/after hashes + unified diff),
-            -- never model-generated narration. Task-scoped via task_id.
             CREATE TABLE IF NOT EXISTS file_changes (
                 change_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -334,11 +323,7 @@ public class MessageStore
                 deleted_lines INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_file_changes_session ON file_changes(session_id, created_at);
 
-            -- Durable tool-activity log (workbench): every tool invocation the model makes,
-            -- persisted so Files/Preview/Terminal survive restarts. The in-memory session
-            -- activity list in ToolExecutor is a cache of this table, not the source of truth.
             CREATE TABLE IF NOT EXISTS tool_activity (
                 activity_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -350,12 +335,7 @@ public class MessageStore
                 output_preview TEXT,
                 timestamp_utc TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_tool_activity_session ON tool_activity(session_id, timestamp_utc);
-            CREATE INDEX IF NOT EXISTS idx_tool_activity_task ON tool_activity(task_id, timestamp_utc);
 
-            -- Durable artifact registry (workbench): files the agent produced that are useful
-            -- to the user. Auto-registered by the mutation pipeline after successful writes —
-            -- the Preview tab reads this instead of inferring artifacts from memory.
             CREATE TABLE IF NOT EXISTS artifacts (
                 artifact_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -368,12 +348,7 @@ public class MessageStore
                 previewable INTEGER NOT NULL DEFAULT 0,
                 is_current INTEGER NOT NULL DEFAULT 1
             );
-            CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, path);
-            CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id, path);
 
-            -- Durable execution-event stream: the factual backbone of the agent loop
-            -- (task/step/tool/file/artifact lifecycle). Workbench panels project from this —
-            -- nothing invents state that is not recorded here.
             CREATE TABLE IF NOT EXISTS execution_events (
                 event_id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -385,13 +360,7 @@ public class MessageStore
                 path TEXT,
                 payload_json TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_execution_events_session ON execution_events(session_id, timestamp_utc);
-            CREATE INDEX IF NOT EXISTS idx_execution_events_task ON execution_events(task_id, timestamp_utc);
 
-            -- Durable action ledger (review §9): every executed tool action with its replay
-            -- identity, side-effect level and lifecycle status. The recovery-critical state
-            -- is UNKNOWN — a process death mid-command leaves the action Unknown, never
-            -- silently Succeeded/Failed, so recovery inspects instead of re-running blindly.
             CREATE TABLE IF NOT EXISTS task_actions (
                 action_id TEXT PRIMARY KEY,
                 replay_key TEXT,
@@ -410,24 +379,15 @@ public class MessageStore
                 model_id TEXT,
                 protocol_key TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_task_actions_model ON task_actions(model_id, protocol_key, started_at);
-            CREATE INDEX IF NOT EXISTS idx_task_actions_run ON task_actions(run_id, started_at);
-            CREATE INDEX IF NOT EXISTS idx_task_actions_task ON task_actions(task_id, started_at);
-            CREATE INDEX IF NOT EXISTS idx_task_actions_replay ON task_actions(replay_key);
 
-            -- Durable execution evidence (review §2): verification facts (BuildPassed /
-            -- PreviewLoaded / TestPassed) persist with the workspace version they were
-            -- produced against, so a recovered run still knows the build was verified and a
-            -- later file change invalidates them durably (invalidated_at), never by losing
-            -- the row.
             CREATE TABLE IF NOT EXISTS execution_evidence (
                 evidence_id TEXT PRIMARY KEY,
                 task_id TEXT,
                 run_id TEXT,
                 step_id TEXT,
                 action_id TEXT,
-                workspace_version INTEGER NOT NULL,
-                kind TEXT NOT NULL,
+                workspace_version INTEGER NOT NULL DEFAULT 1,
+                kind TEXT NOT NULL DEFAULT 'Unspecified',
                 subject TEXT,
                 tool_name TEXT,
                 exit_code INTEGER,
@@ -435,12 +395,7 @@ public class MessageStore
                 timestamp_utc TEXT NOT NULL,
                 invalidated_at TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_execution_evidence_run ON execution_evidence(run_id, workspace_version);
-            CREATE INDEX IF NOT EXISTS idx_execution_evidence_task ON execution_evidence(task_id, timestamp_utc);
 
-            -- Durable supervisor-decision ledger (review §15): the audit trail of what the
-            -- supervisor decided, why, and for which step — survives restarts so a
-            -- recovered loop is diagnosable.
             CREATE TABLE IF NOT EXISTS execution_decisions (
                 decision_id TEXT PRIMARY KEY,
                 task_id TEXT,
@@ -450,21 +405,14 @@ public class MessageStore
                 reason TEXT NOT NULL,
                 timestamp_utc TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_execution_decisions_run ON execution_decisions(run_id, timestamp_utc);
-            CREATE INDEX IF NOT EXISTS idx_execution_decisions_task ON execution_decisions(task_id, timestamp_utc);
 
-            -- Durable typed TaskStep metadata (review §3): the derived execution semantics of
-            -- the plan checklist (kind, allowed tools, verification criteria, status,
-            -- attempt_count) persisted per task so step semantics survive restarts instead of
-            -- being re-derived from English text. The plan checklist remains the durable
-            -- source of truth; this is its typed mirror, rewritten whenever the plan changes.
             CREATE TABLE IF NOT EXISTS task_steps (
                 step_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
-                order_index INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                status TEXT NOT NULL,
-                expected_action_kind TEXT NOT NULL,
+                order_index INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Pending',
+                expected_action_kind TEXT NOT NULL DEFAULT 'None',
                 allowed_tools_json TEXT,
                 required_skills_json TEXT,
                 expected_artifacts_json TEXT,
@@ -481,38 +429,32 @@ public class MessageStore
                 dependencies_json TEXT,
                 expected_files_json TEXT,
                 retry_policy_json TEXT,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL DEFAULT ''
             );
-            CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id, order_index);
-            CREATE INDEX IF NOT EXISTS idx_task_steps_run ON task_steps(run_id);
 
-            -- Execution turns: discrete turns executed within a task step/run (Task -> Run -> Step -> Turn -> Generation)
             CREATE TABLE IF NOT EXISTS turns (
                 turn_id TEXT PRIMARY KEY,
-                step_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                started_at TEXT NOT NULL,
+                step_id TEXT NOT NULL DEFAULT '',
+                run_id TEXT NOT NULL DEFAULT '',
+                sequence INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL DEFAULT '',
                 completed_at TEXT,
-                status TEXT NOT NULL
+                status TEXT NOT NULL DEFAULT ''
             );
-            CREATE INDEX IF NOT EXISTS idx_turns_step ON turns(step_id, sequence);
-            CREATE INDEX IF NOT EXISTS idx_turns_run ON turns(run_id, sequence);
 
-            -- Execution generations: model inference generations for a turn
             CREATE TABLE IF NOT EXISTS generations (
                 generation_id TEXT PRIMARY KEY,
-                turn_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL DEFAULT '',
                 model_id TEXT,
                 request_hash TEXT,
                 response_hash TEXT,
-                started_at TEXT NOT NULL,
+                started_at TEXT NOT NULL DEFAULT '',
                 completed_at TEXT,
                 finish_reason TEXT,
                 token_count INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL
+                status TEXT NOT NULL DEFAULT ''
             );
-            -- Fact Ledger: Epistemic facts with physical volatility TTLs
+
             CREATE TABLE IF NOT EXISTS fact_ledger (
                 fact_id TEXT PRIMARY KEY,
                 domain TEXT NOT NULL,
@@ -526,148 +468,242 @@ public class MessageStore
                 is_invalidated INTEGER NOT NULL DEFAULT 0,
                 invalidation_reason TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_fact_lookup ON fact_ledger(domain, entity_key, expires_at_utc, is_invalidated);
-            CREATE INDEX IF NOT EXISTS idx_fact_domain ON fact_ledger(domain, is_invalidated);
-
-            -- FTS5 Virtual Table for full-text search
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
-
-            -- Triggers to keep FTS table synchronized
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
-                INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-            END;
         ";
         await createCmd.ExecuteNonQueryAsync();
 
-        try
+        // 2. Safe schema migrations for existing databases created with earlier schema versions
+        // sessions
+        await EnsureColumnExistsAsync(connection, "sessions", "is_pinned", "INTEGER DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "sessions", "plan_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "sessions", "world_state", "TEXT");
+        await EnsureColumnExistsAsync(connection, "sessions", "system_prompt", "TEXT");
+        await EnsureColumnExistsAsync(connection, "sessions", "settings_json", "TEXT");
+
+        // messages
+        await EnsureColumnExistsAsync(connection, "messages", "token_count", "INTEGER DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "messages", "tool_calls_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "messages", "is_consolidated", "INTEGER DEFAULT 0");
+
+        // queued_messages
+        await EnsureColumnExistsAsync(connection, "queued_messages", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "queued_messages", "position", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "queued_messages", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "queued_messages", "attachments_json", "TEXT");
+
+        // tasks
+        await EnsureColumnExistsAsync(connection, "tasks", "plan_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "tasks", "summary", "TEXT");
+
+        // runs
+        await EnsureColumnExistsAsync(connection, "runs", "ended_at", "TEXT");
+        await EnsureColumnExistsAsync(connection, "runs", "turn_count", "INTEGER NOT NULL DEFAULT 0");
+
+        // file_changes
+        await EnsureColumnExistsAsync(connection, "file_changes", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "file_changes", "before_hash", "TEXT");
+        await EnsureColumnExistsAsync(connection, "file_changes", "after_hash", "TEXT");
+        await EnsureColumnExistsAsync(connection, "file_changes", "diff", "TEXT");
+        await EnsureColumnExistsAsync(connection, "file_changes", "added_lines", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "file_changes", "deleted_lines", "INTEGER NOT NULL DEFAULT 0");
+
+        // tool_activity
+        await EnsureColumnExistsAsync(connection, "tool_activity", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "tool_activity", "run_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "tool_activity", "args_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "tool_activity", "output_preview", "TEXT");
+
+        // artifacts
+        await EnsureColumnExistsAsync(connection, "artifacts", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "artifacts", "content_hash", "TEXT");
+        await EnsureColumnExistsAsync(connection, "artifacts", "previewable", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "artifacts", "is_current", "INTEGER NOT NULL DEFAULT 1");
+
+        // execution_events
+        await EnsureColumnExistsAsync(connection, "execution_events", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_events", "run_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_events", "tool_name", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_events", "path", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_events", "payload_json", "TEXT");
+
+        // task_actions
+        await EnsureColumnExistsAsync(connection, "task_actions", "replay_key", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "run_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "step_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "turn_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "tool_name", "TEXT NOT NULL DEFAULT ''");
+        await EnsureColumnExistsAsync(connection, "task_actions", "arguments_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "side_effect_level", "TEXT NOT NULL DEFAULT 'ExternalSideEffect'");
+        await EnsureColumnExistsAsync(connection, "task_actions", "status", "TEXT NOT NULL DEFAULT 'Unknown'");
+        await EnsureColumnExistsAsync(connection, "task_actions", "started_at", "TEXT NOT NULL DEFAULT ''");
+        await EnsureColumnExistsAsync(connection, "task_actions", "completed_at", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "result_preview", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "error", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "model_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_actions", "protocol_key", "TEXT");
+
+        // execution_evidence
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "run_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "step_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "action_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "workspace_version", "INTEGER NOT NULL DEFAULT 1");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "kind", "TEXT NOT NULL DEFAULT 'Unspecified'");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "subject", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "tool_name", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "exit_code", "INTEGER");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "payload_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_evidence", "invalidated_at", "TEXT");
+
+        // execution_decisions
+        await EnsureColumnExistsAsync(connection, "execution_decisions", "task_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_decisions", "run_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "execution_decisions", "step_id", "TEXT");
+
+        // task_steps
+        await EnsureColumnExistsAsync(connection, "task_steps", "expected_action_kind", "TEXT NOT NULL DEFAULT 'None'");
+        await EnsureColumnExistsAsync(connection, "task_steps", "allowed_tools_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "required_skills_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "expected_artifacts_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "verification_criteria_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "completion_condition", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "attempt_count", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "task_steps", "last_action_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "started_at", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "completed_at", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "run_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "parent_step_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "failure_reason", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "version", "INTEGER NOT NULL DEFAULT 1");
+        await EnsureColumnExistsAsync(connection, "task_steps", "dependencies_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "expected_files_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "retry_policy_json", "TEXT");
+        await EnsureColumnExistsAsync(connection, "task_steps", "updated_at", "TEXT NOT NULL DEFAULT ''");
+
+        // turns
+        await EnsureColumnExistsAsync(connection, "turns", "step_id", "TEXT NOT NULL DEFAULT ''");
+        await EnsureColumnExistsAsync(connection, "turns", "run_id", "TEXT NOT NULL DEFAULT ''");
+        await EnsureColumnExistsAsync(connection, "turns", "sequence", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "turns", "started_at", "TEXT NOT NULL DEFAULT ''");
+        await EnsureColumnExistsAsync(connection, "turns", "completed_at", "TEXT");
+        await EnsureColumnExistsAsync(connection, "turns", "status", "TEXT NOT NULL DEFAULT ''");
+
+        // generations
+        await EnsureColumnExistsAsync(connection, "generations", "turn_id", "TEXT NOT NULL DEFAULT ''");
+        await EnsureColumnExistsAsync(connection, "generations", "model_id", "TEXT");
+        await EnsureColumnExistsAsync(connection, "generations", "request_hash", "TEXT");
+        await EnsureColumnExistsAsync(connection, "generations", "response_hash", "TEXT");
+        await EnsureColumnExistsAsync(connection, "generations", "started_at", "TEXT NOT NULL DEFAULT ''");
+        await EnsureColumnExistsAsync(connection, "generations", "completed_at", "TEXT");
+        await EnsureColumnExistsAsync(connection, "generations", "finish_reason", "TEXT");
+        await EnsureColumnExistsAsync(connection, "generations", "token_count", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "generations", "status", "TEXT NOT NULL DEFAULT ''");
+
+        // fact_ledger
+        await EnsureColumnExistsAsync(connection, "fact_ledger", "confidence", "REAL NOT NULL DEFAULT 1.0");
+        await EnsureColumnExistsAsync(connection, "fact_ledger", "is_invalidated", "INTEGER NOT NULL DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "fact_ledger", "invalidation_reason", "TEXT");
+
+        // 3. Create all indexes safely
+        var indexStatements = new[]
         {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE sessions ADD COLUMN is_pinned INTEGER DEFAULT 0;";
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+            "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id, created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id, started_at);",
+            "CREATE INDEX IF NOT EXISTS idx_file_changes_session ON file_changes(session_id, created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_tool_activity_session ON tool_activity(session_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_tool_activity_task ON tool_activity(task_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, path);",
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id, path);",
+            "CREATE INDEX IF NOT EXISTS idx_execution_events_session ON execution_events(session_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_execution_events_task ON execution_events(task_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_task_actions_model ON task_actions(model_id, protocol_key, started_at);",
+            "CREATE INDEX IF NOT EXISTS idx_task_actions_run ON task_actions(run_id, started_at);",
+            "CREATE INDEX IF NOT EXISTS idx_task_actions_task ON task_actions(task_id, started_at);",
+            "CREATE INDEX IF NOT EXISTS idx_task_actions_replay ON task_actions(replay_key);",
+            "CREATE INDEX IF NOT EXISTS idx_execution_evidence_run ON execution_evidence(run_id, workspace_version);",
+            "CREATE INDEX IF NOT EXISTS idx_execution_evidence_task ON execution_evidence(task_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_execution_decisions_run ON execution_decisions(run_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_execution_decisions_task ON execution_decisions(task_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_task_steps_task ON task_steps(task_id, order_index);",
+            "CREATE INDEX IF NOT EXISTS idx_task_steps_run ON task_steps(run_id);",
+            "CREATE INDEX IF NOT EXISTS idx_turns_step ON turns(step_id, sequence);",
+            "CREATE INDEX IF NOT EXISTS idx_turns_run ON turns(run_id, sequence);",
+            "CREATE INDEX IF NOT EXISTS idx_fact_lookup ON fact_ledger(domain, entity_key, expires_at_utc, is_invalidated);",
+            "CREATE INDEX IF NOT EXISTS idx_fact_domain ON fact_ledger(domain, is_invalidated);",
+            "CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id);"
+        };
+
+        foreach (var sql in indexStatements)
         {
-            // Column already exists, ignore
+            try
+            {
+                await using var indexCmd = connection.CreateCommand();
+                indexCmd.CommandText = sql;
+                await indexCmd.ExecuteNonQueryAsync();
+            }
+            catch (SqliteException)
+            {
+                // Ignore index errors if already exists
+            }
         }
 
+        // 4. FTS5 Virtual Table and triggers for full-text search
         try
         {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE messages ADD COLUMN is_consolidated INTEGER DEFAULT 0;";
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
-        {
-            // Column already exists, ignore
-        }
+            await using var ftsCmd = connection.CreateCommand();
+            ftsCmd.CommandText = @"
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='id');
 
-        // The agent's task plan / todo list (persisted so long-horizon plans survive app
-        // restarts and model switches — see ToolExecutor.SaveSessionPlanAsync).
-        try
-        {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE sessions ADD COLUMN plan_json TEXT;";
-            await alterCmd.ExecuteNonQueryAsync();
+                CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+                    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+                END;
+                CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+                END;
+                CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+                    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+                END;
+            ";
+            await ftsCmd.ExecuteNonQueryAsync();
         }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        catch (SqliteException)
         {
-            // Column already exists, ignore
+            // FTS table or triggers already exist
         }
+    }
 
-        // Manual drag-and-drop reorder of queued messages: position is the explicit processing
-        // order (0 = first). Defaults to 0 for pre-existing rows, so legacy queues keep FIFO.
+    /// <summary>
+    /// Checks if a column exists on a table via PRAGMA table_info, and adds it via ALTER TABLE if missing.
+    /// </summary>
+    private static async Task EnsureColumnExistsAsync(SqliteConnection connection, string table, string column, string columnDef)
+    {
         try
         {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN position INTEGER NOT NULL DEFAULT 0;";
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
-        {
-            // Column already exists, ignore
-        }
+            await using var checkCmd = connection.CreateCommand();
+            checkCmd.CommandText = $"PRAGMA table_info({table});";
+            await using var reader = await checkCmd.ExecuteReaderAsync();
+            bool exists = false;
+            while (await reader.ReadAsync())
+            {
+                var name = reader.GetString(1);
+                if (string.Equals(name, column, StringComparison.OrdinalIgnoreCase))
+                {
+                    exists = true;
+                    break;
+                }
+            }
 
-        // Task identity on queued messages: items are stamped with the task they belong to so
-        // the model only ever sees the CURRENT task's queue. Legacy rows stay NULL and fall
-        // back to session-scoped behavior.
-        try
-        {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN task_id TEXT;";
-            await alterCmd.ExecuteNonQueryAsync();
+            if (!exists)
+            {
+                await using var alterCmd = connection.CreateCommand();
+                alterCmd.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {columnDef};";
+                await alterCmd.ExecuteNonQueryAsync();
+            }
         }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
+        catch
         {
-            // Column already exists, ignore
-        }
-
-        // Contextual attachments on queued messages (images, screenshots, text snippets, files, audio)
-        try
-        {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE queued_messages ADD COLUMN attachments_json TEXT;";
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
-        {
-            // Column already exists, ignore
-        }
-
-        // Per-model execution telemetry (agent-intelligence stage): actions are stamped with
-        // the model + protocol that produced them so the capability analyzer can aggregate
-        // per-(model, protocol) success/repair/verification rates from the durable ledger.
-        try
-        {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE task_actions ADD COLUMN model_id TEXT;";
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
-        {
-            // Column already exists, ignore
-        }
-
-        try
-        {
-            await using var alterCmd = connection.CreateCommand();
-            alterCmd.CommandText = "ALTER TABLE task_actions ADD COLUMN protocol_key TEXT;";
-            await alterCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
-        {
-            // Column already exists, ignore
-        }
-
-        try
-        {
-            await using var indexCmd = connection.CreateCommand();
-            indexCmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_task_actions_model ON task_actions(model_id, protocol_key, started_at);";
-            await indexCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
-        {
-            // Index already exists, ignore
-        }
-
-        // GetMessagesAsync / GetMessageCountAsync filter by session_id and order by id: without
-        // this index they full-scan the messages table (which includes every tool output) as
-        // sessions grow to tens of thousands of rows.
-        try
-        {
-            await using var indexCmd = connection.CreateCommand();
-            indexCmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id);";
-            await indexCmd.ExecuteNonQueryAsync();
-        }
-        catch (SqliteException ex) when (ex.SqliteErrorCode == 1)
-        {
-            // Index already exists, ignore
+            // Best-effort column addition; ignore if table not found or column added concurrently
         }
     }
 
@@ -877,15 +913,24 @@ public class MessageStore
 
     private static AgentTask ReadTask(System.Data.Common.DbDataReader reader)
     {
+        int ordTaskId = reader.GetOrdinal("task_id");
+        int ordSessionId = reader.GetOrdinal("session_id");
+        int ordObjective = reader.GetOrdinal("objective");
+        int ordStatus = reader.GetOrdinal("status");
+        int ordCreatedAt = reader.GetOrdinal("created_at");
+        int ordUpdatedAt = reader.GetOrdinal("updated_at");
+        int ordPlanJson = reader.GetOrdinal("plan_json");
+        int ordSummary = reader.GetOrdinal("summary");
+
         return new AgentTask(
-            TaskId: reader.GetString(0),
-            SessionId: reader.GetString(1),
-            Objective: reader.GetString(2),
-            Status: Enum.TryParse<TaskStatus>(reader.GetString(3), out var status) ? status : TaskStatus.Running,
-            CreatedAtUtc: DateTime.Parse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind),
-            UpdatedAtUtc: DateTime.Parse(reader.GetString(5), null, System.Globalization.DateTimeStyles.RoundtripKind),
-            PlanJson: reader.IsDBNull(6) ? null : reader.GetString(6),
-            Summary: reader.IsDBNull(7) ? null : reader.GetString(7));
+            TaskId: reader.GetString(ordTaskId),
+            SessionId: reader.GetString(ordSessionId),
+            Objective: reader.GetString(ordObjective),
+            Status: Enum.TryParse<TaskStatus>(reader.GetString(ordStatus), out var status) ? status : TaskStatus.Running,
+            CreatedAtUtc: DateTime.Parse(reader.GetString(ordCreatedAt), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            UpdatedAtUtc: DateTime.Parse(reader.GetString(ordUpdatedAt), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            PlanJson: reader.IsDBNull(ordPlanJson) ? null : reader.GetString(ordPlanJson),
+            Summary: reader.IsDBNull(ordSummary) ? null : reader.GetString(ordSummary));
     }
 
     /// <summary>
@@ -992,7 +1037,6 @@ public class MessageStore
         await command.ExecuteNonQueryAsync();
     }
 
-    /// <summary>All recorded actions for a run (or a task when runId is null), oldest first.</summary>
     public async Task<List<TaskActionRecord>> GetTaskActionsAsync(string? taskId, string? runId)
     {
         var result = new List<TaskActionRecord>();
@@ -1011,23 +1055,7 @@ public class MessageStore
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            result.Add(new TaskActionRecord(
-                ActionId: reader.GetString(0),
-                ReplayKey: reader.IsDBNull(1) ? null : reader.GetString(1),
-                TaskId: reader.IsDBNull(2) ? null : reader.GetString(2),
-                RunId: reader.IsDBNull(3) ? null : reader.GetString(3),
-                StepId: reader.IsDBNull(4) ? null : reader.GetString(4),
-                TurnId: reader.IsDBNull(5) ? null : reader.GetString(5),
-                ToolName: reader.GetString(6),
-                ArgumentsJson: reader.IsDBNull(7) ? null : reader.GetString(7),
-                SideEffectLevel: Enum.TryParse<ToolSideEffectLevel>(reader.GetString(8), out var lvl) ? lvl : ToolSideEffectLevel.ExternalSideEffect,
-                Status: Enum.TryParse<ActionExecutionStatus>(reader.GetString(9), out var st) ? st : ActionExecutionStatus.Unknown,
-                StartedAtUtc: DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                CompletedAtUtc: reader.IsDBNull(11) ? null : DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                ResultPreview: reader.IsDBNull(12) ? null : reader.GetString(12),
-                Error: reader.IsDBNull(13) ? null : reader.GetString(13),
-                ModelId: reader.IsDBNull(14) ? null : reader.GetString(14),
-                ProtocolKey: reader.IsDBNull(15) ? null : reader.GetString(15)));
+            result.Add(ReadTaskAction(reader));
         }
         return result;
     }
@@ -1053,23 +1081,42 @@ public class MessageStore
 
     /// <summary>Maps a task_actions row to a <see cref="TaskActionRecord"/>.</summary>
     private static TaskActionRecord ReadTaskAction(System.Data.Common.DbDataReader reader)
-        => new(
-            ActionId: reader.GetString(0),
-            ReplayKey: reader.IsDBNull(1) ? null : reader.GetString(1),
-            TaskId: reader.IsDBNull(2) ? null : reader.GetString(2),
-            RunId: reader.IsDBNull(3) ? null : reader.GetString(3),
-            StepId: reader.IsDBNull(4) ? null : reader.GetString(4),
-            TurnId: reader.IsDBNull(5) ? null : reader.GetString(5),
-            ToolName: reader.GetString(6),
-            ArgumentsJson: reader.IsDBNull(7) ? null : reader.GetString(7),
-            SideEffectLevel: Enum.TryParse<ToolSideEffectLevel>(reader.GetString(8), out var lvl) ? lvl : ToolSideEffectLevel.ExternalSideEffect,
-            Status: Enum.TryParse<ActionExecutionStatus>(reader.GetString(9), out var st) ? st : ActionExecutionStatus.Unknown,
-            StartedAtUtc: DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
-            CompletedAtUtc: reader.IsDBNull(11) ? null : DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
-            ResultPreview: reader.IsDBNull(12) ? null : reader.GetString(12),
-            Error: reader.IsDBNull(13) ? null : reader.GetString(13),
-            ModelId: reader.IsDBNull(14) ? null : reader.GetString(14),
-            ProtocolKey: reader.IsDBNull(15) ? null : reader.GetString(15));
+    {
+        int ordActionId = reader.GetOrdinal("action_id");
+        int ordReplayKey = reader.GetOrdinal("replay_key");
+        int ordTaskId = reader.GetOrdinal("task_id");
+        int ordRunId = reader.GetOrdinal("run_id");
+        int ordStepId = reader.GetOrdinal("step_id");
+        int ordTurnId = reader.GetOrdinal("turn_id");
+        int ordToolName = reader.GetOrdinal("tool_name");
+        int ordArgumentsJson = reader.GetOrdinal("arguments_json");
+        int ordSideEffectLevel = reader.GetOrdinal("side_effect_level");
+        int ordStatus = reader.GetOrdinal("status");
+        int ordStartedAt = reader.GetOrdinal("started_at");
+        int ordCompletedAt = reader.GetOrdinal("completed_at");
+        int ordResultPreview = reader.GetOrdinal("result_preview");
+        int ordError = reader.GetOrdinal("error");
+        int ordModelId = reader.GetOrdinal("model_id");
+        int ordProtocolKey = reader.GetOrdinal("protocol_key");
+
+        return new TaskActionRecord(
+            ActionId: reader.GetString(ordActionId),
+            ReplayKey: reader.IsDBNull(ordReplayKey) ? null : reader.GetString(ordReplayKey),
+            TaskId: reader.IsDBNull(ordTaskId) ? null : reader.GetString(ordTaskId),
+            RunId: reader.IsDBNull(ordRunId) ? null : reader.GetString(ordRunId),
+            StepId: reader.IsDBNull(ordStepId) ? null : reader.GetString(ordStepId),
+            TurnId: reader.IsDBNull(ordTurnId) ? null : reader.GetString(ordTurnId),
+            ToolName: reader.GetString(ordToolName),
+            ArgumentsJson: reader.IsDBNull(ordArgumentsJson) ? null : reader.GetString(ordArgumentsJson),
+            SideEffectLevel: Enum.TryParse<ToolSideEffectLevel>(reader.GetString(ordSideEffectLevel), out var lvl) ? lvl : ToolSideEffectLevel.ExternalSideEffect,
+            Status: Enum.TryParse<ActionExecutionStatus>(reader.GetString(ordStatus), out var st) ? st : ActionExecutionStatus.Unknown,
+            StartedAtUtc: DateTime.Parse(reader.GetString(ordStartedAt), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            CompletedAtUtc: reader.IsDBNull(ordCompletedAt) ? null : DateTime.Parse(reader.GetString(ordCompletedAt), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            ResultPreview: reader.IsDBNull(ordResultPreview) ? null : reader.GetString(ordResultPreview),
+            Error: reader.IsDBNull(ordError) ? null : reader.GetString(ordError),
+            ModelId: reader.IsDBNull(ordModelId) ? null : reader.GetString(ordModelId),
+            ProtocolKey: reader.IsDBNull(ordProtocolKey) ? null : reader.GetString(ordProtocolKey));
+    }
 
     /// <summary>A single action record by its primary key (lifecycle completion reads it to
     /// preserve the start row's identity fields).</summary>
@@ -1082,23 +1129,7 @@ public class MessageStore
         command.Parameters.AddWithValue("@actionId", actionId);
         await using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync()) return null;
-        return new TaskActionRecord(
-            ActionId: reader.GetString(0),
-            ReplayKey: reader.IsDBNull(1) ? null : reader.GetString(1),
-            TaskId: reader.IsDBNull(2) ? null : reader.GetString(2),
-            RunId: reader.IsDBNull(3) ? null : reader.GetString(3),
-            StepId: reader.IsDBNull(4) ? null : reader.GetString(4),
-            TurnId: reader.IsDBNull(5) ? null : reader.GetString(5),
-            ToolName: reader.GetString(6),
-            ArgumentsJson: reader.IsDBNull(7) ? null : reader.GetString(7),
-            SideEffectLevel: Enum.TryParse<ToolSideEffectLevel>(reader.GetString(8), out var lvl) ? lvl : ToolSideEffectLevel.ExternalSideEffect,
-            Status: Enum.TryParse<ActionExecutionStatus>(reader.GetString(9), out var st) ? st : ActionExecutionStatus.Unknown,
-            StartedAtUtc: DateTime.Parse(reader.GetString(10), null, System.Globalization.DateTimeStyles.RoundtripKind),
-            CompletedAtUtc: reader.IsDBNull(11) ? null : DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
-            ResultPreview: reader.IsDBNull(12) ? null : reader.GetString(12),
-            Error: reader.IsDBNull(13) ? null : reader.GetString(13),
-            ModelId: reader.IsDBNull(14) ? null : reader.GetString(14),
-            ProtocolKey: reader.IsDBNull(15) ? null : reader.GetString(15));
+        return ReadTaskAction(reader);
     }
 
     /// <summary>
@@ -1170,20 +1201,7 @@ public class MessageStore
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            result.Add(new DurableEvidenceRecord(
-                EvidenceId: reader.GetString(0),
-                TaskId: reader.IsDBNull(1) ? null : reader.GetString(1),
-                RunId: reader.IsDBNull(2) ? null : reader.GetString(2),
-                StepId: reader.IsDBNull(3) ? null : reader.GetString(3),
-                ActionId: reader.IsDBNull(4) ? null : reader.GetString(4),
-                WorkspaceVersion: reader.GetInt32(5),
-                Kind: Enum.TryParse<EvidenceKind>(reader.GetString(6), out var kind) ? kind : EvidenceKind.Unspecified,
-                Subject: reader.IsDBNull(7) ? null : reader.GetString(7),
-                ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
-                ExitCode: reader.IsDBNull(9) ? null : reader.GetInt32(9),
-                PayloadJson: reader.IsDBNull(10) ? null : reader.GetString(10),
-                TimestampUtc: DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                InvalidatedAtUtc: reader.IsDBNull(12) ? null : DateTime.Parse(reader.GetString(12), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+            result.Add(MapEvidenceRecord(reader));
         }
         return result;
     }
@@ -1230,21 +1248,37 @@ public class MessageStore
         return result;
     }
 
-    private static DurableEvidenceRecord MapEvidenceRecord(SqliteDataReader reader)
-        => new(
-            EvidenceId: reader.GetString(0),
-            TaskId: reader.IsDBNull(1) ? null : reader.GetString(1),
-            RunId: reader.IsDBNull(2) ? null : reader.GetString(2),
-            StepId: reader.IsDBNull(3) ? null : reader.GetString(3),
-            ActionId: reader.IsDBNull(4) ? null : reader.GetString(4),
-            WorkspaceVersion: reader.GetInt32(5),
-            Kind: Enum.TryParse<EvidenceKind>(reader.GetString(6), out var kind) ? kind : EvidenceKind.Unspecified,
-            Subject: reader.IsDBNull(7) ? null : reader.GetString(7),
-            ToolName: reader.IsDBNull(8) ? null : reader.GetString(8),
-            ExitCode: reader.IsDBNull(9) ? null : reader.GetInt32(9),
-            PayloadJson: reader.IsDBNull(10) ? null : reader.GetString(10),
-            TimestampUtc: DateTime.Parse(reader.GetString(11), null, System.Globalization.DateTimeStyles.RoundtripKind),
-            InvalidatedAtUtc: reader.IsDBNull(12) ? null : DateTime.Parse(reader.GetString(12), null, System.Globalization.DateTimeStyles.RoundtripKind));
+    private static DurableEvidenceRecord MapEvidenceRecord(System.Data.Common.DbDataReader reader)
+    {
+        int ordEvidenceId = reader.GetOrdinal("evidence_id");
+        int ordTaskId = reader.GetOrdinal("task_id");
+        int ordRunId = reader.GetOrdinal("run_id");
+        int ordStepId = reader.GetOrdinal("step_id");
+        int ordActionId = reader.GetOrdinal("action_id");
+        int ordWorkspaceVersion = reader.GetOrdinal("workspace_version");
+        int ordKind = reader.GetOrdinal("kind");
+        int ordSubject = reader.GetOrdinal("subject");
+        int ordToolName = reader.GetOrdinal("tool_name");
+        int ordExitCode = reader.GetOrdinal("exit_code");
+        int ordPayloadJson = reader.GetOrdinal("payload_json");
+        int ordTimestampUtc = reader.GetOrdinal("timestamp_utc");
+        int ordInvalidatedAt = reader.GetOrdinal("invalidated_at");
+
+        return new DurableEvidenceRecord(
+            EvidenceId: reader.GetString(ordEvidenceId),
+            TaskId: reader.IsDBNull(ordTaskId) ? null : reader.GetString(ordTaskId),
+            RunId: reader.IsDBNull(ordRunId) ? null : reader.GetString(ordRunId),
+            StepId: reader.IsDBNull(ordStepId) ? null : reader.GetString(ordStepId),
+            ActionId: reader.IsDBNull(ordActionId) ? null : reader.GetString(ordActionId),
+            WorkspaceVersion: reader.GetInt32(ordWorkspaceVersion),
+            Kind: Enum.TryParse<EvidenceKind>(reader.GetString(ordKind), out var kind) ? kind : EvidenceKind.Unspecified,
+            Subject: reader.IsDBNull(ordSubject) ? null : reader.GetString(ordSubject),
+            ToolName: reader.IsDBNull(ordToolName) ? null : reader.GetString(ordToolName),
+            ExitCode: reader.IsDBNull(ordExitCode) ? null : reader.GetInt32(ordExitCode),
+            PayloadJson: reader.IsDBNull(ordPayloadJson) ? null : reader.GetString(ordPayloadJson),
+            TimestampUtc: DateTime.Parse(reader.GetString(ordTimestampUtc), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            InvalidatedAtUtc: reader.IsDBNull(ordInvalidatedAt) ? null : DateTime.Parse(reader.GetString(ordInvalidatedAt), null, System.Globalization.DateTimeStyles.RoundtripKind));
+    }
 
     /// <summary>Persists one supervisor decision (INSERT OR REPLACE by decision id).</summary>
     public async Task SaveExecutionDecisionAsync(ExecutionDecisionRecord decision)
@@ -1286,16 +1320,29 @@ public class MessageStore
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            result.Add(new ExecutionDecisionRecord(
-                DecisionId: reader.GetString(0),
-                TaskId: reader.IsDBNull(1) ? null : reader.GetString(1),
-                RunId: reader.IsDBNull(2) ? null : reader.GetString(2),
-                StepId: reader.IsDBNull(3) ? null : reader.GetString(3),
-                Decision: Enum.TryParse<ExecutionDecision>(reader.GetString(4), out var d) ? d : ExecutionDecision.ContinueStep,
-                Reason: Enum.TryParse<ContinuationReason>(reader.GetString(5), out var r) ? r : ContinuationReason.StepIncomplete,
-                TimestampUtc: DateTime.Parse(reader.GetString(6), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+            result.Add(ReadExecutionDecision(reader));
         }
         return result;
+    }
+
+    private static ExecutionDecisionRecord ReadExecutionDecision(System.Data.Common.DbDataReader reader)
+    {
+        int ordDecisionId = reader.GetOrdinal("decision_id");
+        int ordTaskId = reader.GetOrdinal("task_id");
+        int ordRunId = reader.GetOrdinal("run_id");
+        int ordStepId = reader.GetOrdinal("step_id");
+        int ordDecision = reader.GetOrdinal("decision");
+        int ordReason = reader.GetOrdinal("reason");
+        int ordTimestampUtc = reader.GetOrdinal("timestamp_utc");
+
+        return new ExecutionDecisionRecord(
+            DecisionId: reader.GetString(ordDecisionId),
+            TaskId: reader.IsDBNull(ordTaskId) ? null : reader.GetString(ordTaskId),
+            RunId: reader.IsDBNull(ordRunId) ? null : reader.GetString(ordRunId),
+            StepId: reader.IsDBNull(ordStepId) ? null : reader.GetString(ordStepId),
+            Decision: Enum.TryParse<ExecutionDecision>(reader.GetString(ordDecision), out var d) ? d : ExecutionDecision.ContinueStep,
+            Reason: Enum.TryParse<ContinuationReason>(reader.GetString(ordReason), out var r) ? r : ContinuationReason.StepIncomplete,
+            TimestampUtc: DateTime.Parse(reader.GetString(ordTimestampUtc), null, System.Globalization.DateTimeStyles.RoundtripKind));
     }
 
     // ===== Durable typed TaskStep mirror (review §3) ========================================
@@ -1375,31 +1422,59 @@ public class MessageStore
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            result.Add(new TaskStep(
-                StepId: reader.GetString(0),
-                TaskId: reader.GetString(1),
-                Order: reader.GetInt32(2),
-                Title: reader.GetString(3),
-                Status: Enum.TryParse<TaskStepStatus>(reader.GetString(4), out var st) ? st : TaskStepStatus.Pending,
-                ExpectedActionKind: Enum.TryParse<StepActionKind>(reader.GetString(5), out var kind) ? kind : StepActionKind.None,
-                AllowedTools: reader.IsDBNull(6) ? null : new HashSet<string>(System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(6)) ?? new List<string>(), StringComparer.OrdinalIgnoreCase),
-                RequiredSkills: reader.IsDBNull(7) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(7)) ?? new List<string>(),
-                ExpectedArtifacts: reader.IsDBNull(8) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(8)) ?? new List<string>(),
-                VerificationCriteria: reader.IsDBNull(9) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(9)) ?? new List<string>(),
-                CompletionCondition: reader.IsDBNull(10) ? null : reader.GetString(10),
-                AttemptCount: reader.GetInt32(11),
-                LastActionId: reader.IsDBNull(12) ? null : reader.GetString(12),
-                StartedAt: reader.IsDBNull(13) ? null : DateTime.Parse(reader.GetString(13), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                CompletedAt: reader.IsDBNull(14) ? null : DateTime.Parse(reader.GetString(14), null, System.Globalization.DateTimeStyles.RoundtripKind),
-                RunId: reader.IsDBNull(15) ? null : reader.GetString(15),
-                ParentStepId: reader.IsDBNull(16) ? null : reader.GetString(16),
-                FailureReason: reader.IsDBNull(17) ? null : reader.GetString(17),
-                Version: reader.IsDBNull(18) ? 1 : reader.GetInt32(18),
-                Dependencies: reader.IsDBNull(19) ? null : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(19)),
-                ExpectedFiles: reader.IsDBNull(20) ? null : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(20)),
-                RetryPolicy: reader.IsDBNull(21) ? null : System.Text.Json.JsonSerializer.Deserialize<StepRetryPolicy>(reader.GetString(21))));
+            result.Add(ReadTaskStep(reader));
         }
         return result;
+    }
+
+    private static TaskStep ReadTaskStep(System.Data.Common.DbDataReader reader)
+    {
+        int ordStepId = reader.GetOrdinal("step_id");
+        int ordTaskId = reader.GetOrdinal("task_id");
+        int ordOrderIndex = reader.GetOrdinal("order_index");
+        int ordTitle = reader.GetOrdinal("title");
+        int ordStatus = reader.GetOrdinal("status");
+        int ordExpectedActionKind = reader.GetOrdinal("expected_action_kind");
+        int ordAllowedTools = reader.GetOrdinal("allowed_tools_json");
+        int ordRequiredSkills = reader.GetOrdinal("required_skills_json");
+        int ordExpectedArtifacts = reader.GetOrdinal("expected_artifacts_json");
+        int ordVerificationCriteria = reader.GetOrdinal("verification_criteria_json");
+        int ordCompletionCondition = reader.GetOrdinal("completion_condition");
+        int ordAttemptCount = reader.GetOrdinal("attempt_count");
+        int ordLastActionId = reader.GetOrdinal("last_action_id");
+        int ordStartedAt = reader.GetOrdinal("started_at");
+        int ordCompletedAt = reader.GetOrdinal("completed_at");
+        int ordRunId = reader.GetOrdinal("run_id");
+        int ordParentStepId = reader.GetOrdinal("parent_step_id");
+        int ordFailureReason = reader.GetOrdinal("failure_reason");
+        int ordVersion = reader.GetOrdinal("version");
+        int ordDependencies = reader.GetOrdinal("dependencies_json");
+        int ordExpectedFiles = reader.GetOrdinal("expected_files_json");
+        int ordRetryPolicy = reader.GetOrdinal("retry_policy_json");
+
+        return new TaskStep(
+            StepId: reader.GetString(ordStepId),
+            TaskId: reader.GetString(ordTaskId),
+            Order: reader.GetInt32(ordOrderIndex),
+            Title: reader.GetString(ordTitle),
+            Status: Enum.TryParse<TaskStepStatus>(reader.GetString(ordStatus), out var st) ? st : TaskStepStatus.Pending,
+            ExpectedActionKind: Enum.TryParse<StepActionKind>(reader.GetString(ordExpectedActionKind), out var kind) ? kind : StepActionKind.None,
+            AllowedTools: reader.IsDBNull(ordAllowedTools) ? null : new HashSet<string>(System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(ordAllowedTools)) ?? new List<string>(), StringComparer.OrdinalIgnoreCase),
+            RequiredSkills: reader.IsDBNull(ordRequiredSkills) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(ordRequiredSkills)) ?? new List<string>(),
+            ExpectedArtifacts: reader.IsDBNull(ordExpectedArtifacts) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(ordExpectedArtifacts)) ?? new List<string>(),
+            VerificationCriteria: reader.IsDBNull(ordVerificationCriteria) ? new List<string>() : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(ordVerificationCriteria)) ?? new List<string>(),
+            CompletionCondition: reader.IsDBNull(ordCompletionCondition) ? null : reader.GetString(ordCompletionCondition),
+            AttemptCount: reader.GetInt32(ordAttemptCount),
+            LastActionId: reader.IsDBNull(ordLastActionId) ? null : reader.GetString(ordLastActionId),
+            StartedAt: reader.IsDBNull(ordStartedAt) ? null : DateTime.Parse(reader.GetString(ordStartedAt), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            CompletedAt: reader.IsDBNull(ordCompletedAt) ? null : DateTime.Parse(reader.GetString(ordCompletedAt), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            RunId: reader.IsDBNull(ordRunId) ? null : reader.GetString(ordRunId),
+            ParentStepId: reader.IsDBNull(ordParentStepId) ? null : reader.GetString(ordParentStepId),
+            FailureReason: reader.IsDBNull(ordFailureReason) ? null : reader.GetString(ordFailureReason),
+            Version: reader.IsDBNull(ordVersion) ? 1 : reader.GetInt32(ordVersion),
+            Dependencies: reader.IsDBNull(ordDependencies) ? null : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(ordDependencies)),
+            ExpectedFiles: reader.IsDBNull(ordExpectedFiles) ? null : System.Text.Json.JsonSerializer.Deserialize<List<string>>(reader.GetString(ordExpectedFiles)),
+            RetryPolicy: reader.IsDBNull(ordRetryPolicy) ? null : System.Text.Json.JsonSerializer.Deserialize<StepRetryPolicy>(reader.GetString(ordRetryPolicy)));
     }
 
     // ===== Turns and Generations Persistence (Task -> Run -> Step -> Turn -> Generation) =====
