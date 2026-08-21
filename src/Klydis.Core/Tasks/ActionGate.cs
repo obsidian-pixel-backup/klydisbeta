@@ -288,6 +288,16 @@ public static class ActionGate
     }
 
     /// <summary>
+    /// Generates a compact structured error string (avoiding large verbose explanations).
+    /// </summary>
+    public static string FormatCompactError(string toolName, ActionGateError error, int attempt = 1, bool retryable = false, string? detail = null)
+    {
+        string code = ErrorCode(error);
+        return $"TOOL_FAILED\ntool={toolName}\ncode={code}\nattempt={attempt}\nretryable={retryable.ToString().ToLowerInvariant()}" +
+               (string.IsNullOrWhiteSpace(detail) ? "" : $"\ndetail={detail}");
+    }
+
+    /// <summary>
     /// Whether an argument value is compatible with a ToolParameter type declaration. Handles
     /// the primitive shapes the parsers produce (string / JsonElement string / numbers /
     /// booleans). A JSON string that holds a number stays a string — type mismatches like
@@ -306,18 +316,32 @@ public static class ActionGate
                 if (val is double d && Math.Abs(d % 1) < double.Epsilon) return true;
                 if (val is float f && Math.Abs(f % 1) < float.Epsilon) return true;
                 if (val is JsonElement jn && jn.ValueKind == JsonValueKind.Number && jn.TryGetInt64(out _)) return true;
-                if (val is string strInt && (long.TryParse(strInt, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out _) ||
-                                             (double.TryParse(strInt, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var parsedD) && Math.Abs(parsedD % 1) < double.Epsilon))) return true;
+                if (val is string strInt)
+                {
+                    var cleaned = strInt.Trim().TrimEnd('%');
+                    if (long.TryParse(cleaned, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out _) ||
+                        (double.TryParse(cleaned, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var parsedD) && Math.Abs(parsedD % 1) < double.Epsilon))
+                    {
+                        return true;
+                    }
+                }
                 return false;
             case "number":
                 if (val is int or long or double or float or decimal or short or byte) return true;
                 if (val is JsonElement num && num.ValueKind == JsonValueKind.Number) return true;
-                if (val is string strNum && double.TryParse(strNum, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out _)) return true;
+                if (val is string strNum)
+                {
+                    var cleaned = strNum.Trim().TrimEnd('%');
+                    if (double.TryParse(cleaned, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out _))
+                    {
+                        return true;
+                    }
+                }
                 return false;
             case "boolean":
                 if (val is bool) return true;
                 if (val is JsonElement jb && (jb.ValueKind == JsonValueKind.True || jb.ValueKind == JsonValueKind.False)) return true;
-                if (val is string strBool && bool.TryParse(strBool, out _)) return true;
+                if (val is string strBool && bool.TryParse(strBool.Trim(), out _)) return true;
                 return false;
             default:
                 // Unknown declared type: be permissive rather than wrongly rejecting.

@@ -755,4 +755,65 @@ public sealed class GenerationLoopDetector
         }
         return count;
     }
+
+    /// <summary>
+    /// Computes a normalized invariant hash of a generation, removing transient IDs, timestamps,
+    /// and whitespace to detect repetitive generations across turns.
+    /// </summary>
+    public static string ComputeNormalizedHash(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "empty";
+        string normalized = NormalizeForSemantic(text);
+        // Strip out hex IDs, GUIDs, numbers
+        normalized = System.Text.RegularExpressions.Regex.Replace(normalized, @"[0-9a-f]{8,}", string.Empty);
+        normalized = System.Text.RegularExpressions.Regex.Replace(normalized, @"\d+", string.Empty);
+        return Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(normalized.Trim())))[..16].ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Checks if the current generation is a near-duplicate of recent previous generations.
+    /// </summary>
+    public static bool DetectCrossTurnRepetition(IReadOnlyList<string> pastGenerations, string currentGeneration, double similarityThreshold = 0.60)
+    {
+        if (pastGenerations == null || pastGenerations.Count == 0 || string.IsNullOrWhiteSpace(currentGeneration))
+            return false;
+
+        string currentNorm = NormalizeForSemantic(currentGeneration);
+        if (currentNorm.Length < 20) return false;
+
+        var wordsCurrent = currentNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+
+        foreach (var past in pastGenerations.TakeLast(3))
+        {
+            if (string.IsNullOrWhiteSpace(past)) continue;
+            string pastNorm = NormalizeForSemantic(past);
+            if (pastNorm.Length < 20) continue;
+
+            if (ComputeNormalizedHash(currentGeneration) == ComputeNormalizedHash(past))
+                return true;
+
+            // Character bigram similarity
+            double charJaccard = CharacterBigramJaccard(currentNorm, pastNorm);
+            if (charJaccard >= similarityThreshold)
+                return true;
+
+            // Word token similarity
+            var wordsPast = pastNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+            if (wordsCurrent.Count > 0 && wordsPast.Count > 0)
+            {
+                int intersect = wordsCurrent.Intersect(wordsPast).Count();
+                int union = wordsCurrent.Union(wordsPast).Count();
+                if (union > 0 && (double)intersect / union >= similarityThreshold)
+                    return true;
+            }
+
+            // Shared leading failure reasoning prefix (e.g. "The plan tool is consistently failing...")
+            if (currentNorm.Length >= 40 && pastNorm.Length >= 40 && currentNorm[..40] == pastNorm[..40])
+                return true;
+        }
+
+        return false;
+    }
 }

@@ -199,6 +199,28 @@ public static class ExecutionTelemetryAnalyzer
             RunsCompleted: all.Sum(m => m.RunsCompleted));
     }
 
+    /// <summary>
+    /// Computes a composite response quality score (0..100) for a model generation.
+    /// ResponseScore = schemaValidity + toolValidity + stateProgress + evidenceQuality - repetition - hallucination.
+    /// </summary>
+    public static double ComputeResponseScore(
+        bool isSchemaValid,
+        bool isToolValid,
+        bool hasStateProgress,
+        bool hasVerificationEvidence,
+        bool isRepetitive,
+        bool hasHallucinationFlag)
+    {
+        double score = 0.0;
+        if (isSchemaValid) score += 25.0;
+        if (isToolValid) score += 25.0;
+        if (hasStateProgress) score += 25.0;
+        if (hasVerificationEvidence) score += 25.0;
+        if (isRepetitive) score -= 30.0;
+        if (hasHallucinationFlag) score -= 40.0;
+        return Math.Clamp(score, 0.0, 100.0);
+    }
+
     internal static string StampModel(string? modelId)
         => string.IsNullOrWhiteSpace(modelId) ? UnknownModel : modelId;
 

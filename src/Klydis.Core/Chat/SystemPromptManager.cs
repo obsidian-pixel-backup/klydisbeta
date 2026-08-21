@@ -676,8 +676,10 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         sb.AppendLine($"- Active Workspace Root: {currentDir}");
         sb.AppendLine($"- User Home Directory: {userProfile}");
         sb.AppendLine($"- User Account Name: {userName}");
-        sb.AppendLine("- When referencing paths or creating files, use actual valid paths on this machine. Never hallucinate user directories (e.g. never invent 'C:\\Users\\joshu').");
-        sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, run_command). Never ask clarifying interview questions or request permission before starting. Pick modern, elegant defaults and START CODING AND CREATING FILES IMMEDIATELY.");
+        sb.AppendLine("- When referencing paths or creating files, use actual valid paths on this machine. Never hallucinate user directories.");
+        sb.AppendLine("- Epistemic Rule: You cannot answer environmental, hardware, CPU, RAM, disk, or network queries from internal inference. You MUST obtain real evidence via tools (e.g. run_command, system tools). If tools are unavailable or no evidence exists, state UNKNOWN.");
+        sb.AppendLine("- Epistemic Rule: Accuracy > Completeness > Brevity. Never simulate or invent facts.");
+        sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, run_command). Distinguish confirmed requirements from creative suggestions.");
         sb.AppendLine();
     }
 }

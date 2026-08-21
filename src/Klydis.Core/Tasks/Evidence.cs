@@ -55,7 +55,8 @@ public sealed record Evidence(
     string? StepId = null,
     int? ExitCode = null,
     string? Payload = null,
-    int WorkspaceVersion = 0)
+    int WorkspaceVersion = 0,
+    EpistemicAuthority Authority = EpistemicAuthority.Verified)
 {
     /// <summary>
     /// True when this evidence kind actually VERIFIES something (a build/test/preview result,

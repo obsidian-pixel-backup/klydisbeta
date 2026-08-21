@@ -109,6 +109,18 @@ public sealed record StateDelta(IReadOnlyList<StateDeltaEntry> Entries)
 
     public bool IsEmpty => Entries.Count == 0;
 
+    /// <summary>True when the plan checklist changed this turn.</summary>
+    public bool PlanChanged => Contains(StateDeltaKind.PlanChanged) || Contains(StateDeltaKind.StepCompleted);
+
+    /// <summary>True when evidence was added this turn.</summary>
+    public bool EvidenceAdded => Contains(StateDeltaKind.EvidenceAdded);
+
+    /// <summary>True when workspace files were modified/created/deleted this turn.</summary>
+    public bool WorkspaceModified => Contains(StateDeltaKind.FileChanged) || Contains(StateDeltaKind.FileCreated) || Contains(StateDeltaKind.FileModified) || Contains(StateDeltaKind.FileDeleted);
+
+    /// <summary>True when a tool was executed this turn.</summary>
+    public bool ToolExecuted => Contains(StateDeltaKind.ToolExecuted);
+
     /// <summary>True when ANY entry of the kind exists. (P1.8-Fix-5: this is the contains
     /// semantics — a turn of ToolExecuted/ToolSucceeded/FileChanged must report
     /// Has(ToolExecuted) == true even though ToolExecuted is not the LAST entry.)</summary>

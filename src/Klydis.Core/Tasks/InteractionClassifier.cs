@@ -29,6 +29,24 @@ public enum InteractionMode
 }
 
 /// <summary>
+/// Fine-grained subtype of the interaction to enforce specialized epistemic contracts.
+/// </summary>
+public enum InteractionSubtype
+{
+    /// <summary>Standard task or conversation.</summary>
+    General,
+
+    /// <summary>Hardware, OS, or environment inspection — requires tool evidence, simulation forbidden.</summary>
+    SystemInspection,
+
+    /// <summary>Requirements gathering / scoping — strictly isolates confirmed facts, unknowns, and suggestions.</summary>
+    RequirementExtraction,
+
+    /// <summary>Brainstorming or creative ideation.</summary>
+    CreativeExpansion
+}
+
+/// <summary>
 /// Deterministic interaction classifier. Priority order: explicit conversational intent
 /// (greetings, gratitude, explanation requests) wins; then strong build/fix verbs
 /// (Autonomous); then analysis/research verbs (Task); short messages fall back to
@@ -215,6 +233,45 @@ public static class InteractionClassifier
 
     private static bool ContainsAny(string[] tokens, string[] markers)
         => markers.Any(m => m.Contains(' ') ? HasPhrase(tokens, m) : tokens.Contains(m));
+
+    private static readonly string[] RequirementMarkers =
+    {
+        "want to build", "want to create", "want a landing page", "landing page for",
+        "website for", "app for", "application for", "requirements for", "spec for",
+        "specification for", "design a page for", "build a page for", "scope out",
+        "feature list", "user stories"
+    };
+
+    /// <summary>
+    /// Classifies the interaction subtype to determine epistemic constraints and output format.
+    /// </summary>
+    public static InteractionSubtype ClassifySubtype(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return InteractionSubtype.General;
+        string normalized = Normalize(message);
+        string[] tokens = Tokenize(normalized);
+
+        if (ContainsAny(tokens, SystemInspectionMarkers)) return InteractionSubtype.SystemInspection;
+        if (ContainsAny(tokens, RequirementMarkers)) return InteractionSubtype.RequirementExtraction;
+        return InteractionSubtype.General;
+    }
+
+    /// <summary>
+    /// Generates the strict requirement extraction prompt contract to prevent creative completion leaking into user requirements.
+    /// </summary>
+    public static string FormatRequirementExtractionContract()
+    {
+        return @"[EPISTEMIC CONTRACT — REQUIREMENTS EXTRACTION]
+You are extracting requirements from the user's request.
+You MUST distinguish confirmed requirements from unknowns and creative suggestions.
+Return your extraction strictly in this structured form:
+{
+  ""confirmedRequirements"": [ ""List only facts explicitly stated by the user"" ],
+  ""unknowns"": [ ""List missing specifications such as company name, pricing, branding, domain, etc."" ],
+  ""suggestions"": [ ""List recommended ideas, UI sections, or optional features without treating them as facts"" ]
+}
+DO NOT invent technical specifications or treat creative ideas as confirmed requirements.";
+    }
 
     private static bool HasPhrase(string[] tokens, string phrase)
     {
