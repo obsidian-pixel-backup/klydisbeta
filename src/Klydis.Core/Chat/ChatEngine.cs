@@ -291,6 +291,8 @@ public class ChatEngine(
     // run id changes (a fresh run / new task).
     private readonly HashSet<string> _runExecutedActions = new(StringComparer.Ordinal);
     private string? _runExecutedActionsRunId;
+    private readonly Klydis.Core.Tasks.FailureFingerprintTracker _fingerprintTracker = new();
+    private readonly Klydis.Core.Inference.IBudgetManager _budgetManager = new Klydis.Core.Inference.BudgetManager();
 
     public Klydis.Core.RAG.VectorStore? VectorStore { get; set; } = vectorStore;
 
@@ -2402,6 +2404,25 @@ public class ChatEngine(
                 }
             }
 
+            // Cross-turn repetition detection: detect multi-turn repetition loops that span across generations
+            if (loopInfo == null && !string.IsNullOrWhiteSpace(fullResponse))
+            {
+                var pastGenerations = activeHistory
+                    .Where(m => m.Role == ChatRole.Assistant && !string.IsNullOrWhiteSpace(m.Content))
+                    .Select(m => m.Content!)
+                    .ToList();
+                if (Klydis.Core.Chat.GenerationLoopDetector.DetectCrossTurnRepetition(pastGenerations, fullResponse))
+                {
+                    logger.LogWarning("Cross-turn repetitive generation detected. Applying corrective redirect.");
+                    if (selfCorrectionsThisTurn < MaxSelfCorrectionsPerTurn)
+                    {
+                        selfCorrectionsThisTurn++;
+                        loopCorrection = "[SYSTEM — REPETITION DETECTED] You are repeating previous outputs without advancing state. Take a completely different action, inspect available evidence, or report UNKNOWN.";
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Cross-turn repetition detected — self-correcting…");
+                    }
+                }
+            }
+
             // Strip raw thinking tags and antml system tags so history stored in context does not poison future turns
             var cleanHistoryResponse = OutputSanitizer.CleanHistoryResponse(fullResponse);
             if (string.IsNullOrWhiteSpace(cleanHistoryResponse))
@@ -2668,6 +2689,7 @@ public class ChatEngine(
                 if (!string.Equals(activeRunId, _runExecutedActionsRunId, StringComparison.Ordinal))
                 {
                     _runExecutedActions.Clear();
+                    _fingerprintTracker.Reset();
                     if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
                     {
                         try
@@ -2828,7 +2850,10 @@ public class ChatEngine(
                         string actionId = Klydis.Core.Tasks.ActionGate.ComputeActionId(
                             req, CurrentTaskId, activeRunId, turnActionOrdinal);
                         string gateErrorCode = Klydis.Core.Tasks.ActionGate.ErrorCode(gateVerdict.Error!.Value);
-                        string rejection = BuildActionGateRejection(actionId, req, gateVerdict);
+                        var fp = _fingerprintTracker.RecordFailure(req.Name, gateErrorCode, req.Arguments, currentStepText);
+                        string rejection = fp.IsStrategyBlocked
+                            ? _fingerprintTracker.FormatBlockedFeedback(req.Name, gateErrorCode)
+                            : BuildActionGateRejection(actionId, req, gateVerdict);
                         logger.LogWarning(
                             "ACTION_GATE_REJECTED actionId={ActionId} task={TaskId} run={RunId} step={Step} " +
                             "tool={Tool} code={Code} reason={Reason} allowed={Allowed}",

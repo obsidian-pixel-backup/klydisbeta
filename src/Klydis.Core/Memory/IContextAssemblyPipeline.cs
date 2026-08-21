@@ -130,6 +130,12 @@ public sealed class ContextAssemblyPipeline : IContextAssemblyPipeline
 
     /// <inheritdoc />
     public string SummarizeToolOutput(string toolName, string rawOutput, int maxChars = 2000)
+        => SummarizeToolOutputStatic(toolName, rawOutput, maxChars);
+
+    /// <summary>
+    /// Static tool output summarizer accessible across the harness.
+    /// </summary>
+    public static string SummarizeToolOutputStatic(string toolName, string rawOutput, int maxChars = 2000)
     {
         if (string.IsNullOrWhiteSpace(rawOutput)) return string.Empty;
         if (rawOutput.Length <= maxChars) return rawOutput;

@@ -775,13 +775,13 @@ public sealed class GenerationLoopDetector
     /// <summary>
     /// Checks if the current generation is a near-duplicate of recent previous generations.
     /// </summary>
-    public static bool DetectCrossTurnRepetition(IReadOnlyList<string> pastGenerations, string currentGeneration, double similarityThreshold = 0.60)
+    public static bool DetectCrossTurnRepetition(IReadOnlyList<string> pastGenerations, string currentGeneration, double similarityThreshold = 0.85)
     {
         if (pastGenerations == null || pastGenerations.Count == 0 || string.IsNullOrWhiteSpace(currentGeneration))
             return false;
 
         string currentNorm = NormalizeForSemantic(currentGeneration);
-        if (currentNorm.Length < 20) return false;
+        if (currentNorm.Length < 100) return false;
 
         var wordsCurrent = currentNorm.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
 
@@ -789,7 +789,7 @@ public sealed class GenerationLoopDetector
         {
             if (string.IsNullOrWhiteSpace(past)) continue;
             string pastNorm = NormalizeForSemantic(past);
-            if (pastNorm.Length < 20) continue;
+            if (pastNorm.Length < 100) continue;
 
             if (ComputeNormalizedHash(currentGeneration) == ComputeNormalizedHash(past))
                 return true;

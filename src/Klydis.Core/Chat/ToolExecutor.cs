@@ -738,14 +738,12 @@ public class ToolExecutor(
             }
             catch { /* best effort */ }
 
-            var preview = result.Output.Length > OffloadPreviewChars 
-                ? result.Output[..OffloadPreviewChars] 
-                : result.Output;
+            var preview = Klydis.Core.Memory.ContextAssemblyPipeline.SummarizeToolOutputStatic(result.ToolName, result.Output, OffloadPreviewChars);
 
             // M1: Directive language — model MUST read the file before responding
             var offloadedMessage = $"[Tool Output Exceeded Context Budget]\n" +
                                    $"Full output ({result.Output.Length} characters) offloaded to: {filePath}\n\n" +
-                                   $"Preview (First {preview.Length} characters):\n" +
+                                   $"Preview / Structured Summary:\n" +
                                    $"--------------------------------------------------\n" +
                                    $"{preview}\n" +
                                    $"--------------------------------------------------\n" +

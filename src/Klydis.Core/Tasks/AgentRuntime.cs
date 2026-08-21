@@ -246,6 +246,12 @@ public class AgentRuntime : IAgentRuntime
     public void RecordRunEvidence(string taskId, Evidence evidence, string? runId = null, string? actionId = null)
         => _evidenceLedger.RecordEvidence(taskId, evidence, runId, actionId);
 
+    /// <summary>
+    /// Gets the authoritative epistemic ledger for the specified task.
+    /// </summary>
+    public EpistemicLedger GetEpistemicLedger(string taskId)
+        => _evidenceLedger.GetEpistemicLedger(taskId);
+
     /// <summary>Bumps the run's workspace version — every prior build/preview evidence entry
     /// is now STALE (file changes invalidate verification).</summary>
     public void NoteRunFileChanged(string taskId)

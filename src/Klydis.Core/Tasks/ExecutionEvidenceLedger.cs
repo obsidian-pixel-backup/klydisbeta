@@ -61,6 +61,7 @@ public sealed class ExecutionEvidenceLedger
         public int WorkspaceVersion;
         public readonly List<EvidenceLedgerEntry> Evidence = new();
         public readonly List<ExecutionDecisionRecord> Decisions = new();
+        public readonly EpistemicLedger Epistemic = new();
     }
 
     private readonly MessageStore? _store;
@@ -76,6 +77,12 @@ public sealed class ExecutionEvidenceLedger
 
     private RunLedger Ledger(string runKey)
         => _runs.GetOrAdd(runKey ?? string.Empty, _ => new RunLedger());
+
+    /// <summary>
+    /// Gets the authoritative epistemic ledger for a task/run.
+    /// </summary>
+    public EpistemicLedger GetEpistemicLedger(string runKey)
+        => Ledger(runKey).Epistemic;
 
     /// <summary>
     /// Resets the ledger for a key — called when a FRESH run starts (a continued run keeps
@@ -108,6 +115,17 @@ public sealed class ExecutionEvidenceLedger
                             Payload: row.PayloadJson,
                             WorkspaceVersion: row.WorkspaceVersion),
                         row.WorkspaceVersion));
+
+                    ledger.Epistemic.RecordFact(new EpistemicEntry(
+                        Key: !string.IsNullOrWhiteSpace(row.Subject) ? row.Subject : row.Kind.ToString(),
+                        Value: row.PayloadJson ?? string.Empty,
+                        Source: EpistemicSource.VerifiedEvidence,
+                        Authority: EpistemicAuthority.Verified,
+                        Freshness: EpistemicFreshness.Current,
+                        TimestampUtc: row.TimestampUtc,
+                        WorkspaceVersion: row.WorkspaceVersion,
+                        StepId: row.StepId));
+
                     if (row.WorkspaceVersion > ledger.WorkspaceVersion)
                     {
                         ledger.WorkspaceVersion = row.WorkspaceVersion;
@@ -138,6 +156,22 @@ public sealed class ExecutionEvidenceLedger
                 ? evidence with { WorkspaceVersion = ledger.WorkspaceVersion }
                 : evidence;
             ledger.Evidence.Add(new EvidenceLedgerEntry(stamped, ledger.WorkspaceVersion));
+
+            var epistemicSource = stamped.Kind switch
+            {
+                EvidenceKind.UserFact => EpistemicSource.UserFact,
+                EvidenceKind.BuildPassed or EvidenceKind.TestPassed or EvidenceKind.VerificationPassed => EpistemicSource.VerifiedEvidence,
+                _ => EpistemicSource.RuntimeTool
+            };
+            ledger.Epistemic.RecordFact(new EpistemicEntry(
+                Key: !string.IsNullOrWhiteSpace(stamped.Subject) ? stamped.Subject : stamped.Kind.ToString(),
+                Value: !string.IsNullOrWhiteSpace(stamped.Payload) ? stamped.Payload : stamped.Description,
+                Source: epistemicSource,
+                Authority: stamped.Authority,
+                Freshness: EpistemicFreshness.Current,
+                TimestampUtc: stamped.TimestampUtc,
+                WorkspaceVersion: stamped.WorkspaceVersion,
+                StepId: stamped.StepId));
 
             if (_store == null) return;
             try
@@ -175,6 +209,7 @@ public sealed class ExecutionEvidenceLedger
         lock (ledger)
         {
             ledger.WorkspaceVersion++;
+            ledger.Epistemic.InvalidateOnWorkspaceChange(ledger.WorkspaceVersion);
             if (_store == null) return;
             try
             {
