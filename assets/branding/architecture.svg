@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 960" width="1500" height="960" role="img" aria-label="Klydis architecture at a glance — WPF UI, ChatViewModel, ChatEngine loop host, ToolExecutor/SystemPromptManager/AgentRuntime, SQLite MessageStore, InferenceEngine and ContextOrchestrator over native llama.cpp and supporting services">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#001619"/>
+      <stop offset="1" stop-color="#03232B"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#3A6B76"/>
+    </marker>
+  </defs>
+
+  <rect width="1500" height="960" fill="url(#bg)"/>
+  <text x="750" y="40" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="600" letter-spacing="5" fill="#4E7A84" text-anchor="middle">ARCHITECTURE AT A GLANCE</text>
+  <rect x="690" y="52" width="120" height="2" rx="1" fill="#50E8F4"/>
+
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <!-- WPF APP -->
+    <rect x="450" y="72" width="600" height="62" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="750" y="100" font-size="16" font-weight="700" fill="#EAF9FB" text-anchor="middle">WPF APP (UI)</text>
+    <text x="750" y="122" font-size="12" fill="#8FB4BC" text-anchor="middle">MainWindow · ChatView · SidePanel · ModelLibrary · RAG · Skills · Settings</text>
+
+    <line x1="750" y1="134" x2="750" y2="158" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- ChatViewModel -->
+    <rect x="635" y="160" width="230" height="44" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="750" y="184" font-size="14" font-weight="700" fill="#EAF9FB" text-anchor="middle">ChatViewModel</text>
+    <text x="750" y="198" font-size="11" fill="#8FB4BC" text-anchor="middle">MVVM · sessions · risk · queue</text>
+
+    <line x1="750" y1="204" x2="750" y2="230" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- ChatEngine -->
+    <rect x="430" y="232" width="640" height="74" rx="10" fill="#073039" stroke="#2E9AA8" stroke-width="1.5"/>
+    <text x="750" y="260" font-size="16" font-weight="700" fill="#7FE9F5" text-anchor="middle">ChatEngine — the loop host</text>
+    <text x="750" y="286" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9DC9D2" text-anchor="middle">classify → task → prompt → generate → parse → execute → supervise → continue / repair / done</text>
+
+    <line x1="560" y1="306" x2="560" y2="338" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="750" y1="306" x2="750" y2="338" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="940" y1="306" x2="940" y2="338" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Row: ToolExecutor / SystemPromptManager / AgentRuntime -->
+    <rect x="70" y="340" width="430" height="118" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="100" y="368" font-size="15" font-weight="700" fill="#EAF9FB">ToolExecutor</text>
+    <text x="100" y="392" font-size="12" fill="#8FB4BC">42 built-in tools</text>
+    <text x="100" y="412" font-size="12" fill="#8FB4BC">mutation pipeline · real diffs · artifacts</text>
+    <text x="100" y="432" font-size="12" fill="#8FB4BC">approval gates · event emit</text>
+
+    <rect x="535" y="340" width="430" height="118" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="565" y="368" font-size="15" font-weight="700" fill="#EAF9FB">SystemPromptManager</text>
+    <text x="565" y="392" font-size="12" fill="#8FB4BC">3 prompt profiles (full / compact / conversational)</text>
+    <text x="565" y="412" font-size="12" fill="#8FB4BC">KNOWN · ASSUMED · PROPOSED fact grounding</text>
+    <text x="565" y="432" font-size="12" fill="#8FB4BC">personas &amp; personalities</text>
+
+    <rect x="1000" y="340" width="430" height="118" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="1030" y="368" font-size="15" font-weight="700" fill="#EAF9FB">AgentRuntime</text>
+    <text x="1030" y="392" font-size="12" fill="#8FB4BC">run lifecycle (Run → Turn → Generation)</text>
+    <text x="1030" y="412" font-size="12" fill="#8FB4BC">outcome classification</text>
+    <text x="1030" y="432" font-size="12" fill="#8FB4BC">supervisor dispatch · evidence ledger</text>
+
+    <line x1="285" y1="458" x2="285" y2="508" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="750" y1="458" x2="750" y2="508" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="1215" y1="458" x2="1215" y2="508" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- MessageStore -->
+    <rect x="230" y="510" width="1040" height="128" rx="12" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="750" y="540" font-size="16" font-weight="700" fill="#7FE9F5" text-anchor="middle">MessageStore — SQLite · WAL</text>
+    <text x="750" y="566" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9DC9D2" text-anchor="middle">sessions · messages · tasks · runs · turns · generations · task_steps · task_actions</text>
+    <text x="750" y="586" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9DC9D2" text-anchor="middle">execution_evidence · execution_decisions · execution_events · file_changes</text>
+    <text x="750" y="606" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9DC9D2" text-anchor="middle">tool_activity · artifacts · queued_messages · custom_tools · lessons · session_notes · fact_ledger</text>
+
+    <line x1="505" y1="638" x2="505" y2="678" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="995" y1="638" x2="995" y2="678" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- InferenceEngine / ContextOrchestrator -->
+    <rect x="230" y="680" width="500" height="112" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="260" y="708" font-size="15" font-weight="700" fill="#EAF9FB">InferenceEngine</text>
+    <text x="260" y="732" font-size="12" fill="#8FB4BC">LLamaSharp fork · model lifecycle · KV cache</text>
+    <text x="260" y="752" font-size="12" fill="#8FB4BC">speculative decoding · grammar-constrained tools</text>
+    <text x="260" y="772" font-size="12" fill="#8FB4BC">native engine manager · model pool</text>
+
+    <rect x="770" y="680" width="500" height="112" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="800" y="708" font-size="15" font-weight="700" fill="#EAF9FB">ContextOrchestrator</text>
+    <text x="800" y="732" font-size="12" fill="#8FB4BC">rolling compression · world-state summaries</text>
+    <text x="800" y="752" font-size="12" fill="#8FB4BC">token budgets · chunked summarization</text>
+    <text x="800" y="772" font-size="12" fill="#8FB4BC">sparse memory index · Obsidian vault</text>
+
+    <line x1="480" y1="792" x2="480" y2="832" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <line x1="1020" y1="792" x2="1020" y2="832" stroke="#3A6B76" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- bottom row -->
+    <rect x="230" y="834" width="500" height="56" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="480" y="862" font-size="14" font-weight="700" fill="#EAF9FB" text-anchor="middle">Native llama.cpp engine (auto-updated)</text>
+    <text x="480" y="880" font-size="11.5" fill="#8FB4BC" text-anchor="middle">CPU / CUDA / Vulkan backends · ABI-pinned</text>
+
+    <rect x="770" y="834" width="500" height="56" rx="10" fill="#042029" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="1020" y="862" font-size="14" font-weight="700" fill="#EAF9FB" text-anchor="middle">RAG · Skills · Learning · Benchmarking</text>
+    <text x="1020" y="880" font-size="11.5" fill="#8FB4BC" text-anchor="middle">Capabilities · Orchestration · Protocol · Providers</text>
+  </g>
+
+  <text x="750" y="936" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-style="italic" fill="#5E8A93" text-anchor="middle">Key principle: every UI panel is a projection of durable execution state — the model can propose, the harness disposes.</text>
+</svg>

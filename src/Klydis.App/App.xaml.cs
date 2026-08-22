@@ -221,6 +221,15 @@ public partial class App : Application
         services.AddSingleton<Klydis.Core.Learning.AdaptiveLearningService>();
         services.AddSingleton<Klydis.Core.Chat.CamoufoxManager>();
         services.AddSingleton<Klydis.Core.Chat.StealthBrowserService>();
+        // Web subsystem (P0 hardening): one SSRF gate over every fetch path, DNS-pinned HTTP
+        // fetcher, browser fetcher, fallback router, multi-provider search, and the
+        // orchestrator that ToolExecutor exposes as search_web / crawl_url.
+        services.AddSingleton<Klydis.Core.Web.Security.SsrfGuard>();
+        services.AddSingleton<Klydis.Core.Web.Fetch.HttpFetcher>();
+        services.AddSingleton<Klydis.Core.Web.Fetch.BrowserFetcher>();
+        services.AddSingleton<Klydis.Core.Web.Fetch.FetchRouter>();
+        services.AddSingleton<Klydis.Core.Web.Search.WebSearchService>();
+        services.AddSingleton<Klydis.Core.Web.WebOrchestrator>();
         services.AddSingleton<ModelPool>();
         services.AddSingleton<GpuProfiler>();
         services.AddSingleton<SystemProfiler>();
@@ -294,7 +303,8 @@ public partial class App : Application
                 sp.GetService<Klydis.Core.RAG.HybridRetriever>(),
                 sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>(),
                 sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>(),
-                sp.GetService<Klydis.Core.Tasks.TaskManager>()
+                sp.GetService<Klydis.Core.Tasks.TaskManager>(),
+                sp.GetRequiredService<Klydis.Core.Web.WebOrchestrator>()
             );
             // Default to Standard (approval gate for risky/flagged tools). AutoPilot mode
             // executes arbitrary PowerShell with no approval gate, which combined with

@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 420" width="1600" height="420" role="img" aria-label="Klydis — a local LLM inference engine and agentic chat platform for Windows">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#001619"/>
+      <stop offset="0.55" stop-color="#03232B"/>
+      <stop offset="1" stop-color="#06323C"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#50E8F4"/>
+      <stop offset="1" stop-color="#2FB8C9"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#50E8F4" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#50E8F4" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#1E4A54" stroke-width="1" opacity="0.45"/>
+    </pattern>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <filter id="glowText" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="420" fill="url(#bg)"/>
+  <rect width="1600" height="420" fill="url(#grid)"/>
+  <ellipse cx="1240" cy="210" rx="400" ry="300" fill="url(#glow)"/>
+  <ellipse cx="430" cy="210" rx="540" ry="330" fill="url(#glow)" opacity="0.55"/>
+  <rect y="378" width="1600" height="42" fill="#001619" opacity="0.55"/>
+
+  <!-- token streams feeding the chip -->
+  <path d="M 900 170 C 1000 165 1050 145 1120 132" fill="none" stroke="#2E6A76" stroke-width="1.5" stroke-dasharray="4 6" opacity="0.9"/>
+  <circle cx="940" cy="166" r="5" fill="#50E8F4" opacity="0.9"/>
+  <circle cx="1000" cy="158" r="4" fill="#50E8F4" opacity="0.7"/>
+  <circle cx="1060" cy="148" r="3" fill="#50E8F4" opacity="0.5"/>
+  <path d="M 900 260 C 1000 270 1050 280 1120 292" fill="none" stroke="#2E6A76" stroke-width="1.5" stroke-dasharray="4 6" opacity="0.9"/>
+  <circle cx="940" cy="266" r="5" fill="#7BE39B" opacity="0.9"/>
+  <circle cx="1000" cy="274" r="4" fill="#7BE39B" opacity="0.7"/>
+  <circle cx="1060" cy="282" r="3" fill="#7BE39B" opacity="0.5"/>
+
+  <!-- processor chip -->
+  <g>
+    <rect x="1174" y="98" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1196" y="98" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1218" y="98" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1240" y="98" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1262" y="98" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1284" y="98" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1174" y="212" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1196" y="212" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1218" y="212" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1240" y="212" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1262" y="212" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1284" y="212" width="14" height="10" rx="2" fill="#2E6A76"/>
+    <rect x="1146" y="134" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1146" y="156" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1146" y="178" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1146" y="200" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1146" y="222" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1146" y="244" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1344" y="134" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1344" y="156" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1344" y="178" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1344" y="200" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1344" y="222" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1344" y="244" width="10" height="14" rx="2" fill="#2E6A76"/>
+    <rect x="1172" y="132" width="156" height="156" rx="16" fill="#0A3540" stroke="#50E8F4" stroke-width="2"/>
+    <rect x="1192" y="152" width="116" height="116" rx="10" fill="#50E8F4" opacity="0.12"/>
+    <rect x="1202" y="162" width="14" height="14" rx="3" fill="#50E8F4" opacity="0.5"/>
+    <rect x="1284" y="162" width="14" height="14" rx="3" fill="#50E8F4" opacity="0.5"/>
+    <rect x="1202" y="244" width="14" height="14" rx="3" fill="#50E8F4" opacity="0.5"/>
+    <rect x="1284" y="244" width="14" height="14" rx="3" fill="#50E8F4" opacity="0.5"/>
+    <text x="1250" y="228" font-family="Segoe UI, Arial, sans-serif" font-size="64" font-weight="800" fill="#7FE9F5" text-anchor="middle" filter="url(#glowText)">K</text>
+  </g>
+
+  <!-- wordmark -->
+  <rect x="120" y="118" width="76" height="76" rx="18" fill="url(#accent)"/>
+  <text x="158" y="170" font-family="Segoe UI, Arial, sans-serif" font-size="44" font-weight="800" fill="#001619" text-anchor="middle">K</text>
+  <text x="220" y="176" font-family="Segoe UI, Arial, sans-serif" font-size="84" font-weight="800" letter-spacing="6" fill="#EAF9FB" filter="url(#glowText)">KLYDIS</text>
+  <rect x="596" y="138" width="104" height="38" rx="19" fill="none" stroke="#FFC24B" stroke-width="1.5"/>
+  <text x="648" y="163" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="3" fill="#FFC24B" text-anchor="middle">BETA</text>
+
+  <text x="220" y="238" font-family="Segoe UI, Arial, sans-serif" font-size="26" font-weight="400" fill="#A9D4DC">Local LLM inference engine &amp; agentic chat platform for Windows</text>
+
+  <!-- feature pills -->
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="15">
+    <rect x="220" y="272" width="190" height="36" rx="18" fill="#0A2E37" stroke="#1E4A54" stroke-width="1"/>
+    <circle cx="244" cy="290" r="4" fill="#50E8F4"/>
+    <text x="260" y="295" fill="#CFE9EE">In-process GGUF</text>
+
+    <rect x="424" y="272" width="190" height="36" rx="18" fill="#0A2E37" stroke="#1E4A54" stroke-width="1"/>
+    <circle cx="448" cy="290" r="4" fill="#7BE39B"/>
+    <text x="464" y="295" fill="#CFE9EE">1M-token context</text>
+
+    <rect x="628" y="272" width="190" height="36" rx="18" fill="#0A2E37" stroke="#1E4A54" stroke-width="1"/>
+    <circle cx="652" cy="290" r="4" fill="#B18CFF"/>
+    <text x="668" y="295" fill="#CFE9EE">42 built-in tools</text>
+
+    <rect x="832" y="272" width="190" height="36" rx="18" fill="#0A2E37" stroke="#1E4A54" stroke-width="1"/>
+    <circle cx="856" cy="290" r="4" fill="#FFC24B"/>
+    <text x="872" y="295" fill="#CFE9EE">SQLite agent state</text>
+  </g>
+
+  <text x="800" y="392" font-family="Segoe UI, Arial, sans-serif" font-size="13" letter-spacing="3" fill="#4E7A84" text-anchor="middle">POWERED BY .NET 10 · VENDORED LLAMASHARP FORK · LLAMA.CPP</text>
+</svg>

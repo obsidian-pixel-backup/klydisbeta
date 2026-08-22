@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 820" width="1600" height="820" role="img" aria-label="A stylized mockup of the Klydis desktop app — chat transcript, plan, files, preview and terminal workbench panels, status bar with live stats">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#001619"/>
+      <stop offset="1" stop-color="#04232B"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#50E8F4"/>
+      <stop offset="1" stop-color="#2FB8C9"/>
+    </linearGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#1E4A54" stroke-width="1" opacity="0.30"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="820" fill="url(#bg)"/>
+  <rect width="1600" height="820" fill="url(#grid)"/>
+
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <!-- window frame -->
+    <rect x="70" y="40" width="1460" height="740" rx="14" fill="#03181D" stroke="#1E4A54" stroke-width="1.5"/>
+
+    <!-- title bar -->
+    <path d="M 84 40 H 1516 A 14 14 0 0 1 1530 54 V 84 H 70 V 54 A 14 14 0 0 1 84 40 Z" fill="#042029"/>
+    <rect x="92" y="50" width="24" height="24" rx="6" fill="url(#accentGrad)"/>
+    <text x="104" y="67" font-size="13" font-weight="800" fill="#001619" text-anchor="middle">K</text>
+    <text x="126" y="67" font-size="13.5" font-weight="700" fill="#EAF9FB">Klydis Beta</text>
+    <circle cx="1440" cy="62" r="5" fill="#2A4A52"/>
+    <circle cx="1466" cy="62" r="5" fill="#2A4A52"/>
+    <circle cx="1492" cy="62" r="5" fill="#E5484D"/>
+
+    <!-- activity bar -->
+    <rect x="70" y="84" width="56" height="656" fill="#042029"/>
+    <rect x="78" y="96" width="40" height="40" rx="10" fill="#0E3A44"/>
+    <g fill="none" stroke="#7FE9F5" stroke-width="1.8" stroke-linejoin="round">
+      <path d="M 88 108 h 20 v 12 h -9 l -5 4 v -4 h -6 z"/>
+    </g>
+    <g fill="none" stroke="#4E7A84" stroke-width="1.8" stroke-linejoin="round">
+      <path d="M 98 152 l 9 5 -9 5 -9 -5 z M 89 160 l 9 5 9 -5"/>
+      <path d="M 98 200 L 105 204 L 98 208 L 91 204 Z M 98 208 V 216"/>
+      <path d="M 90 238 h 16 v 10 h -16 z M 94 248 v 4 M 102 248 v 4"/>
+      <path d="M 92 270 h 8 l 4 5 h 8 v 12 h -20 z"/>
+    </g>
+    <g fill="none" stroke="#4E7A84" stroke-width="1.8" stroke-linecap="round">
+      <path d="M 90 300 h 16 M 90 306 h 16 M 90 312 h 16"/>
+      <circle cx="96" cy="300" r="2.5" fill="#4E7A84" stroke="none"/>
+      <circle cx="104" cy="306" r="2.5" fill="#4E7A84" stroke="none"/>
+      <circle cx="93" cy="312" r="2.5" fill="#4E7A84" stroke="none"/>
+    </g>
+    <rect x="88" y="686" width="20" height="20" rx="4" fill="none" stroke="#4E7A84" stroke-width="1.8"/>
+
+    <!-- chat column -->
+    <rect x="126" y="84" width="950" height="656" fill="#011417"/>
+    <rect x="126" y="84" width="950" height="42" fill="#042029"/>
+    <line x1="126" y1="126" x2="1076" y2="126" stroke="#163E46" stroke-width="1"/>
+    <text x="146" y="111" font-size="13.5" font-weight="700" fill="#EAF9FB">LaserForge — landing page</text>
+    <rect x="930" y="94" width="130" height="24" rx="12" fill="#0E3A44"/>
+    <circle cx="944" cy="106" r="4" fill="#7BE39B"/>
+    <text x="956" y="110" font-size="11" fill="#9DC9D2">Working…</text>
+
+    <!-- messages -->
+    <rect x="706" y="150" width="350" height="46" rx="12" fill="url(#accentGrad)"/>
+    <text x="726" y="179" font-size="13.5" font-weight="700" fill="#02181C">Build the landing page now.</text>
+
+    <rect x="146" y="216" width="560" height="86" rx="12" fill="#0A2E37" stroke="#163E46" stroke-width="1"/>
+    <rect x="166" y="234" width="300" height="7" rx="3.5" fill="#2E5A66"/>
+    <rect x="166" y="250" width="420" height="7" rx="3.5" fill="#2E5A66"/>
+    <rect x="166" y="266" width="240" height="7" rx="3.5" fill="#2E5A66"/>
+
+    <rect x="146" y="322" width="240" height="38" rx="19" fill="#06252D" stroke="#163E46" stroke-width="1"/>
+    <text x="266" y="346" font-size="12" font-style="italic" fill="#7FA9B2" text-anchor="middle">Thinking…</text>
+
+    <rect x="146" y="380" width="430" height="44" rx="10" fill="#0A2E37" stroke="#163E46" stroke-width="1"/>
+    <rect x="166" y="394" width="12" height="12" rx="6" fill="#103B33"/>
+    <path d="M 169 401.5 l 3 3 5 -5.5" fill="none" stroke="#7BE39B" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="188" y="407" font-size="12.5" fill="#B9D8DE">run_command — dotnet build</text>
+
+    <rect x="146" y="444" width="620" height="110" rx="12" fill="#0A2E37" stroke="#163E46" stroke-width="1"/>
+    <rect x="166" y="466" width="380" height="7" rx="3.5" fill="#2E5A66"/>
+    <rect x="166" y="484" width="520" height="7" rx="3.5" fill="#2E5A66"/>
+    <rect x="166" y="502" width="300" height="7" rx="3.5" fill="#2E5A66"/>
+    <rect x="166" y="520" width="460" height="7" rx="3.5" fill="#2E5A66"/>
+
+    <!-- input -->
+    <rect x="146" y="690" width="910" height="44" rx="22" fill="#042029" stroke="#1E4A54" stroke-width="1"/>
+    <text x="186" y="717" font-size="12" fill="#5E8A93">Message Klydis…   (Enter to send)</text>
+    <circle cx="172" cy="712" r="12" fill="#0A2E37" stroke="#1E4A54" stroke-width="1"/>
+    <text x="172" y="716" font-size="13" fill="#7FE9F5" text-anchor="middle">+</text>
+    <circle cx="1020" cy="712" r="15" fill="url(#accentGrad)"/>
+    <path d="M 1013 705 L 1027 712 L 1013 719 Z" fill="#02181C"/>
+
+    <!-- workbench column -->
+    <rect x="1076" y="84" width="454" height="656" fill="#06232B"/>
+    <line x1="1076" y1="84" x2="1076" y2="740" stroke="#163E46" stroke-width="1"/>
+
+    <text x="1092" y="105" font-size="11" fill="#5E8A93">Queue</text>
+    <text x="1144" y="105" font-size="11" font-weight="700" fill="#7FE9F5">Plan</text>
+    <rect x="1138" y="110" width="36" height="2" rx="1" fill="#50E8F4"/>
+    <text x="1190" y="105" font-size="11" fill="#5E8A93">Files</text>
+    <text x="1250" y="105" font-size="11" fill="#5E8A93">Changes</text>
+    <text x="1324" y="105" font-size="11" fill="#5E8A93">Preview</text>
+    <text x="1400" y="105" font-size="11" fill="#5E8A93">Terminal</text>
+    <text x="1476" y="105" font-size="11" fill="#5E8A93">Notes</text>
+
+    <text x="1096" y="140" font-size="10" font-weight="600" letter-spacing="3" fill="#4E7A84">TASK PLAN</text>
+
+    <rect x="1096" y="154" width="14" height="14" rx="3" fill="#50E8F4"/>
+    <path d="M 1099.5 161 l 3 3 5 -5" fill="none" stroke="#02181C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1120" y="166" font-size="12" fill="#CFE9EE">Set up project structure</text>
+
+    <rect x="1096" y="184" width="14" height="14" rx="3" fill="#50E8F4"/>
+    <path d="M 1099.5 191 l 3 3 5 -5" fill="none" stroke="#02181C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1120" y="196" font-size="12" fill="#CFE9EE">Build hero section</text>
+
+    <rect x="1096" y="214" width="14" height="14" rx="3" fill="none" stroke="#2E6A76" stroke-width="1.5"/>
+    <text x="1120" y="226" font-size="12" fill="#8FB4BC">Add product showcase</text>
+
+    <rect x="1096" y="244" width="14" height="14" rx="3" fill="none" stroke="#2E6A76" stroke-width="1.5"/>
+    <text x="1120" y="256" font-size="12" fill="#8FB4BC">Deploy &amp; verify</text>
+
+    <text x="1096" y="298" font-size="10" font-weight="600" letter-spacing="3" fill="#4E7A84">FILES</text>
+    <rect x="1096" y="308" width="16" height="16" rx="4" fill="#FFC24B" opacity="0.85"/>
+    <text x="1122" y="321" font-size="12" fill="#B9D8DE">index.html</text>
+    <rect x="1096" y="332" width="16" height="16" rx="4" fill="#4D9FFF" opacity="0.85"/>
+    <text x="1122" y="345" font-size="12" fill="#B9D8DE">styles.css</text>
+    <rect x="1096" y="356" width="16" height="16" rx="4" fill="#F5C542" opacity="0.85"/>
+    <text x="1122" y="369" font-size="12" fill="#B9D8DE">app.js</text>
+
+    <text x="1096" y="412" font-size="10" font-weight="600" letter-spacing="3" fill="#4E7A84">PREVIEW</text>
+    <rect x="1096" y="424" width="414" height="150" rx="8" fill="#042029" stroke="#163E46" stroke-width="1"/>
+    <rect x="1104" y="434" width="398" height="20" rx="4" fill="#0A2E37"/>
+    <text x="1114" y="448" font-size="10" fill="#5E8A93">file:///workspace/index.html</text>
+    <rect x="1104" y="462" width="398" height="104" fill="#03242C"/>
+    <rect x="1120" y="482" width="120" height="8" rx="4" fill="#2E6A76"/>
+    <rect x="1120" y="498" width="200" height="5" rx="2.5" fill="#1E4A54"/>
+    <rect x="1120" y="510" width="180" height="5" rx="2.5" fill="#1E4A54"/>
+    <rect x="1120" y="522" width="150" height="5" rx="2.5" fill="#1E4A54"/>
+    <rect x="1120" y="536" width="70" height="16" rx="8" fill="#50E8F4" opacity="0.8"/>
+
+    <text x="1096" y="608" font-size="11" fill="#5E8A93">VRAM 6.2/16 GB · 128 t/s · ctx 42% free</text>
+
+    <!-- status bar -->
+    <rect x="70" y="724" width="1460" height="56" rx="14" fill="#042029"/>
+    <rect x="70" y="724" width="1460" height="26" fill="#042029"/>
+    <line x1="70" y1="724" x2="1530" y2="724" stroke="#163E46" stroke-width="1"/>
+    <rect x="92" y="740" width="190" height="26" rx="13" fill="#0E3A44"/>
+    <circle cx="106" cy="753" r="4" fill="#7BE39B"/>
+    <text x="118" y="757" font-size="11.5" fill="#CFE9EE">Qwen3-32B · Q4_0</text>
+    <text x="1506" y="757" font-size="11" fill="#8FB4BC" text-anchor="end">CPU 12% · RAM 6.8 GB · VRAM 6.2/16 GB · 128 t/s · ctx 42% free</text>
+  </g>
+</svg>

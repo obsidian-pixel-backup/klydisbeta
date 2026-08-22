@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 380" width="1600" height="380" role="img" aria-label="Klydis theme system — 20 accent themes and 3 background identities">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#001619"/>
+      <stop offset="1" stop-color="#04232B"/>
+    </linearGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#1E4A54" stroke-width="1" opacity="0.35"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="380" fill="url(#bg)"/>
+  <rect width="1600" height="380" fill="url(#grid)"/>
+
+  <text x="800" y="46" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="600" letter-spacing="5" fill="#4E7A84" text-anchor="middle">THEME SYSTEM</text>
+  <rect x="740" y="58" width="120" height="2" rx="1" fill="#50E8F4"/>
+  <text x="800" y="88" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#8FB4BC" text-anchor="middle">Hot-swappable palettes — persisted and applied at startup</text>
+
+  <!-- 20 accent themes -->
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <rect x="60" y="104" width="64" height="64" rx="12" fill="#50E8F4"/>
+    <text x="92" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Fluorescent</text>
+
+    <rect x="128" y="104" width="64" height="64" rx="12" fill="#B18CFF"/>
+    <text x="160" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Violet</text>
+
+    <rect x="196" y="104" width="64" height="64" rx="12" fill="#FFC24B"/>
+    <text x="228" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Amber</text>
+
+    <rect x="264" y="104" width="64" height="64" rx="12" fill="#FF8FB3"/>
+    <text x="296" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Rose</text>
+
+    <rect x="332" y="104" width="64" height="64" rx="12" fill="#7BE39B"/>
+    <text x="364" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Forest</text>
+
+    <rect x="400" y="104" width="64" height="64" rx="12" fill="#FF6B81"/>
+    <text x="432" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Cherry</text>
+
+    <rect x="468" y="104" width="64" height="64" rx="12" fill="#4D9FFF"/>
+    <text x="500" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Cobalt</text>
+
+    <rect x="536" y="104" width="64" height="64" rx="12" fill="#34D399"/>
+    <text x="568" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Emerald</text>
+
+    <rect x="604" y="104" width="64" height="64" rx="12" fill="#F5C542"/>
+    <text x="636" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Gold</text>
+
+    <rect x="672" y="104" width="64" height="64" rx="12" fill="#8B8CFF"/>
+    <text x="704" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Indigo</text>
+
+    <rect x="740" y="104" width="64" height="64" rx="12" fill="#C9A9FF"/>
+    <text x="772" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Lavender</text>
+
+    <rect x="808" y="104" width="64" height="64" rx="12" fill="#FF5CC8"/>
+    <text x="840" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Magenta</text>
+
+    <rect x="876" y="104" width="64" height="64" rx="12" fill="#6EE7B7"/>
+    <text x="908" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Mint</text>
+
+    <rect x="944" y="104" width="64" height="64" rx="12" fill="#FFA04D"/>
+    <text x="976" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Orange</text>
+
+    <rect x="1012" y="104" width="64" height="64" rx="12" fill="#FFB49A"/>
+    <text x="1044" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Peach</text>
+
+    <rect x="1080" y="104" width="64" height="64" rx="12" fill="#E5484D"/>
+    <text x="1112" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Ruby</text>
+
+    <rect x="1148" y="104" width="64" height="64" rx="12" fill="#5EB1FF"/>
+    <text x="1180" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Sapphire</text>
+
+    <rect x="1216" y="104" width="64" height="64" rx="12" fill="#7DD3FC"/>
+    <text x="1248" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Sky</text>
+
+    <rect x="1284" y="104" width="64" height="64" rx="12" fill="#2DD4BF"/>
+    <text x="1316" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Teal</text>
+
+    <rect x="1352" y="104" width="64" height="64" rx="12" fill="#48C6EF"/>
+    <text x="1384" y="188" font-size="10" fill="#9DBBC2" text-anchor="middle">Turquoise</text>
+  </g>
+
+  <!-- background identities -->
+  <text x="60" y="248" font-family="Segoe UI, Arial, sans-serif" font-size="10" font-weight="600" letter-spacing="3" fill="#4E7A84">BACKGROUND IDENTITIES</text>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <rect x="60" y="262" width="180" height="44" rx="10" fill="#001619" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="150" y="330" font-size="12" font-weight="700" fill="#EAF9FB" text-anchor="middle">Ocean</text>
+    <text x="150" y="346" font-size="10" fill="#5E8A93" text-anchor="middle">#001619</text>
+
+    <rect x="300" y="262" width="180" height="44" rx="10" fill="#0D0D0D" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="390" y="330" font-size="12" font-weight="700" fill="#EAF9FB" text-anchor="middle">Obsidian</text>
+    <text x="390" y="346" font-size="10" fill="#5E8A93" text-anchor="middle">#0D0D0D</text>
+
+    <rect x="540" y="262" width="180" height="44" rx="10" fill="#000B18" stroke="#1E4A54" stroke-width="1.5"/>
+    <text x="630" y="330" font-size="12" font-weight="700" fill="#EAF9FB" text-anchor="middle">Midnight</text>
+    <text x="630" y="346" font-size="10" fill="#5E8A93" text-anchor="middle">#000B18</text>
+  </g>
+
+  <text x="800" y="290" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#8FB4BC">Modes: Dark · Light · System (follows Windows)</text>
+  <text x="800" y="314" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#8FB4BC">Custom accent / background / font colors, applied live</text>
+  <text x="800" y="338" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#8FB4BC">Typography: 18 font families × 7 styles</text>
+</svg>
