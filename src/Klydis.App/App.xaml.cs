@@ -369,6 +369,7 @@ public partial class App : Application
             return engine;
         });
         services.AddSingleton<PromptTemplateEngine>();
+        services.AddSingleton<Klydis.Core.Protocol.IActionParser, Klydis.Core.Protocol.ActionParser>();
         services.AddSingleton<Klydis.Core.Chat.GoalBudget>();
         services.AddTransient<Klydis.Core.Chat.GoalOrchestrator>();
 

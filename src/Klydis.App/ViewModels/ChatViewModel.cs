@@ -2391,10 +2391,23 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             sb.AppendLine($"Session: {SelectedSession.Title}");
             sb.AppendLine($"SessionId: {SelectedSession.Id}");
             sb.AppendLine($"Exported: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            sb.AppendLine();
+            var taskManager = _chatEngine?.TaskManager;
+            var authoritativeTask = _chatEngine?.CurrentTaskId != null && taskManager != null
+                ? await taskManager.GetTaskAsync(_chatEngine.CurrentTaskId)
+                : (taskManager != null ? await taskManager.GetCurrentTaskAsync(SelectedSession.Id) : null);
+
+            string taskIdDisplay = authoritativeTask?.TaskId ?? _chatEngine?.CurrentTaskId ?? "(no active task)";
+            string taskObjectiveDisplay = authoritativeTask?.Objective ?? _chatEngine?.CurrentTaskObjective ?? "(none)";
+            string taskStatusDisplay = authoritativeTask?.Status.ToString() ?? "(unknown)";
+
             sb.AppendLine("--- TASK ---");
-            sb.AppendLine($"TaskId: {_chatEngine?.CurrentTaskId ?? "(no active task)"}");
-            sb.AppendLine($"Objective: {_chatEngine?.CurrentTaskObjective ?? "(none)"}");
+            sb.AppendLine($"TaskId: {taskIdDisplay}");
+            sb.AppendLine($"Status: {taskStatusDisplay}");
+            sb.AppendLine($"Objective: {taskObjectiveDisplay}");
+            if (authoritativeTask != null && !string.IsNullOrWhiteSpace(authoritativeTask.PlanJson))
+            {
+                sb.AppendLine($"Plan: {authoritativeTask.PlanJson}");
+            }
             sb.AppendLine();
             sb.AppendLine("--- MODEL ---");
             var profile = _chatEngine?.CurrentModelProfile;

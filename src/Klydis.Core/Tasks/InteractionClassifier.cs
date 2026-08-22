@@ -88,7 +88,18 @@ public static class InteractionClassifier
         "confirm what os", "my os", "current machine", "my machine", "my system",
         "this machine", "test tools", "test all tools", "test all your tools",
         "test your tools", "run tool", "list files", "show files", "inspect system",
-        "diagnose system", "check system", "check hardware", "memory usage", "disk load"
+        "diagnose system", "check system", "check hardware", "memory usage", "disk load",
+        "cpu utilization", "gpu utilization", "system metrics", "hardware metrics",
+        "software report", "inspect cpu", "inspect gpu", "inspect ram", "check cpu",
+        "check gpu", "check ram", "check disk", "check os", "system diagnostics"
+    };
+
+    // Explicit execution commands and markers — imperative execution requests REQUIRE tools.
+    private static readonly string[] ExecutionMarkers =
+    {
+        "execute", "run", "perform", "inspect", "check", "scan", "investigate",
+        "retrieve", "gather", "determine", "measure", "monitor", "benchmark",
+        "diagnose", "query", "fetch", "extract", "audit"
     };
 
     // Informational / explanation requests. These are CONVERSATION even when they mention
@@ -114,7 +125,7 @@ public static class InteractionClassifier
         "lets start", "lets begin", "start working", "start building",
         "begin building", "begin work", "get to work", "do it", "do it now",
         "keep going", "keep working", "carry on", "start now", "right away",
-        "immediately"
+        "immediately", "execute", "execute the", "run the", "perform the"
     };
 
     // Strong build/fix verbs: unambiguous executable work, regardless of message length.
@@ -138,7 +149,8 @@ public static class InteractionClassifier
         "analyze", "inspect", "review", "compare", "research", "investigate",
         "summarize", "evaluate", "test", "examine", "explore", "diagnose",
         "trace", "monitor", "benchmark", "profile", "identify", "find",
-        "read", "search for", "go through", "look at"
+        "read", "search for", "go through", "look at", "execute", "run",
+        "determine", "measure", "scan", "audit", "gather", "retrieve"
     };
 
     /// <summary>
@@ -148,21 +160,31 @@ public static class InteractionClassifier
     {
         if (string.IsNullOrWhiteSpace(message)) return InteractionMode.Conversation;
 
+        // Numbered/bulleted action lists (e.g. 1..15 tasks) are unambiguously executable tasks.
+        if (TaskDecomposer.ContainsDecomposableTasks(message))
+        {
+            return (message.Length >= 60 || ContainsAny(Tokenize(Normalize(message)), AutonomousVerbs))
+                ? InteractionMode.Autonomous
+                : InteractionMode.Task;
+        }
+
         string normalized = Normalize(message);
         string[] tokens = Tokenize(normalized);
 
         // 0. System inspection / environment / tool testing queries ALWAYS route to Task mode with tools.
         if (ContainsAny(tokens, SystemInspectionMarkers)) return InteractionMode.Task;
 
-        // 1. Explicit conversational intent wins over everything.
-        if (ContainsAny(tokens, GreetingMarkers)) return InteractionMode.Conversation;
+        // 1. Explicit conversational intent wins over everything when NOT accompanied by explicit execution commands.
+        if (ContainsAny(tokens, GreetingMarkers) && !ContainsAny(tokens, ExecutionMarkers) && !ContainsAny(tokens, AutonomousVerbs))
+            return InteractionMode.Conversation;
 
         // 1b. Live-data requests need the web/search tools — Task mode, never Conversation.
         if (ContainsAny(tokens, LiveDataMarkers)) return InteractionMode.Task;
 
         // 2. Explanation / informational questions are conversation — even with verbs inside
         //    ("explain how to build X" asks for an explanation, it does not build X).
-        if (ContainsAny(tokens, ExplanationMarkers)) return InteractionMode.Conversation;
+        if (ContainsAny(tokens, ExplanationMarkers) && !HasImperativeExecutionCommand(normalized))
+            return InteractionMode.Conversation;
 
         // 2b. COMPOUND imperative: a command marker FOLLOWED by an autonomous verb
         //     ("begin building", "start implementing", "continue developing",
@@ -188,11 +210,20 @@ public static class InteractionClassifier
         //     verb tiers so "build the site, then start" still hits Autonomous via "build".
         if (ContainsAny(tokens, CommandMarkers)) return InteractionMode.Task;
 
-        // 5. Analysis / research verbs → Task.
-        if (ContainsAny(tokens, TaskVerbs)) return InteractionMode.Task;
+        // 5. Analysis / research / execution verbs → Task.
+        if (ContainsAny(tokens, TaskVerbs) || ContainsAny(tokens, ExecutionMarkers)) return InteractionMode.Task;
 
         // 6. Fallback: short messages are conversation; anything substantial defaults to Task.
         return normalized.Length < 40 ? InteractionMode.Conversation : InteractionMode.Task;
+    }
+
+    /// <summary>
+    /// Checks if the message starts with or clearly contains an imperative execution directive.
+    /// </summary>
+    private static bool HasImperativeExecutionCommand(string normalized)
+    {
+        string[] imperatives = { "execute ", "run ", "perform ", "inspect ", "check ", "scan ", "determine " };
+        return imperatives.Any(imp => normalized.StartsWith(imp, StringComparison.Ordinal) || normalized.Contains(" " + imp, StringComparison.Ordinal));
     }
 
     /// <summary>

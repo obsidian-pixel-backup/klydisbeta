@@ -90,6 +90,35 @@ public static class ToolActionParser
         return ToolActionKind.NoAction;
     }
 
+    private static readonly Regex HallucinatedExecutionRegex = new(
+        @"(?:from\s+os\s+import\s+sysinfo|import\s+(?:sysinfo|psudo|nvmax|syslog)|\b(?:psudo|sysinfo|nvmax|syslog)\s*\(|from\s+os\s+import\s+.*exec)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// True when the text contains simulated/hallucinated execution constructs (e.g. psudo, sysinfo, nvmax, syslog, fake python imports).
+    /// </summary>
+    public static bool IsHallucinatedExecution(string? response)
+    {
+        if (string.IsNullOrWhiteSpace(response)) return false;
+        return HallucinatedExecutionRegex.IsMatch(response);
+    }
+
+    /// <summary>
+    /// True when the text claims execution occurred or claims completion without structured tool invocation.
+    /// </summary>
+    public static bool IsUnverifiedCompletionClaim(string? response)
+    {
+        if (string.IsNullOrWhiteSpace(response)) return false;
+        string lower = response.ToLowerInvariant();
+        string[] claimPhrases =
+        {
+            "here is the answer to all", "executed step-by-step", "i have executed all",
+            "i have completed all", "all tasks have been executed", "all tasks are executed",
+            "execution complete", "i executed the following", "here are the results from executing"
+        };
+        return claimPhrases.Any(p => lower.Contains(p, StringComparison.Ordinal));
+    }
+
     /// <summary>
     /// True when a text-only response is a REFUSAL or conversational filler instead of task
     /// progress — the exact failure pattern from the live export (greetings, permission

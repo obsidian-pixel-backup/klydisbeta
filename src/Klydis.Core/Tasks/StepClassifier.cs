@@ -82,6 +82,13 @@ public static class StepClassifier
         "fix the", "modify", "edit", "configure", "refactor", "develop the"
     };
 
+    private static readonly string[] SystemDiagnosticMarkers =
+    {
+        "cpu", "gpu", "ram", "memory utilization", "disk space", "operating system", "os version",
+        "temperatures", "process count", "gpu processes", "top cpu", "top memory", "uptime", "hardware report",
+        "software report", "diagnostic command", "run command", "execute command", "powershell"
+    };
+
     private static readonly string[] ResearchMarkers =
     {
         "research", "search the web", "competitive analysis", "market research",
@@ -242,6 +249,15 @@ public static class StepClassifier
                 artifacts: new[] { "Code/Document changed" },
                 criteria: new[] { "Files actually changed", "No syntax errors" },
                 condition: "file mutation evidence");
+        }
+        if (SystemDiagnosticMarkers.Any(t.Contains))
+        {
+            return Make(StepActionKind.CommandExecution,
+                new[] { "run_command", "read_file", "list_directory", "search_files" },
+                skills: new[] { "system-diagnostics", "command-execution" },
+                artifacts: Array.Empty<string>(),
+                criteria: new[] { "System command executed", "Evidence recorded from tool output" },
+                condition: "diagnostic evidence produced");
         }
 
         // No marker matched: no restriction (existence-gated only), no specific action kind.

@@ -53,17 +53,19 @@ public sealed record AgentTask(
     DateTime CreatedAtUtc,
     DateTime UpdatedAtUtc,
     string? PlanJson = null,
-    string? Summary = null)
+    string? Summary = null,
+    bool RequiresExecution = true)
 {
     /// <summary>
     /// Creates a fresh task with a new id and a Running status.
     /// </summary>
-    public static AgentTask Create(string sessionId, string objective)
+    public static AgentTask Create(string sessionId, string objective, bool requiresExecution = true)
         => new(
             TaskId: "T-" + Guid.NewGuid().ToString("N")[..12],
             SessionId: sessionId,
             Objective: objective,
             Status: TaskStatus.Running,
             CreatedAtUtc: DateTime.UtcNow,
-            UpdatedAtUtc: DateTime.UtcNow);
+            UpdatedAtUtc: DateTime.UtcNow,
+            RequiresExecution: requiresExecution);
 }

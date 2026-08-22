@@ -63,7 +63,9 @@ public class TaskManager(
         "build", "create", "implement", "develop", "refactor", "migrate", "port",
         "optimize", "analyze", "investigate", "research", "debug", "fix", "test",
         "design", "configure", "integrate", "set up", "make", "write", "document",
-        "compare", "evaluate", "review", "add", "install", "deploy", "summarize", "produce"
+        "compare", "evaluate", "review", "add", "install", "deploy", "summarize", "produce",
+        "execute", "run", "perform", "inspect", "check", "scan", "determine", "measure",
+        "monitor", "benchmark", "diagnose", "audit", "gather", "retrieve"
     };
 
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
@@ -210,11 +212,12 @@ public class TaskManager(
             return TaskResolutionKind.SteerTask;
         }
 
-        bool substantial = lower.Length >= 40
+        bool hasDecomposedTasks = TaskDecomposer.ContainsDecomposableTasks(userMessage);
+        bool substantial = (lower.Length >= 40 || hasDecomposedTasks)
             && TaskActionVerbs.Any(v => lower.Contains(v, StringComparison.OrdinalIgnoreCase));
         bool echoesObjective = Overlaps(userMessage, current.Objective);
 
-        if (substantial && !echoesObjective)
+        if ((substantial || hasDecomposedTasks) && !echoesObjective)
         {
             return TaskResolutionKind.NewTask;
         }

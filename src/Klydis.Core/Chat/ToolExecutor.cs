@@ -568,6 +568,42 @@ public class ToolExecutor(
         // same way. A case-sensitive lookup let calls like READ_FILE pass the gate and then
         // fail dispatch as "unknown tool".
         var toolDef = tools.FirstOrDefault(t => t.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase));
+
+        // Tool alias normalization: map aliases (e.g. execute_command -> run_command, ls -> list_directory)
+        if (toolDef == null)
+        {
+            string aliasKey = request.Name.ToLowerInvariant();
+            string? mappedName = aliasKey switch
+            {
+                "execute_command" or "run_shell" or "terminal_command" or "powershell" or "cmd" or "bash" or "sh" or "exec" or "run" => "run_command",
+                "read" => "read_file",
+                "write" => "write_file",
+                "edit" => "edit_file",
+                "ls" or "dir" => "list_directory",
+                "find" or "grep" => "search_files",
+                "search" or "google" => "search_web",
+                "fetch" or "scrape" => "crawl_url",
+                _ => null
+            };
+
+            if (mappedName != null)
+            {
+                toolDef = tools.FirstOrDefault(t => t.Name.Equals(mappedName, StringComparison.OrdinalIgnoreCase));
+                if (toolDef != null)
+                {
+                    // Normalize argument key for run_command if passed as script/cmd/code
+                    if (mappedName == "run_command" && request.Arguments != null && !request.Arguments.ContainsKey("command"))
+                    {
+                        if (request.Arguments.TryGetValue("script", out var sVal))
+                            request.Arguments["command"] = sVal;
+                        else if (request.Arguments.TryGetValue("cmd", out var cVal))
+                            request.Arguments["command"] = cVal;
+                        else if (request.Arguments.TryGetValue("code", out var codeVal))
+                            request.Arguments["command"] = codeVal;
+                    }
+                }
+            }
+        }
         
         if (toolDef == null)
         {
@@ -577,8 +613,12 @@ public class ToolExecutor(
                                   request.Name.Equals("terminal", StringComparison.OrdinalIgnoreCase) ||
                                   request.Name.Equals("bash", StringComparison.OrdinalIgnoreCase) ||
                                   request.Name.Equals("sh", StringComparison.OrdinalIgnoreCase) ||
-                                  request.Name.Equals("exec", StringComparison.OrdinalIgnoreCase))
-                ? $"\nAction Required: You attempted to call '{request.Name}' as a tool name. To run command line commands or launch processes, call tool 'run_command' with argument {{\"command\": \"...\"}}."
+                                  request.Name.Equals("exec", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("psudo", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("sysinfo", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("nvmax", StringComparison.OrdinalIgnoreCase) ||
+                                  request.Name.Equals("syslog", StringComparison.OrdinalIgnoreCase))
+                ? $"\nAction Required: You attempted to call '{request.Name}' as a tool name. Do not invent tools or simulate execution. To run command line commands or launch processes, call tool 'run_command' with argument {{\"command\": \"...\"}}."
                 : "";
 
             var guidance = $"Tool '{request.Name}' does not exist in available system tools.{commandHint}\n" +

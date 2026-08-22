@@ -578,6 +578,16 @@ public class ChatEngine(
         }
     }
 
+    /// <summary>
+    /// The task manager managing active tasks and plans.
+    /// </summary>
+    public Klydis.Core.Tasks.TaskManager? TaskManager => _taskManager;
+
+    /// <summary>
+    /// The agent runtime owning task runs, evidence ledgers, and execution lifecycle.
+    /// </summary>
+    public Klydis.Core.Tasks.AgentRuntime? Runtime => _runtime;
+
     // ---- Harness-owned initial planner (report §5 / §51-P0) ----
     // The runtime establishes a baseline plan for actionable requests; the model refines or
     // replaces it. This removes the "the model must remember to call plan" dependency while
@@ -591,25 +601,28 @@ public class ChatEngine(
         "build", "create", "implement", "develop", "refactor", "migrate", "port",
         "optimize", "analyze", "investigate", "research", "debug", "fix", "test",
         "design", "configure", "integrate", "set up", "make", "write", "document",
-        "compare", "evaluate", "review", "add", "install", "deploy", "summarize", "produce"
+        "compare", "evaluate", "review", "add", "install", "deploy", "summarize", "produce",
+        "execute", "run", "perform", "inspect", "check", "scan", "determine", "measure",
+        "monitor", "benchmark", "diagnose", "audit", "gather", "retrieve"
     };
 
     /// <summary>
     /// True when the message reads as a substantive, actionable task (long enough to be a
-    /// real request AND contains a task verb). Trivial questions and one-liners skip the
+    /// real request AND contains a task verb, or contains explicit decomposed tasks). Trivial questions and one-liners skip the
     /// scaffolding ceremony entirely.
     /// </summary>
     private static bool IsActionableTaskRequest(string message)
     {
-        if (string.IsNullOrWhiteSpace(message) || message.Length < 40) return false;
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        if (TaskDecomposer.ContainsDecomposableTasks(message)) return true;
+        if (message.Length < 40) return false;
         string lower = message.ToLowerInvariant();
         return TaskActionVerbs.Any(v => lower.Contains(v, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
-    /// Ensures plan state is properly initialized for a new user message without injecting substantive tasks.
-    /// Obsolete completed plans from prior tasks are cleared so the new task starts fresh with zero tasks,
-    /// and the model generates the execution plan from scratch governed by the runtime schema.
+    /// Ensures plan state is properly initialized for a new user message.
+    /// Explicit decomposed tasks from the user message are seeded into the plan.
     /// </summary>
     private async Task SeedInitialPlanIfNeededAsync(string sessionId, string userMessage)
     {
@@ -619,15 +632,34 @@ public class ChatEngine(
 
             var existing = toolExecutor.GetSessionPlanEntries(sessionId);
             string? owner = toolExecutor.GetSessionPlanOwner(sessionId);
+            var initialTasks = InitialPlanGenerator.Generate(userMessage);
 
-            if (existing.Count > 0 && !string.IsNullOrEmpty(owner) && owner != userMessage)
+            if (existing.Count == 0)
+            {
+                if (initialTasks.Count > 0)
+                {
+                    logger.LogInformation("Seeding {Count} initial decomposed task steps from user message.", initialTasks.Count);
+                    await toolExecutor.SeedSessionPlanAsync(sessionId, initialTasks);
+                    if (_taskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
+                    {
+                        var planEntries = initialTasks.Select(t => new ToolExecutor.PlanEntry(t, false)).ToList();
+                        await _taskManager.SavePlanAsync(CurrentTaskId, AgentRuntime.SerializePlanEntries(planEntries));
+                    }
+                }
+            }
+            else if (!string.IsNullOrEmpty(owner) && owner != userMessage)
             {
                 bool hasUnfinishedItems = existing.Any(e => !e.Done);
                 if (!hasUnfinishedItems)
                 {
                     logger.LogInformation(
-                        "Clearing completed plan from a previous task; fresh task begins with 0 tasks for model planning.");
-                    await toolExecutor.SeedSessionPlanAsync(sessionId, Array.Empty<string>());
+                        "Clearing completed plan from a previous task; fresh task begins with {Count} decomposed tasks.", initialTasks.Count);
+                    await toolExecutor.SeedSessionPlanAsync(sessionId, initialTasks);
+                    if (_taskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
+                    {
+                        var planEntries = initialTasks.Select(t => new ToolExecutor.PlanEntry(t, false)).ToList();
+                        await _taskManager.SavePlanAsync(CurrentTaskId, AgentRuntime.SerializePlanEntries(planEntries));
+                    }
                 }
                 else
                 {
@@ -3351,14 +3383,22 @@ public class ChatEngine(
                 // text is the deliverable regardless of length.
                 bool substantiveDeliverable = currentStepForTurn?.ExpectedActionKind != Klydis.Core.Tasks.StepActionKind.Reason ||
                     visibleResponse.Trim().Length >= MinTextDeliverableLength;
-                bool noActionProducedThisTurn = isGoalMode && !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
-                    (refusalLike || (openStepsRemain && (!stepProducesText || !substantiveDeliverable)));
 
                 // Capability Contradiction & Response Validation Gate
                 var executedToolsThisTurn = turnState.Build().Entries
                     .Where(e => e.Kind == Klydis.Core.Tasks.StateDeltaKind.ToolExecuted)
                     .Select(e => e.Detail)
                     .ToList();
+
+                bool hallucinatedExecution = ToolActionParser.IsHallucinatedExecution(visibleResponse);
+                bool unverifiedCompletionClaim = ToolActionParser.IsUnverifiedCompletionClaim(visibleResponse) && executedToolsThisTurn.Count == 0;
+                bool openStepExecutionMissing = openStepsRemain && currentStepForTurn != null &&
+                    Klydis.Core.Tasks.AgentSupervisor.RequiresExecution(currentStepForTurn.ExpectedActionKind) &&
+                    executedToolsThisTurn.Count == 0;
+                bool goalModeNoAction = isGoalMode && (refusalLike || (openStepsRemain && (!stepProducesText || !substantiveDeliverable)));
+
+                bool noActionProducedThisTurn = !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
+                    (hallucinatedExecution || unverifiedCompletionClaim || goalModeNoAction || openStepExecutionMissing);
 
                 var responseValidation = ResponseValidator.ValidateResponse(
                     visibleResponse,
@@ -3829,9 +3869,9 @@ public class ChatEngine(
                         ToolActionParser.Classify(visibleResponse) == ToolActionKind.NoAction)
                     {
                         noActionRepairsThisTurn++;
-                        logger.LogWarning("Autonomous no-action response (repair {Repair}/{Max}): the model produced text but no tool action; injecting the action-required repair instruction.",
+                        logger.LogWarning("Action-required response (repair {Repair}/{Max}): the model produced text but no tool action; injecting the action-required repair instruction.",
                             noActionRepairsThisTurn, MaxNoActionRepairs);
-                        NoteLesson("no_action_produced", $"Autonomous turn produced no tool action; action-required repair injected (repair {noActionRepairsThisTurn}).");
+                        NoteLesson("no_action_produced", $"Turn produced no tool action; action-required repair injected (repair {noActionRepairsThisTurn}).");
 
                         string? repairStepText = currentStepForTurn?.Title;
                         if (string.IsNullOrWhiteSpace(repairStepText))
@@ -3839,22 +3879,30 @@ public class ChatEngine(
                             try
                             {
                                 repairStepText = toolExecutor.GetSessionPlanEntries(generatingSessionId).FirstOrDefault(e => !e.Done)?.Text
-                                    ?? "finish and verify the remaining work";
+                                    ?? "execute required system tools for the task";
                             }
                             catch (Exception)
                             {
-                                repairStepText = "finish and verify the remaining work";
+                                repairStepText = "execute required system tools for the task";
                             }
                         }
-                        var noActionMsg = "[System Instruction: The current task is active and incomplete. Your previous response produced only text/questions — no tool action, no file change, no state change.\n" +
-                            "CRITICAL AUTONOMY DIRECTIVE: Do NOT ask clarifying questions, do NOT ask for brand/palette/budget details, and do NOT request confirmation before starting.\n" +
-                            "The user expects you to BUILD IMMEDIATELY. Pick modern, tasteful design choices and execute the next tool action (write_file, edit_file, run_command, or list_directory) NOW.\n" +
+
+                        string specificHint = hallucinatedExecution
+                            ? "CRITICAL PROTOCOL VIOLATION: Invented execution construct detected. Do NOT write Python code simulating tools, and do NOT invent tool names (e.g. psudo, sysinfo, nvmax, syslog). You MUST invoke registered tools directly.\n"
+                            : unverifiedCompletionClaim
+                                ? "CRITICAL VERIFICATION REQUIREMENT: Unverified completion claim rejected. You claimed execution occurred, but zero tools were executed on the system. Every factual system value must come from a real tool result.\n"
+                                : "";
+
+                        var noActionMsg = "[System Instruction: The current task is active and requires real execution. Your previous response produced text but no valid tool call was executed.\n" +
+                            specificHint +
+                            "CRITICAL AUTONOMY DIRECTIVE: Do NOT describe what you would do, do NOT ask for confirmation, and do NOT simulate execution.\n" +
+                            "You MUST execute a valid tool call (e.g. 'run_command' with argument {\"command\": \"...\"}, 'read_file', 'write_file', or 'list_directory') NOW.\n" +
                             "CURRENT STEP: " + repairStepText + "\n" +
                             BuildAutonomousDirective(repairStepText) + "\n" +
-                            "Do NOT greet the user. Do NOT ask what to do next. Do NOT describe what you would do — execute a tool call immediately.]";
+                            "Execute the tool call immediately.]";
                         var noActionMsgObj = new ChatMessage(ChatRole.Runtime, noActionMsg);
                         AddToSessionHistory(activeHistory, noActionMsgObj, generatingSessionId);
-                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The supervisor detected an inactive response — directing model to execute tools immediately…");
+                        yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ Execution required — directing model to execute tools immediately…");
                         continue;
                     }
 

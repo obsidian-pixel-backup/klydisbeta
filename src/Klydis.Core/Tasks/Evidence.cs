@@ -88,4 +88,21 @@ public sealed record Evidence(
         EvidenceKind.ArtifactValidated or
         EvidenceKind.WebDocument or
         EvidenceKind.WebFact;
+
+    public static Evidence Requirement(string description, string? subject = null, string? toolName = null)
+        => new(
+            Kind: EvidenceKind.RequirementSatisfied,
+            Description: description,
+            TimestampUtc: DateTime.UtcNow,
+            Subject: subject,
+            ToolName: toolName);
+
+    public static Evidence Command(string description, string command, int exitCode = 0, string? toolName = "run_command")
+        => new(
+            Kind: exitCode == 0 ? EvidenceKind.CommandSucceeded : EvidenceKind.CommandFailed,
+            Description: description,
+            TimestampUtc: DateTime.UtcNow,
+            Subject: command,
+            ToolName: toolName,
+            ExitCode: exitCode);
 }
