@@ -18,6 +18,8 @@ using Klydis.Core.Memory;
 using Klydis.Core.Workbench;
 using Klydis.Core.Capabilities;
 using Klydis.Core.Capabilities.Bridge;
+using Klydis.Core.Tracing;
+using TraceEventType = Klydis.Core.Tracing.TraceEventType;
 
 namespace Klydis.Core.Chat;
 
@@ -165,6 +167,8 @@ public class ToolExecutor(
     public Klydis.Core.Learning.AdaptiveLearningService? AdaptiveLearning { get; set; } = adaptiveLearning;
     public CapabilityRegistry? CapabilityRegistry { get; set; }
     public CapabilityToolBridge? CapabilityToolBridge { get; set; }
+    public Klydis.Core.Tracing.IAgentTrace? AgentTrace { get; set; }
+    public string? CurrentTurnId { get; set; }
 
     /// <summary>
     /// Gets or sets the current risk level mode.
@@ -556,6 +560,9 @@ public class ToolExecutor(
             throw new OperationCanceledException(ct);
         }
 
+        long toolStartMonotonic = System.Diagnostics.Stopwatch.GetTimestamp();
+        string execId = $"E-{request.Name}-{DateTime.UtcNow.Ticks:x}";
+
         // Serialize the arguments once — shared by duplicate-call tracking and the session
         // activity record.
         string argsJson = string.Empty;
@@ -563,6 +570,26 @@ public class ToolExecutor(
         {
             try { argsJson = System.Text.Json.JsonSerializer.Serialize(request.Arguments); } catch { /* best effort */ }
         }
+
+        try
+        {
+            AgentTrace?.Record(AgentTraceEvent.Create(
+                TraceEventType.ToolExecutionStarted,
+                sessionId: sessionId,
+                taskId: CurrentTaskId,
+                runId: CurrentRunId,
+                turnId: CurrentTurnId,
+                toolExecutionId: execId,
+                category: AgentTimingCategory.ToolExecution,
+                data: new Dictionary<string, object?>
+                {
+                    ["tool"] = request.Name,
+                    ["arguments"] = request.Arguments
+                }
+            ));
+        }
+        catch { /* best effort */ }
+
         var tools = await GetToolDefinitionsAsync();
         // P1: the gate compares tool names case-insensitively; the executor must resolve the
         // same way. A case-sensitive lookup let calls like READ_FILE pass the gate and then
@@ -780,11 +807,27 @@ public class ToolExecutor(
         // Canonicalize the result's tool name so every consumer (activity rows, durable
         // store, execution events, and the model's next prompt) sees the registered name.
         result = result with { ToolName = canonicalName };
-        return await FinishToolCallAsync(request, sessionId, argsJson, result, canonicalName);
+        return await FinishToolCallAsync(request, sessionId, argsJson, result, canonicalName, toolStartMonotonic, execId);
     }
 
-    private async Task<ToolResult> FinishToolCallAsync(ToolCallRequest request, string sessionId, string argsJson, ToolResult result, string canonicalName)
+    private async Task<ToolResult> FinishToolCallAsync(
+        ToolCallRequest request,
+        string sessionId,
+        string argsJson,
+        ToolResult result,
+        string canonicalName,
+        long startMonotonic = 0,
+        string? execId = null)
     {
+        double measuredDurationMs = startMonotonic > 0
+            ? (System.Diagnostics.Stopwatch.GetTimestamp() - startMonotonic) * 1000.0 / System.Diagnostics.Stopwatch.Frequency
+            : (double)result.DurationMs;
+
+        if (result.DurationMs <= 0 && measuredDurationMs > 0)
+        {
+            result = result with { DurationMs = (long)Math.Round(measuredDurationMs) };
+        }
+
         // Hydrate first so the in-memory cache is the DB contents before this invocation is
         // appended — otherwise a tool call that lands before the UI's first read would be
         // recorded in memory, then re-appended by the lazy hydration, duplicating it.
@@ -846,6 +889,33 @@ public class ToolExecutor(
         {
             logger.LogWarning(ex, "Failed to emit tool event for {ToolName}.", canonicalName);
         }
+
+        try
+        {
+            AgentTrace?.Record(AgentTraceEvent.Create(
+                result.Success ? TraceEventType.ToolExecutionCompleted : TraceEventType.ToolExecutionFailed,
+                sessionId: sessionId,
+                taskId: CurrentTaskId,
+                runId: CurrentRunId,
+                turnId: CurrentTurnId,
+                toolExecutionId: execId ?? $"E-{canonicalName}-{DateTime.UtcNow.Ticks:x}",
+                category: AgentTimingCategory.ToolExecution,
+                durationMs: measuredDurationMs,
+                data: new Dictionary<string, object?>
+                {
+                    ["tool"] = canonicalName,
+                    ["success"] = result.Success,
+                    ["exit_code"] = result.ExitCode,
+                    ["duration_ms"] = measuredDurationMs,
+                    ["stdout"] = result.Stdout,
+                    ["stderr"] = result.Stderr,
+                    ["output_preview"] = outputPreview,
+                    ["error"] = result.Error,
+                    ["recovery_guidance"] = result.RecoveryGuidance
+                }
+            ));
+        }
+        catch { /* best-effort trace */ }
 
         result = ProcessToolOutputOffload(result);
         ToolExecuted?.Invoke(this, result);

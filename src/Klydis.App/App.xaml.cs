@@ -346,6 +346,7 @@ public partial class App : Application
             toolExecutor.CapabilityToolBridge = sp.GetRequiredService<CapabilityToolBridge>();
             return toolExecutor;
         });
+        services.AddSingleton<Klydis.Core.Tracing.IAgentTrace, Klydis.Core.Tracing.AgentTraceService>();
         services.AddSingleton<ChatEngine>(sp =>
         {
             var engine = new ChatEngine(
@@ -359,7 +360,8 @@ public partial class App : Application
                 sp.GetService<Klydis.Core.RAG.VectorStore>(),
                 sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>(),
                 sp.GetService<Klydis.Core.Tasks.TaskManager>(),
-                sp.GetService<Klydis.Core.Tasks.AgentRuntime>()
+                sp.GetService<Klydis.Core.Tasks.AgentRuntime>(),
+                sp.GetService<Klydis.Core.Tracing.IAgentTrace>()
             );
             var themeService = sp.GetService<ThemeService>();
             if (themeService != null)

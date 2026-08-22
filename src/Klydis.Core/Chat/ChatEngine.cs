@@ -12,6 +12,7 @@ using Klydis.Core.Inference;
 using Klydis.Core.Inference.Telemetry;
 using Klydis.Core.Tasks;
 using Klydis.Core.Orchestration;
+using Klydis.Core.Tracing;
 
 namespace Klydis.Core.Chat;
 
@@ -247,8 +248,12 @@ public class ChatEngine(
     Klydis.Core.RAG.VectorStore? vectorStore = null,
     Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null,
     Klydis.Core.Tasks.TaskManager? taskManager = null,
-    Klydis.Core.Tasks.AgentRuntime? agentRuntime = null) : IGoalCompletionVerifier
+    Klydis.Core.Tasks.AgentRuntime? agentRuntime = null,
+    Klydis.Core.Tracing.IAgentTrace? agentTrace = null) : IGoalCompletionVerifier
 {
+    private readonly Klydis.Core.Tracing.IAgentTrace _agentTrace = agentTrace ?? new Klydis.Core.Tracing.AgentTraceService(messageStore);
+    public Klydis.Core.Tracing.IAgentTrace AgentTrace => _agentTrace;
+
     private readonly List<ChatMessage> _history = new();
     private readonly Klydis.Core.Learning.AdaptiveLearningService? _adaptiveLearning = adaptiveLearning;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ChatMessage>> _sessionHistories = new();
@@ -986,13 +991,14 @@ public class ChatEngine(
         bool? isGoalMode = null,
         string? sessionId = null)
     {
+        string generatingSessionId = !string.IsNullOrWhiteSpace(sessionId) ? sessionId : CurrentSessionId;
+        string turnId = $"turn_{Guid.NewGuid():N}";
+        var turnStopwatch = System.Diagnostics.Stopwatch.StartNew();
         IAsyncEnumerator<ChatStreamEvent>? enumerator = null;
         try
         {
             IsGenerating = true;
             _recentTools.Clear();
-
-            string generatingSessionId = !string.IsNullOrWhiteSpace(sessionId) ? sessionId : CurrentSessionId;
 
             // ===== DETERMINISTIC DIRECT ACTION FAST-PATH =====
             // Recognize obvious system telemetry and desktop operational queries ("CPU load", "GPU load", "OS version",
@@ -1027,6 +1033,21 @@ public class ChatEngine(
         // and the task contract from the prompt entirely (see StreamResponseInternalAsync).
         InteractionMode mode = InteractionClassifier.Classify(userMessage);
         bool isConversationTurn = mode == InteractionMode.Conversation;
+
+        toolExecutor.CurrentTurnId = turnId;
+        toolExecutor.AgentTrace = _agentTrace;
+
+        _agentTrace.Record(AgentTraceEvent.Create(
+            TraceEventType.TurnStarted,
+            sessionId: generatingSessionId,
+            turnId: turnId,
+            data: new Dictionary<string, object?>
+            {
+                ["user_message"] = userMessage,
+                ["mode"] = mode.ToString(),
+                ["is_goal_mode"] = isGoalMode ?? mode == InteractionMode.Autonomous
+            }
+        ));
 
         // Remember the mode for the idle context gauge: its fallback system-prompt estimate
         // must match how the NEXT prompt would actually be built (per-mode), not a global
@@ -1107,6 +1128,19 @@ public class ChatEngine(
                     // execution-event rows are (task, run)-attributable instead of RunId: null.
                     toolExecutor.CurrentRunId = _runtime.GetActiveRunId(task.TaskId);
                 }
+
+                _agentTrace.Record(AgentTraceEvent.Create(
+                    task.TaskId != previousTaskId ? TraceEventType.TaskCreated : TraceEventType.TaskSelected,
+                    sessionId: generatingSessionId,
+                    taskId: task.TaskId,
+                    runId: toolExecutor.CurrentRunId,
+                    turnId: turnId,
+                    data: new Dictionary<string, object?>
+                    {
+                        ["objective"] = task.Objective,
+                        ["status"] = task.Status.ToString()
+                    }
+                ));
             }
             catch (Exception ex)
             {
@@ -1247,9 +1281,42 @@ public class ChatEngine(
                     }
                 }
             }
+
+            string genSessionId = !string.IsNullOrWhiteSpace(sessionId) ? sessionId : CurrentSessionId;
+            string currentTurnId = toolExecutor.CurrentTurnId ?? "turn_complete";
+            try
+            {
+                _agentTrace.Record(AgentTraceEvent.Create(
+                    TraceEventType.RunTerminated,
+                    sessionId: genSessionId,
+                    taskId: CurrentTaskId,
+                    runId: toolExecutor.CurrentRunId,
+                    turnId: currentTurnId,
+                    data: new Dictionary<string, object?>
+                    {
+                        ["reason"] = _goalCompletedThisTurn ? "GOAL_COMPLETED" : (ct.IsCancellationRequested ? "USER_CANCELLED" : "TURN_ENDED"),
+                        ["goal_completed"] = _goalCompletedThisTurn
+                    }
+                ));
+
+                _agentTrace.Record(AgentTraceEvent.Create(
+                    TraceEventType.TurnCompleted,
+                    sessionId: genSessionId,
+                    taskId: CurrentTaskId,
+                    runId: toolExecutor.CurrentRunId,
+                    turnId: currentTurnId,
+                    data: new Dictionary<string, object?>
+                    {
+                        ["goal_completed"] = _goalCompletedThisTurn
+                    }
+                ));
+            }
+            catch { /* trace logging must never crash finally */ }
+
             toolExecutor.CurrentTaskUserMessage = null;
             toolExecutor.CurrentTaskId = null;
             toolExecutor.CurrentRunId = null;
+            toolExecutor.CurrentTurnId = null;
             IsGenerating = false;
         }
     }
@@ -2356,6 +2423,32 @@ public class ChatEngine(
 
         // Stream tokens
         bool generationStalled = false;
+        string currentGenId = $"G-{Guid.NewGuid():N}";
+        long genStartMonotonic = System.Diagnostics.Stopwatch.GetTimestamp();
+        long firstTokenMonotonic = 0;
+        long lastTokenMonotonic = 0;
+        try
+        {
+            _agentTrace.Record(AgentTraceEvent.Create(
+                TraceEventType.GenerationStarted,
+                sessionId: generatingSessionId,
+                taskId: CurrentTaskId,
+                runId: toolExecutor.CurrentRunId,
+                turnId: toolExecutor.CurrentTurnId,
+                generationId: currentGenId,
+                category: AgentTimingCategory.ModelInference,
+                monotonicTimestamp: genStartMonotonic,
+                data: new Dictionary<string, object?>
+                {
+                    ["iteration"] = iterationCount,
+                    ["step"] = currentStepForTurn?.Title,
+                    ["tools_exposed"] = tools.Count,
+                    ["prompt_tokens"] = finalPromptTokens
+                }
+            ));
+        }
+        catch { /* best effort */ }
+
         var tokenStream = inferenceEngine.StreamTokensAsync(prompt, stopTokens, sysPromptTokens, stallCts.Token);
         await using (var tokenEnumerator = tokenStream.GetAsyncEnumerator(stallCts.Token))
         {
@@ -2376,6 +2469,31 @@ public class ChatEngine(
                     generationStalled = true;
                     break;
                 }
+
+                if (firstTokenMonotonic == 0)
+                {
+                    firstTokenMonotonic = System.Diagnostics.Stopwatch.GetTimestamp();
+                    double ttftMs = (firstTokenMonotonic - genStartMonotonic) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    try
+                    {
+                        _agentTrace.Record(AgentTraceEvent.Create(
+                            TraceEventType.FirstTokenReceived,
+                            sessionId: generatingSessionId,
+                            taskId: CurrentTaskId,
+                            runId: toolExecutor.CurrentRunId,
+                            turnId: toolExecutor.CurrentTurnId,
+                            generationId: currentGenId,
+                            category: AgentTimingCategory.ModelInference,
+                            durationMs: ttftMs,
+                            data: new Dictionary<string, object?>
+                            {
+                                ["ttft_ms"] = ttftMs
+                            }
+                        ));
+                    }
+                    catch { /* best effort */ }
+                }
+                lastTokenMonotonic = System.Diagnostics.Stopwatch.GetTimestamp();
 
                 fullResponseBuilder.Append(token);
                 streamParser.Append(token);
@@ -2416,11 +2534,84 @@ public class ChatEngine(
         }
 
         var fullResponse = fullResponseBuilder.ToString();
+        long genEndMonotonic = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (lastTokenMonotonic == 0 && firstTokenMonotonic > 0) lastTokenMonotonic = genEndMonotonic;
+        double totalInferenceMs = (genEndMonotonic - genStartMonotonic) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        double streamingDurationMs = firstTokenMonotonic > 0 ? (lastTokenMonotonic - firstTokenMonotonic) * 1000.0 / System.Diagnostics.Stopwatch.Frequency : 0;
+        double finalTtftMs = firstTokenMonotonic > 0 ? (firstTokenMonotonic - genStartMonotonic) * 1000.0 / System.Diagnostics.Stopwatch.Frequency : totalInferenceMs;
+        int outTokens = inferenceEngine.GetTokenCount(fullResponse);
+        double tokensPerSec = streamingDurationMs > 0 ? (outTokens / (streamingDurationMs / 1000.0)) : (totalInferenceMs > 0 ? (outTokens / (totalInferenceMs / 1000.0)) : 0);
 
         if (visibleTextBuilder.Length > 0)
         {
             producedVisibleOutput = true;
         }
+
+        try
+        {
+            if (lastTokenMonotonic > 0)
+            {
+                _agentTrace.Record(AgentTraceEvent.Create(
+                    TraceEventType.LastTokenReceived,
+                    sessionId: generatingSessionId,
+                    taskId: CurrentTaskId,
+                    runId: toolExecutor.CurrentRunId,
+                    turnId: toolExecutor.CurrentTurnId,
+                    generationId: currentGenId,
+                    category: AgentTimingCategory.ModelStreaming,
+                    durationMs: streamingDurationMs,
+                    data: new Dictionary<string, object?>
+                    {
+                        ["streaming_duration_ms"] = streamingDurationMs
+                    }
+                ));
+            }
+
+            _agentTrace.Record(AgentTraceEvent.Create(
+                TraceEventType.InferenceCompleted,
+                sessionId: generatingSessionId,
+                taskId: CurrentTaskId,
+                runId: toolExecutor.CurrentRunId,
+                turnId: toolExecutor.CurrentTurnId,
+                generationId: currentGenId,
+                category: AgentTimingCategory.ModelInference,
+                durationMs: totalInferenceMs,
+                data: new Dictionary<string, object?>
+                {
+                    ["time_to_first_token_ms"] = finalTtftMs,
+                    ["streaming_duration_ms"] = streamingDurationMs,
+                    ["inference_duration_ms"] = totalInferenceMs,
+                    ["prompt_tokens"] = finalPromptTokens,
+                    ["output_tokens"] = outTokens,
+                    ["tokens_per_sec"] = tokensPerSec,
+                    ["hit_output_cap"] = inferenceEngine.LastGenerationHitMaxTokens,
+                    ["cut_short"] = inferenceEngine.LastGenerationWasCutShort
+                }
+            ));
+
+            _agentTrace.Record(AgentTraceEvent.Create(
+                TraceEventType.RawModelOutput,
+                sessionId: generatingSessionId,
+                taskId: CurrentTaskId,
+                runId: toolExecutor.CurrentRunId,
+                turnId: toolExecutor.CurrentTurnId,
+                generationId: currentGenId,
+                category: AgentTimingCategory.ModelInference,
+                durationMs: totalInferenceMs,
+                data: new Dictionary<string, object?>
+                {
+                    ["raw_output"] = fullResponse,
+                    ["visible_output"] = visibleTextBuilder.ToString(),
+                    ["tokens"] = outTokens,
+                    ["time_to_first_token_ms"] = finalTtftMs,
+                    ["streaming_duration_ms"] = streamingDurationMs,
+                    ["tokens_per_sec"] = tokensPerSec,
+                    ["hit_output_cap"] = inferenceEngine.LastGenerationHitMaxTokens,
+                    ["cut_short"] = inferenceEngine.LastGenerationWasCutShort
+                }
+            ));
+        }
+        catch { /* best effort */ }
 
         // Per-generation inference-boundary instrumentation (reviewer request): one line per
         // generation tying the session/task/mode/user to the KV reuse decision (from the
@@ -2659,6 +2850,46 @@ public class ChatEngine(
             var toolCallRequests = (toolsDisabled || rescueTriggered)
                 ? new List<ToolCallRequest>()
                 : ParseToolCalls(visibleResponse);
+
+            try
+            {
+                if (toolCallRequests.Count > 0)
+                {
+                    _agentTrace.Record(AgentTraceEvent.Create(
+                        TraceEventType.OutputParsed,
+                        sessionId: generatingSessionId,
+                        taskId: CurrentTaskId,
+                        runId: toolExecutor.CurrentRunId,
+                        turnId: toolExecutor.CurrentTurnId,
+                        generationId: currentGenId,
+                        data: new Dictionary<string, object?>
+                        {
+                            ["output_kind"] = "ToolCall",
+                            ["parse_status"] = "success",
+                            ["tool_count"] = toolCallRequests.Count,
+                            ["tools"] = string.Join(", ", toolCallRequests.Select(t => t.Name))
+                        }
+                    ));
+                }
+                else if (Regex.IsMatch(visibleResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
+                {
+                    _agentTrace.Record(AgentTraceEvent.Create(
+                        TraceEventType.OutputParseFailed,
+                        sessionId: generatingSessionId,
+                        taskId: CurrentTaskId,
+                        runId: toolExecutor.CurrentRunId,
+                        turnId: toolExecutor.CurrentTurnId,
+                        generationId: currentGenId,
+                        data: new Dictionary<string, object?>
+                        {
+                            ["parse_status"] = "failure",
+                            ["error"] = "Malformed or incomplete tool call markup",
+                            ["raw_snippet"] = visibleResponse.Length > 200 ? visibleResponse.Substring(0, 200) : visibleResponse
+                        }
+                    ));
+                }
+            }
+            catch { /* best-effort trace */ }
 
             // After repeated malformed tool calls, block execution entirely and force a direct
             // answer. The notice is injected once; subsequent iterations with tool tags just
@@ -2922,6 +3153,24 @@ public class ChatEngine(
                             completionEligibleNow = true;
                         }
                     }
+                    try
+                    {
+                        _agentTrace.Record(AgentTraceEvent.Create(
+                            TraceEventType.ToolCallProposed,
+                            sessionId: generatingSessionId,
+                            taskId: CurrentTaskId,
+                            runId: activeRunId,
+                            turnId: toolExecutor.CurrentTurnId,
+                            generationId: currentGenId,
+                            data: new Dictionary<string, object?>
+                            {
+                                ["tool"] = req.Name,
+                                ["arguments"] = req.Arguments != null ? new Dictionary<string, object?>(req.Arguments.Select(kv => new KeyValuePair<string, object?>(kv.Key, kv.Value))) : null
+                            }
+                        ));
+                    }
+                    catch { /* best effort */ }
+
                     var gateVerdict = Klydis.Core.Tasks.ActionValidator.ValidateForStep(
                         req, registeredToolDefs,
                         currentTaskStep == null ? null : Klydis.Core.Tasks.ActionObligation.FromStep(currentTaskStep),
@@ -2946,6 +3195,28 @@ public class ChatEngine(
                             actionId, CurrentTaskId ?? "—", activeRunId ?? "—", currentStepText ?? "—",
                             req.Name, gateErrorCode, gateVerdict.Reason, gateVerdict.AllowedToolsSummary ?? "—");
                         NoteLesson("action_gate", $"Action rejected by the deterministic gate: tool={req.Name} code={gateErrorCode}");
+
+                        try
+                        {
+                            _agentTrace.Record(AgentTraceEvent.Create(
+                                TraceEventType.ToolCallRejected,
+                                sessionId: generatingSessionId,
+                                taskId: CurrentTaskId,
+                                runId: activeRunId,
+                                turnId: toolExecutor.CurrentTurnId,
+                                generationId: currentGenId,
+                                actionId: actionId,
+                                data: new Dictionary<string, object?>
+                                {
+                                    ["tool"] = req.Name,
+                                    ["reason"] = gateVerdict.Reason,
+                                    ["code"] = gateErrorCode,
+                                    ["status"] = "REJECTED"
+                                }
+                            ));
+                        }
+                        catch { /* best effort */ }
+
                         var gateRejObj = new ChatMessage(ChatRole.Tool, rejection, req.Name);
                         AddToSessionHistory(activeHistory, gateRejObj, generatingSessionId);
                         // P0: the rejection is engine-internal feedback for THIS turn only — it is
@@ -2961,6 +3232,24 @@ public class ChatEngine(
                         }
                         continue;
                     }
+
+                    try
+                    {
+                        _agentTrace.Record(AgentTraceEvent.Create(
+                            TraceEventType.ToolCallValidated,
+                            sessionId: generatingSessionId,
+                            taskId: CurrentTaskId,
+                            runId: activeRunId,
+                            turnId: toolExecutor.CurrentTurnId,
+                            generationId: currentGenId,
+                            data: new Dictionary<string, object?>
+                            {
+                                ["tool"] = req.Name,
+                                ["status"] = "Accepted"
+                            }
+                        ));
+                    }
+                    catch { /* best effort */ }
 
                     // req.Arguments is a non-nullable IDictionary by declaration; the null-
                     // forgiving operator silences the analyzer's over-flag of the interface-
@@ -3236,6 +3525,27 @@ public class ChatEngine(
 
                     _recentTools.Add((req.Name, argsHash, toolOutput));
 
+                    try
+                    {
+                        _agentTrace.Record(AgentTraceEvent.Create(
+                            TraceEventType.ToolResultInjected,
+                            sessionId: generatingSessionId,
+                            taskId: CurrentTaskId,
+                            runId: activeRunId,
+                            turnId: toolExecutor.CurrentTurnId,
+                            generationId: currentGenId,
+                            actionId: runActionId,
+                            data: new Dictionary<string, object?>
+                            {
+                                ["tool"] = req.Name,
+                                ["bytes"] = toolOutput.Length,
+                                ["success"] = result.Success,
+                                ["exit_code"] = result.ExitCode
+                            }
+                        ));
+                    }
+                    catch { /* best effort */ }
+
                     // Bound the loop-detection history: it only needs recent context, and an
                     // unbounded list grows forever on long autonomous sessions (O(n) scan per call).
                     if (_recentTools.Count > 200)
@@ -3510,6 +3820,27 @@ public class ChatEngine(
                         logger.LogInformation(
                             "Supervisor: outcome={Outcome} decision={Decision} reason={Reason} nextStep={NextStep}",
                             outcome, decision.Decision, decision.Reason, decision.NextStepId ?? "—");
+
+                        try
+                        {
+                            _agentTrace.Record(AgentTraceEvent.Create(
+                                TraceEventType.ContinuationDecision,
+                                sessionId: generatingSessionId,
+                                taskId: CurrentTaskId,
+                                runId: toolExecutor.CurrentRunId,
+                                turnId: toolExecutor.CurrentTurnId,
+                                generationId: currentGenId,
+                                data: new Dictionary<string, object?>
+                                {
+                                    ["outcome"] = outcome.ToString(),
+                                    ["decision"] = decision.Decision.ToString(),
+                                    ["reason"] = decision.Reason.ToString(),
+                                    ["next_step"] = decision.NextStepId,
+                                    ["stalled_turns"] = stalledNow
+                                }
+                            ));
+                        }
+                        catch { /* best effort */ }
                         // P1.15 — the decision is DISPATCHED, not merely logged. The runtime
                         // records the decision against the run and executes the durable half
                         // (task-state transitions, completion seal); the returned directive

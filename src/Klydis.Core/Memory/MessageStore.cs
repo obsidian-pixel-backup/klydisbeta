@@ -8,6 +8,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Klydis.Core.Chat;
 using Klydis.Core.Tasks;
+using Klydis.Core.Tracing;
 using Klydis.Core.Workbench;
 using TaskStatus = Klydis.Core.Chat.TaskStatus;
 
@@ -468,10 +469,35 @@ public class MessageStore
                 is_invalidated INTEGER NOT NULL DEFAULT 0,
                 invalidation_reason TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS agent_trace_events (
+                event_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                task_id TEXT,
+                run_id TEXT,
+                turn_id TEXT,
+                generation_id TEXT,
+                action_id TEXT,
+                tool_execution_id TEXT,
+                skill_execution_id TEXT,
+                artifact_id TEXT,
+                parent_event_id TEXT,
+                event_type TEXT NOT NULL,
+                category TEXT,
+                duration_ms REAL,
+                monotonic_timestamp INTEGER,
+                timestamp_utc TEXT NOT NULL,
+                data_json TEXT
+            );
         ";
         await createCmd.ExecuteNonQueryAsync();
 
         // 2. Safe schema migrations for existing databases created with earlier schema versions
+        // agent_trace_events
+        await EnsureColumnExistsAsync(connection, "agent_trace_events", "monotonic_timestamp", "INTEGER DEFAULT 0");
+        await EnsureColumnExistsAsync(connection, "agent_trace_events", "category", "TEXT");
+        await EnsureColumnExistsAsync(connection, "agent_trace_events", "duration_ms", "REAL");
+
         // sessions
         await EnsureColumnExistsAsync(connection, "sessions", "is_pinned", "INTEGER DEFAULT 0");
         await EnsureColumnExistsAsync(connection, "sessions", "plan_json", "TEXT");
@@ -630,7 +656,10 @@ public class MessageStore
             "CREATE INDEX IF NOT EXISTS idx_turns_run ON turns(run_id, sequence);",
             "CREATE INDEX IF NOT EXISTS idx_fact_lookup ON fact_ledger(domain, entity_key, expires_at_utc, is_invalidated);",
             "CREATE INDEX IF NOT EXISTS idx_fact_domain ON fact_ledger(domain, is_invalidated);",
-            "CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id);"
+            "CREATE INDEX IF NOT EXISTS idx_messages_session_id_id ON messages(session_id, id);",
+            "CREATE INDEX IF NOT EXISTS idx_agent_trace_session ON agent_trace_events(session_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_agent_trace_task ON agent_trace_events(task_id, timestamp_utc);",
+            "CREATE INDEX IF NOT EXISTS idx_agent_trace_run ON agent_trace_events(run_id, timestamp_utc);"
         };
 
         foreach (var sql in indexStatements)
@@ -851,6 +880,29 @@ public class MessageStore
             return ReadTask(reader);
         }
         return null;
+    }
+
+    /// <summary>
+    /// Loads all tasks associated with a session, in chronological order.
+    /// </summary>
+    public async Task<List<AgentTask>> GetTasksBySessionAsync(string sessionId)
+    {
+        var result = new List<AgentTask>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT task_id, session_id, objective, status, created_at, updated_at, plan_json, summary
+            FROM tasks
+            WHERE session_id = @sessionId
+            ORDER BY created_at ASC;";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadTask(reader));
+        }
+        return result;
     }
 
     /// <summary>
@@ -2735,6 +2787,177 @@ public class MessageStore
             reader.GetInt32(Ord("is_invalidated")) != 0,
             reader.IsDBNull(Ord("invalidation_reason")) ? null : reader.GetString(Ord("invalidation_reason"))
         );
+    }
+
+    #endregion
+
+    #region Agent Trace Events
+
+    public async Task AddTraceEventAsync(AgentTraceEvent evt)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT INTO agent_trace_events (
+                event_id, session_id, task_id, run_id, turn_id, generation_id,
+                action_id, tool_execution_id, skill_execution_id, artifact_id,
+                parent_event_id, event_type, category, duration_ms, monotonic_timestamp,
+                timestamp_utc, data_json
+            ) VALUES (
+                @eventId, @sessionId, @taskId, @runId, @turnId, @generationId,
+                @actionId, @toolExecutionId, @skillExecutionId, @artifactId,
+                @parentEventId, @eventType, @category, @durationMs, @monotonicTimestamp,
+                @timestampUtc, @dataJson
+            ) ON CONFLICT(event_id) DO NOTHING;
+        ";
+        command.Parameters.AddWithValue("@eventId", evt.EventId);
+        command.Parameters.AddWithValue("@sessionId", (object?)evt.SessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@taskId", (object?)evt.TaskId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@runId", (object?)evt.RunId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@turnId", (object?)evt.TurnId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@generationId", (object?)evt.GenerationId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@actionId", (object?)evt.ActionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@toolExecutionId", (object?)evt.ToolExecutionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@skillExecutionId", (object?)evt.SkillExecutionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@artifactId", (object?)evt.ArtifactId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@parentEventId", (object?)evt.ParentEventId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@eventType", evt.Type.ToString());
+        command.Parameters.AddWithValue("@category", (object?)evt.Category?.ToString() ?? DBNull.Value);
+        command.Parameters.AddWithValue("@durationMs", (object?)evt.DurationMs ?? DBNull.Value);
+        command.Parameters.AddWithValue("@monotonicTimestamp", evt.MonotonicTimestamp);
+        command.Parameters.AddWithValue("@timestampUtc", evt.TimestampUtc.UtcDateTime.ToString("o"));
+        command.Parameters.AddWithValue("@dataJson", evt.Data != null ? JsonSerializer.Serialize(evt.Data) : (object)DBNull.Value);
+
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<List<AgentTraceEvent>> GetTraceEventsBySessionAsync(string sessionId, int limit = 10000)
+    {
+        var result = new List<AgentTraceEvent>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT event_id, session_id, task_id, run_id, turn_id, generation_id,
+                   action_id, tool_execution_id, skill_execution_id, artifact_id,
+                   parent_event_id, event_type, category, duration_ms, monotonic_timestamp,
+                   timestamp_utc, data_json
+            FROM agent_trace_events
+            WHERE session_id = @sessionId
+            ORDER BY timestamp_utc ASC, rowid ASC
+            LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+        command.Parameters.AddWithValue("@limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadTraceEvent(reader));
+        }
+        return result;
+    }
+
+    public async Task<List<AgentTraceEvent>> GetTraceEventsByTaskAsync(string taskId, int limit = 10000)
+    {
+        var result = new List<AgentTraceEvent>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT event_id, session_id, task_id, run_id, turn_id, generation_id,
+                   action_id, tool_execution_id, skill_execution_id, artifact_id,
+                   parent_event_id, event_type, category, duration_ms, monotonic_timestamp,
+                   timestamp_utc, data_json
+            FROM agent_trace_events
+            WHERE task_id = @taskId
+            ORDER BY timestamp_utc ASC, rowid ASC
+            LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@taskId", taskId);
+        command.Parameters.AddWithValue("@limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadTraceEvent(reader));
+        }
+        return result;
+    }
+
+    public async Task<List<AgentTraceEvent>> GetTraceEventsByRunAsync(string runId, int limit = 10000)
+    {
+        var result = new List<AgentTraceEvent>();
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT event_id, session_id, task_id, run_id, turn_id, generation_id,
+                   action_id, tool_execution_id, skill_execution_id, artifact_id,
+                   parent_event_id, event_type, category, duration_ms, monotonic_timestamp,
+                   timestamp_utc, data_json
+            FROM agent_trace_events
+            WHERE run_id = @runId
+            ORDER BY timestamp_utc ASC, rowid ASC
+            LIMIT @limit;
+        ";
+        command.Parameters.AddWithValue("@runId", runId);
+        command.Parameters.AddWithValue("@limit", limit);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(ReadTraceEvent(reader));
+        }
+        return result;
+    }
+
+    private static AgentTraceEvent ReadTraceEvent(Microsoft.Data.Sqlite.SqliteDataReader reader)
+    {
+        int Ord(string name) => reader.GetOrdinal(name);
+        string typeStr = reader.GetString(Ord("event_type"));
+        Enum.TryParse<TraceEventType>(typeStr, out var type);
+
+        AgentTimingCategory? category = null;
+        if (!reader.IsDBNull(Ord("category")))
+        {
+            if (Enum.TryParse<AgentTimingCategory>(reader.GetString(Ord("category")), out var cat))
+            {
+                category = cat;
+            }
+        }
+
+        double? durationMs = reader.IsDBNull(Ord("duration_ms")) ? null : reader.GetDouble(Ord("duration_ms"));
+        long monotonicTimestamp = reader.IsDBNull(Ord("monotonic_timestamp")) ? 0 : reader.GetInt64(Ord("monotonic_timestamp"));
+
+        string? dataJson = reader.IsDBNull(Ord("data_json")) ? null : reader.GetString(Ord("data_json"));
+        Dictionary<string, object?>? data = null;
+        if (!string.IsNullOrWhiteSpace(dataJson))
+        {
+            try
+            {
+                data = JsonSerializer.Deserialize<Dictionary<string, object?>>(dataJson);
+            }
+            catch
+            {
+                data = new Dictionary<string, object?> { ["raw_json"] = dataJson };
+            }
+        }
+
+        return new AgentTraceEvent
+        {
+            EventId = reader.GetString(Ord("event_id")),
+            SessionId = reader.IsDBNull(Ord("session_id")) ? null : reader.GetString(Ord("session_id")),
+            TaskId = reader.IsDBNull(Ord("task_id")) ? null : reader.GetString(Ord("task_id")),
+            RunId = reader.IsDBNull(Ord("run_id")) ? null : reader.GetString(Ord("run_id")),
+            TurnId = reader.IsDBNull(Ord("turn_id")) ? null : reader.GetString(Ord("turn_id")),
+            GenerationId = reader.IsDBNull(Ord("generation_id")) ? null : reader.GetString(Ord("generation_id")),
+            ActionId = reader.IsDBNull(Ord("action_id")) ? null : reader.GetString(Ord("action_id")),
+            ToolExecutionId = reader.IsDBNull(Ord("tool_execution_id")) ? null : reader.GetString(Ord("tool_execution_id")),
+            SkillExecutionId = reader.IsDBNull(Ord("skill_execution_id")) ? null : reader.GetString(Ord("skill_execution_id")),
+            ArtifactId = reader.IsDBNull(Ord("artifact_id")) ? null : reader.GetString(Ord("artifact_id")),
+            ParentEventId = reader.IsDBNull(Ord("parent_event_id")) ? null : reader.GetString(Ord("parent_event_id")),
+            Type = type,
+            Category = category,
+            DurationMs = durationMs,
+            MonotonicTimestamp = monotonicTimestamp,
+            TimestampUtc = DateTimeOffset.Parse(reader.GetString(Ord("timestamp_utc")), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            Data = data
+        };
     }
 
     #endregion

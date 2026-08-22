@@ -11,6 +11,7 @@ using Klydis.App.Services;
 using Klydis.Core.Chat;
 using Klydis.Core.Diagnostics;
 using Klydis.Core.Tasks;
+using Klydis.Core.Tracing;
 
 namespace Klydis.App.ViewModels;
 
@@ -2368,102 +2369,46 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         if (SelectedSession == null) return;
 
-        var dbMessages = await _messageStore.GetMessagesAsync(SelectedSession.Id, null);
-        if (dbMessages == null || dbMessages.Count == 0) return;
-
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
-            FileName = $"{CleanTitle(SelectedSession.Title)}_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
-            DefaultExt = ".txt",
-            Filter = "Text documents (.txt)|*.txt|All files (*.*)|*.*",
-            Title = "Export Chat Log"
+            FileName = $"Klydis_ChatExport_{CleanTitle(SelectedSession.Title)}_{DateTime.Now:yyyyMMdd_HHmmss}.md",
+            DefaultExt = ".md",
+            Filter = "Markdown Agent Dossier (*.md)|*.md|JSONL Trace Stream (*.jsonl)|*.jsonl|Plain Text Transcript (*.txt)|*.txt|All Files (*.*)|*.*",
+            Title = "Export Complete Agent Execution Dossier"
         };
 
         if (dialog.ShowDialog() == true)
         {
-            var sb = new StringBuilder();
-
-            // ===== Verbose header: app, session, task, and FULL model diagnostics =====
-            sb.AppendLine("============================================================");
-            sb.AppendLine("KLYDIS CHAT EXPORT");
-            sb.AppendLine("============================================================");
-            sb.AppendLine($"App version: {GetAppVersion()}");
-            sb.AppendLine($"Session: {SelectedSession.Title}");
-            sb.AppendLine($"SessionId: {SelectedSession.Id}");
-            sb.AppendLine($"Exported: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            var taskManager = _chatEngine?.TaskManager;
-            var authoritativeTask = _chatEngine?.CurrentTaskId != null && taskManager != null
-                ? await taskManager.GetTaskAsync(_chatEngine.CurrentTaskId)
-                : (taskManager != null ? await taskManager.GetCurrentTaskAsync(SelectedSession.Id) : null);
-
-            string taskIdDisplay = authoritativeTask?.TaskId ?? _chatEngine?.CurrentTaskId ?? "(no active task)";
-            string taskObjectiveDisplay = authoritativeTask?.Objective ?? _chatEngine?.CurrentTaskObjective ?? "(none)";
-            string taskStatusDisplay = authoritativeTask?.Status.ToString() ?? "(unknown)";
-
-            sb.AppendLine("--- TASK ---");
-            sb.AppendLine($"TaskId: {taskIdDisplay}");
-            sb.AppendLine($"Status: {taskStatusDisplay}");
-            sb.AppendLine($"Objective: {taskObjectiveDisplay}");
-            if (authoritativeTask != null && !string.IsNullOrWhiteSpace(authoritativeTask.PlanJson))
-            {
-                sb.AppendLine($"Plan: {authoritativeTask.PlanJson}");
-            }
-            sb.AppendLine();
-            sb.AppendLine("--- MODEL ---");
-            var profile = _chatEngine?.CurrentModelProfile;
-            if (profile == null)
-            {
-                sb.AppendLine("(no model profile available — model not loaded)");
-            }
-            else
-            {
-                var adapter = _chatEngine?.CurrentProtocolAdapter;
-                sb.AppendLine($"Model: {profile.ModelId}");
-                sb.AppendLine($"Path: {profile.ModelPath}");
-                sb.AppendLine($"Architecture: {profile.Architecture}");
-                sb.AppendLine($"ChatTemplate: {profile.Template}");
-                sb.AppendLine($"Reasoning: {profile.Reasoning}");
-                sb.AppendLine($"ToolProtocol: {profile.ToolProtocol}");
-                sb.AppendLine($"PreferredProtocol: {profile.PreferredProtocol}");
-                sb.AppendLine($"SupportedProtocols: {string.Join(", ", profile.SupportedProtocols)}");
-                sb.AppendLine($"FallbackProtocols: {(profile.FallbackProtocols.Count > 0 ? string.Join(", ", profile.FallbackProtocols) : "(none)")}");
-                sb.AppendLine($"NativeTools: {profile.SupportsNativeTools} | StructuredOutput: {profile.SupportsStructuredOutput} | Grammar: {profile.SupportsGrammar} | Thinking: {profile.SupportsThinking} | ToolContinuation: {profile.SupportsToolContinuation}");
-                sb.AppendLine($"ToolCalling: {profile.ToolCalling} | Continuation: {profile.Continuation} | Repair: {profile.Repair}");
-                sb.AppendLine($"ProtocolConfidence: {profile.ProtocolConfidence:0.00}");
-                sb.AppendLine($"ProtocolKey: {Klydis.Core.Protocol.ProtocolRegistry.ResolveProtocolKey(profile) ?? "legacy-fallback"}");
-                sb.AppendLine($"Adapter: {adapter?.GetType().Name ?? "legacy-fallback (no registered adapter)"}");
-                sb.AppendLine($"Fingerprint: {profile.Fingerprint}");
-                sb.AppendLine($"ProfileVersion: {profile.ProfileVersion}");
-            }
-            sb.AppendLine($"ContextSize: {_chatEngine?.ContextSize ?? 0} tokens");
-            sb.AppendLine();
-            sb.AppendLine("--- MESSAGES ---");
-            sb.AppendLine(new string('=', 60));
-            sb.AppendLine();
-
-            foreach (var msg in dbMessages)
-            {
-                sb.Append($"[{msg.Timestamp:yyyy-MM-dd HH:mm:ss}] {msg.Role.ToString().ToUpperInvariant()}");
-                if (msg.IsConsolidated) sb.Append(" (consolidated)");
-                if (msg.TokenCount > 0) sb.Append($" | tokens: {msg.TokenCount}");
-                sb.AppendLine(":");
-                sb.AppendLine(msg.Content);
-                if (!string.IsNullOrWhiteSpace(msg.ToolCallsJson))
-                {
-                    sb.AppendLine($"ToolCalls: {msg.ToolCallsJson}");
-                }
-                sb.AppendLine(new string('-', 40));
-                sb.AppendLine();
-            }
-
             try
             {
-                await System.IO.File.WriteAllTextAsync(dialog.FileName, sb.ToString());
+                string extension = System.IO.Path.GetExtension(dialog.FileName).ToLowerInvariant();
+                string outputText;
+
+                if (extension == ".jsonl")
+                {
+                    outputText = await AgentExecutionDossierBuilder.BuildJsonlTraceAsync(
+                        SelectedSession.Id,
+                        _messageStore,
+                        _chatEngine?.AgentTrace);
+                }
+                else
+                {
+                    outputText = await AgentExecutionDossierBuilder.BuildMarkdownDossierAsync(
+                        SelectedSession.Id,
+                        _messageStore,
+                        _chatEngine?.AgentTrace,
+                        _chatEngine?.CurrentModelProfile,
+                        _chatEngine?.CurrentProtocolAdapter,
+                        _chatEngine?.ContextSize ?? 0,
+                        GetAppVersion());
+                }
+
+                await System.IO.File.WriteAllTextAsync(dialog.FileName, outputText, Encoding.UTF8);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Failed to export chat: {ex}");
-                ShowAlert("Export Failed", $"Failed to export chat:\n{ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Failed to export dossier: {ex}");
+                ShowAlert("Export Failed", $"Failed to export agent execution dossier:\n{ex.Message}");
             }
         }
     }
