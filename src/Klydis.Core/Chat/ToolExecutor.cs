@@ -115,6 +115,8 @@ public class ToolExecutor(
     private readonly Klydis.Core.Web.Tools.WebToolService _webTools =
         new(webOrchestrator ?? Klydis.Core.Web.WebOrchestrator.CreateDefault(logger, stealthBrowserService), logger);
 
+    private readonly Klydis.Core.Hardware.ISystemDiagnostics _systemDiagnostics = new Klydis.Core.Hardware.WindowsSystemDiagnostics();
+
     /// <summary>
     /// The task currently executing, when the turn resolved one. Set by ChatEngine after
     /// task resolution and cleared when the turn ends. Drives (a) plan persistence, which
@@ -253,13 +255,18 @@ public class ToolExecutor(
             new("path", "string", "Absolute path to the file", true),
             new("patch", "string", "The unified diff (diff -u format: --- / +++ headers and @@ -a,b +c,d @@ hunks)", true)
         }, false),
-        new ToolDefinition("list_directory", "Lists immediate children of a directory with sizes. For very large directories (e.g. system32), consider using search_files instead.", new List<ToolParameter>
+        new ToolDefinition("list_directory", "Lists immediate children of a directory with structured pagination. For large directories, specify offset and limit to paginate.", new List<ToolParameter>
         {
-            new("path", "string", "Absolute path to the directory", true)
+            new("path", "string", "Absolute path to the directory", true),
+            new("offset", "integer", "Optional 0-indexed item offset for pagination (default 0)", false),
+            new("limit", "integer", "Optional maximum items to return per page (default 50)", false),
+            new("filter", "string", "Optional search filter (e.g. *.dll, *.log, or text)", false),
+            new("sort", "string", "Optional sorting criterion: name, size, or modified (default name)", false, new[] { "name", "size", "modified" })
         }, false),
-        new ToolDefinition("run_command", "Executes a PowerShell command and returns stdout/stderr. Only use real PowerShell cmdlets. For app launching use Start-Process -FilePath ... -ArgumentList ... Pipe large outputs through Select-Object -First N.", new List<ToolParameter>
+        new ToolDefinition("run_command", "Executes a shell command (PowerShell, CMD, or Bash) and returns a complete structured execution envelope with stdout, stderr, exit code, duration, and failure taxonomy.", new List<ToolParameter>
         {
             new("command", "string", "Command to execute", true),
+            new("shell", "string", "Shell environment to execute in: 'powershell' (default), 'cmd', or 'bash'", false, new[] { "powershell", "cmd", "bash" }),
             new("working_directory", "string", "Optional working directory for command execution", false),
             new("timeout_seconds", "integer", "Optional timeout in seconds (default 60)", false)
         }, false),
@@ -398,16 +405,28 @@ public class ToolExecutor(
             new("progress", "integer", "Optional overall completion percent 0-100", false)
         }, false),
         new ToolDefinition("system_report", "Returns a full comprehensive system diagnostic report covering CPU, GPU (NVML/WMI), RAM, Disks, Operating System, and Displays.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_cpu_info", "Returns CPU model name, socket count, physical cores, logical processors, max clock speed, and architecture.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_cpu_usage", "Returns real-time total CPU utilization percentage and current process CPU consumption.", new List<ToolParameter>(), false),
         new ToolDefinition("system_cpu_metrics", "Returns detailed CPU hardware specs, core counts, clock frequency, and real-time CPU utilization.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_gpu_info", "Returns installed GPU models, total/available VRAM, compute capability, and driver versions.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_gpu_usage", "Returns real-time GPU utilization %, VRAM %, and core temperatures via NVML.", new List<ToolParameter>(), false),
         new ToolDefinition("system_gpu_metrics", "Returns detailed NVIDIA/system GPU hardware metrics, VRAM usage, temperature, and compute capabilities.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_memory", "Returns real-time physical RAM usage (total, available, used GB, utilization %) and process working set.", new List<ToolParameter>(), false),
         new ToolDefinition("system_memory_metrics", "Returns real-time RAM usage, total physical memory, available memory, and process working set.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_disks", "Returns mounted storage drives, volume labels, total capacity, free space, and usage percentages.", new List<ToolParameter>(), false),
         new ToolDefinition("system_disk_metrics", "Returns real-time disk storage status, available drives, free space, and capacity.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_os", "Returns host operating system details, version, build number, machine architecture, and user context.", new List<ToolParameter>(), false),
         new ToolDefinition("system_os_info", "Returns host operating system details, version, machine architecture, and user context.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_temperatures", "Returns thermal sensor readings for CPU thermal zones and GPU cores in Celsius.", new List<ToolParameter>(), false),
         new ToolDefinition("system_processes", "Returns a list of currently running processes with PID, memory working set, and process count.", new List<ToolParameter>
         {
             new("top_n", "integer", "Optional maximum number of top processes by memory to return (default 25)", false),
             new("filter", "string", "Optional name filter for process names", false)
         }, false),
+        new ToolDefinition("system_gpu_processes", "Returns active processes utilizing GPU VRAM and compute resources.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_uptime", "Returns continuous system uptime and boot timestamp.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_hardware_report", "Returns a comprehensive consolidated hardware report covering CPU specs, CPU load, GPUs, RAM, Disks, and Temperatures.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_software_report", "Returns a consolidated software report covering OS details, uptime, active processes, and runtime environments.", new List<ToolParameter>(), false),
         new ToolDefinition("desktop_launch", "Launches a desktop application or browser URL with optional arguments and target monitor placement.", new List<ToolParameter>
         {
             new("app", "string", "Application name or path (e.g. 'chrome', 'notepad', 'code', 'calc')", true),
@@ -762,12 +781,24 @@ public class ToolExecutor(
                 "task_progress" => ExecuteTaskProgress(request),
                 "plan" => await ExecutePlanAsync(request, sessionId),
                 "system_report" => await GetSystemReportAsync(toolCt),
+                "system_cpu_info" => await GetSystemCpuInfoAsync(toolCt),
+                "system_cpu_usage" => await GetSystemCpuUsageAsync(toolCt),
                 "system_cpu_metrics" => await GetSystemCpuMetricsAsync(toolCt),
+                "system_gpu_info" => await GetSystemGpuInfoAsync(toolCt),
+                "system_gpu_usage" => await GetSystemGpuUsageAsync(toolCt),
                 "system_gpu_metrics" => await GetSystemGpuMetricsAsync(toolCt),
+                "system_memory" => await GetSystemMemoryMetricsAsync(toolCt),
                 "system_memory_metrics" => await GetSystemMemoryMetricsAsync(toolCt),
+                "system_disks" => await GetSystemDiskMetricsAsync(toolCt),
                 "system_disk_metrics" => await GetSystemDiskMetricsAsync(toolCt),
+                "system_os" => await GetSystemOsInfoAsync(toolCt),
                 "system_os_info" => await GetSystemOsInfoAsync(toolCt),
+                "system_temperatures" => await GetSystemTemperaturesAsync(toolCt),
                 "system_processes" => await GetSystemProcessesAsync(request, toolCt),
+                "system_gpu_processes" => await GetSystemGpuProcessesAsync(toolCt),
+                "system_uptime" => await GetSystemUptimeAsync(toolCt),
+                "system_hardware_report" => await GetSystemHardwareReportAsync(toolCt),
+                "system_software_report" => await GetSystemSoftwareReportAsync(toolCt),
                 "desktop_launch" => await DesktopLaunchAsync(request, toolCt),
                 "replace_lines" => await ReplaceLinesAsync(request, sessionId, toolCt),
                 "manage_process" => await ManageProcessAsync(request, toolCt),
@@ -785,6 +816,11 @@ public class ToolExecutor(
             result = new ToolResult(request.Name, false, string.Empty,
                 $"⚠ Tool call '{request.Name}' exceeded the per-call timeout of {(int)effectiveToolTimeout.TotalSeconds} s and was cancelled. " +
                 $"Re-plan: split the operation into smaller steps or reduce its scope before retrying.");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            logger.LogInformation("Tool '{ToolName}' cancelled by caller cancellation token.", request.Name);
+            throw;
         }
         catch (Exception ex)
         {
@@ -1597,16 +1633,68 @@ public class ToolExecutor(
         if (string.IsNullOrEmpty(path)) return Task.FromResult(InvalidCall(request.Name, "Path is required"));
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return Task.FromResult(commandLike);
-        if (!Directory.Exists(path)) return Task.FromResult(new ToolResult(request.Name, false, "", "Directory not found"));
+        if (!Directory.Exists(path)) return Task.FromResult(new ToolResult(request.Name, false, "", $"Directory not found: {path}"));
+
+        int offset = 0;
+        int limit = 50;
+        string? filter = GetStringArg(request.Arguments, "filter");
+        string? sort = GetStringArg(request.Arguments, "sort")?.ToLowerInvariant();
+
+        if (request.Arguments != null)
+        {
+            if (request.Arguments.TryGetValue("offset", out var offObj) && int.TryParse(UnwrapJsonElement(offObj)?.ToString(), out int off) && off >= 0)
+                offset = off;
+            if (request.Arguments.TryGetValue("limit", out var limObj) && int.TryParse(UnwrapJsonElement(limObj)?.ToString(), out int lim) && lim > 0)
+                limit = Math.Clamp(lim, 1, 200);
+        }
 
         var info = new DirectoryInfo(path);
-        var entries = new List<string>();
-        foreach (var dir in info.GetDirectories())
-            entries.Add($"[DIR] {dir.Name}");
-        foreach (var file in info.GetFiles())
-            entries.Add($"[FILE] {file.Name} ({file.Length} bytes)");
+        var dirs = info.GetDirectories().AsEnumerable();
+        var files = info.GetFiles().AsEnumerable();
 
-        return Task.FromResult(new ToolResult(request.Name, true, string.Join("\n", entries), null));
+        if (!string.IsNullOrWhiteSpace(filter))
+        {
+            dirs = dirs.Where(d => d.Name.Contains(filter, StringComparison.OrdinalIgnoreCase));
+            files = files.Where(f => f.Name.Contains(filter, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var dirList = dirs.ToList();
+        var fileList = files.ToList();
+
+        if (sort == "size")
+        {
+            fileList = fileList.OrderByDescending(f => f.Length).ToList();
+        }
+        else if (sort == "modified")
+        {
+            dirList = dirList.OrderByDescending(d => d.LastWriteTimeUtc).ToList();
+            fileList = fileList.OrderByDescending(f => f.LastWriteTimeUtc).ToList();
+        }
+        else
+        {
+            dirList = dirList.OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            fileList = fileList.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        var allItems = new List<string>();
+        foreach (var dir in dirList) allItems.Add($"[DIR] {dir.Name}");
+        foreach (var file in fileList) allItems.Add($"[FILE] {file.Name} ({file.Length} bytes)");
+
+        int totalCount = allItems.Count;
+        var pagedItems = allItems.Skip(offset).Take(limit).ToList();
+        bool hasMore = offset + pagedItems.Count < totalCount;
+        int nextOffset = offset + pagedItems.Count;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"[Directory: {path}] [Total Items: {totalCount} ({dirList.Count} dirs, {fileList.Count} files)] [Showing {Math.Min(offset + 1, totalCount)} to {offset + pagedItems.Count} of {totalCount}]");
+        sb.AppendLine($"[Pagination: offset={offset}, limit={limit}, has_more={hasMore.ToString().ToLowerInvariant()}, next_offset={(hasMore ? nextOffset : -1)}]");
+        sb.AppendLine();
+        foreach (var item in pagedItems)
+        {
+            sb.AppendLine(item);
+        }
+
+        return Task.FromResult(new ToolResult(request.Name, true, sb.ToString().TrimEnd(), null));
     }
 
     private async Task<ToolResult> RunCommandAsync(ToolCallRequest request, CancellationToken ct)
@@ -1614,11 +1702,10 @@ public class ToolExecutor(
         var command = GetStringArg(request.Arguments, "command");
         if (string.IsNullOrEmpty(command)) return InvalidCall(request.Name, "Command is required");
 
+        string shell = GetStringArg(request.Arguments, "shell")?.ToLowerInvariant() ?? "powershell";
         var workingDir = GetStringArg(request.Arguments, "working_directory");
         if (string.IsNullOrWhiteSpace(workingDir) || !Directory.Exists(workingDir))
         {
-            // P0: default to the task workspace root when established — not the process cwd,
-            // which may be anywhere (and may not even exist as a project boundary).
             workingDir = WorkspaceRoot ?? Directory.GetCurrentDirectory();
         }
 
@@ -1632,23 +1719,54 @@ public class ToolExecutor(
             }
         }
 
-        // Auto-normalize common PowerShell parameter binding mistakes (e.g. `start chrome --new-window http...` -> `Start-Process chrome -ArgumentList '--new-window', 'http...'`)
-        var sanitizedCmd = Regex.Replace(command, @"(?<=\s|^)&&(?=\s|$)", ";");
-        var matchStartFlags = Regex.Match(sanitizedCmd, @"^(?:start|Start-Process)\s+([a-zA-Z0-9_\-\.\:\\]+)\s+(--?[a-zA-Z0-9_\-\.]+.*)$", RegexOptions.IgnoreCase);
-        if (matchStartFlags.Success)
+        var sanitizedCmd = command;
+        ProcessStartInfo psi;
+
+        if (shell == "cmd")
         {
-            string appName = matchStartFlags.Groups[1].Value;
-            string rawArgs = matchStartFlags.Groups[2].Value;
-            sanitizedCmd = $"Start-Process -FilePath \"{appName}\" -ArgumentList {rawArgs}";
+            psi = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c {sanitizedCmd}",
+                WorkingDirectory = workingDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
         }
-
-        sanitizedCmd = NormalizePowershellWrapper(sanitizedCmd);
-
-        var encodedCmd = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitizedCmd));
-
-        try
+        else if (shell == "bash")
         {
-            var psi = new ProcessStartInfo
+            psi = new ProcessStartInfo
+            {
+                FileName = "bash.exe",
+                Arguments = $"-c \"{sanitizedCmd.Replace("\"", "\\\"")}\"",
+                WorkingDirectory = workingDir,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+        }
+        else // default: powershell
+        {
+            shell = "powershell";
+            sanitizedCmd = Regex.Replace(command, @"(?<=\s|^)&&(?=\s|$)", ";");
+            var matchStartFlags = Regex.Match(sanitizedCmd, @"^(?:start|Start-Process)\s+([a-zA-Z0-9_\-\.\:\\]+)\s+(--?[a-zA-Z0-9_\-\.]+.*)$", RegexOptions.IgnoreCase);
+            if (matchStartFlags.Success)
+            {
+                string appName = matchStartFlags.Groups[1].Value;
+                string rawArgs = matchStartFlags.Groups[2].Value;
+                sanitizedCmd = $"Start-Process -FilePath \"{appName}\" -ArgumentList {rawArgs}";
+            }
+            sanitizedCmd = NormalizePowershellWrapper(sanitizedCmd);
+            var encodedCmd = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitizedCmd));
+
+            psi = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
                 Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encodedCmd}",
@@ -1660,12 +1778,14 @@ public class ToolExecutor(
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+        }
 
+        try
+        {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             using var process = Process.Start(psi);
             if (process == null) return new ToolResult(request.Name, false, "", "Failed to start process");
 
-            // Read stdout and stderr asynchronously concurrently with process execution to avoid pipe deadlocks
             var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
             var stderrTask = process.StandardError.ReadToEndAsync(ct);
 
@@ -1699,62 +1819,41 @@ public class ToolExecutor(
                 stderr = System.Text.RegularExpressions.Regex.Replace(stderr, @"#<\s*CLIXML[\s\S]*?</Objs>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
             }
 
-            var output = stdout;
-            if (!string.IsNullOrEmpty(stderr))
-            {
-                if (string.IsNullOrEmpty(output)) output = stderr;
-                else output += $"\nSTDERR:\n{stderr}";
-            }
+            var classification = Klydis.Core.Tasks.CommandExecution.ClassifyError(stderr, stdout, process.ExitCode, false, false);
+            string? guidance = Klydis.Core.Tasks.CommandExecution.GetGuidance(classification);
 
-            // Unknown-cmdlet feedback: PowerShell's "The term 'X' is not recognized as the name of
-            // a cmdlet..." is the ground-truth signal for a hallucinated command token (the KMS
-            // chats invented Get-RandomProperty / Write-OutnFile / slpapi.exe and got zero useful
-            // feedback). Extract the first unknown token and say exactly what was wrong — the
-            // model can then replace that ONE token instead of guessing.
+            var executionEnvelope = new Dictionary<string, object?>
+            {
+                ["status"] = process.ExitCode == 0 ? "succeeded" : "failed",
+                ["exit_code"] = process.ExitCode,
+                ["stdout"] = string.IsNullOrWhiteSpace(stdout) ? null : stdout.TrimEnd(),
+                ["stderr"] = string.IsNullOrWhiteSpace(stderr) ? null : stderr.TrimEnd(),
+                ["command"] = command,
+                ["working_directory"] = workingDir,
+                ["shell"] = shell,
+                ["duration_ms"] = sw.ElapsedMilliseconds,
+                ["timed_out"] = false,
+                ["failure_class"] = process.ExitCode == 0 ? null : classification.ToString(),
+                ["recovery_guidance"] = process.ExitCode == 0 ? null : guidance
+            };
+
+            string jsonEnvelope = JsonSerializer.Serialize(executionEnvelope, new JsonSerializerOptions { WriteIndented = true, DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+
+            string formattedOutput = $"[COMMAND EXECUTION RESULT]\n```json\n{jsonEnvelope}\n```";
+            if (!string.IsNullOrWhiteSpace(stdout))
+            {
+                formattedOutput += $"\n\n--- STDOUT ---\n{stdout.TrimEnd()}";
+            }
             if (!string.IsNullOrWhiteSpace(stderr))
             {
-                var unknown = Regex.Match(stderr, @"The term\s+['""]([^'""]+)['""]\s+is not recognized", RegexOptions.IgnoreCase);
-                if (unknown.Success && !string.IsNullOrWhiteSpace(unknown.Groups[1].Value))
-                {
-                    output = $"[Unknown command: '{unknown.Groups[1].Value}' — that is not a real cmdlet/command. Replace it with a valid PowerShell cmdlet or the correct tool.]\n\n{output}";
-                }
+                formattedOutput += $"\n\n--- STDERR ---\n{stderr.TrimEnd()}";
             }
-
-            // GUI-dialog detection: a process that exits 0 with EMPTY console output may have
-            // opened a GUI window instead (slmgr /dli, slmgr /ckmsctl, ...). Treating that as
-            // "Command executed successfully with no output." lets the model mistake a dialog
-            // for evidence — the observed "we received visual outputs" dead-end. Known
-            // dialog-launcher verbs get a distinct signal naming the console variant.
-            if (string.IsNullOrWhiteSpace(output) && process.ExitCode == 0)
-            {
-                var firstToken = Regex.Match(sanitizedCmd, @"^\s*([a-zA-Z0-9_\-\.]+)").Groups[1].Value;
-                // slmgr invoked directly opens a GUI dialog (the console variant is
-                // cscript //nologo slmgr.vbs); wscript is the GUI twin of cscript; slui is the
-                // activation UI; control opens the Control Panel. cscript itself is the CONSOLE
-                // host and must NOT be flagged.
-                bool guiLauncher = firstToken.Equals("slmgr", StringComparison.OrdinalIgnoreCase) ||
-                                   firstToken.Equals("slui", StringComparison.OrdinalIgnoreCase) ||
-                                   firstToken.Equals("wscript", StringComparison.OrdinalIgnoreCase) ||
-                                   firstToken.Equals("control", StringComparison.OrdinalIgnoreCase);
-                output = guiLauncher
-                    ? $"[This command opened a GUI dialog; its console output is unavailable. Use the console variant to get capturable output: cscript //nologo %windir%\\system32\\slmgr.vbs /dli]"
-                    : "Command executed successfully with no output.";
-            }
-
-            var classification = Klydis.Core.Tasks.CommandExecution.ClassifyError(stderr, stdout, process.ExitCode, false, false);
-            string? guidance = classification switch
-            {
-                Klydis.Core.Tasks.CommandErrorClassification.CommandNotFound => "USE_DIFFERENT_COMMAND: Cmdlet/command not found. Use real PowerShell cmdlets or registered tools.",
-                Klydis.Core.Tasks.CommandErrorClassification.PermissionDenied => "PERMISSION_DENIED: Access denied. Re-try with alternative command or approach.",
-                Klydis.Core.Tasks.CommandErrorClassification.InvalidArgument => "INVALID_ARGUMENT: Check command syntax and arguments.",
-                _ => null
-            };
 
             return new ToolResult(
                 request.Name,
                 process.ExitCode == 0,
-                output,
-                process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null,
+                formattedOutput,
+                process.ExitCode != 0 ? (string.IsNullOrWhiteSpace(stderr) ? $"Command exited with code {process.ExitCode}" : stderr.Trim()) : null,
                 ExitCode: process.ExitCode,
                 Stdout: stdout,
                 Stderr: stderr,
@@ -1764,10 +1863,6 @@ public class ToolExecutor(
         }
         catch (Exception ex)
         {
-            // Cancellation must PROPAGATE to the dispatch-level per-tool-call timeout handler
-            // (which produces the actionable "exceeded the per-call timeout" message). The
-            // old swallow-and-convert leaked a bare "The operation was canceled." to the
-            // model, and it made the ToolExecutor.ToolCallTimeout backstop dead for run_command.
             if (ex is OperationCanceledException) throw;
             return new ToolResult(request.Name, false, "", ex.Message);
         }
@@ -1853,150 +1948,159 @@ public class ToolExecutor(
 
     private async Task<ToolResult> GetSystemReportAsync(CancellationToken ct)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("### Comprehensive System Diagnostic Report");
-        sb.AppendLine();
-
         try
         {
-            // 1. OS & Platform
-            sb.AppendLine($"**Operating System:** {Environment.OSVersion} ({(Environment.Is64BitOperatingSystem ? "64-bit" : "32-bit")})");
-            sb.AppendLine($"**Host / Machine Name:** {Environment.MachineName}");
-            sb.AppendLine($"**User / Context:** {Environment.UserName}");
-            sb.AppendLine($"**System Up Time:** {TimeSpan.FromMilliseconds(Environment.TickCount64):d\\.hh\\:mm\\:ss}");
+            var repTask = _systemDiagnostics.GetHardwareReportAsync(ct);
+            var osTask = _systemDiagnostics.GetOperatingSystemAsync(ct);
+            await Task.WhenAll(repTask, osTask);
+
+            var rep = await repTask;
+            var os = await osTask;
+
+            var sb = new StringBuilder();
+            sb.AppendLine("### Comprehensive System Hardware Diagnostic Report");
+            sb.AppendLine();
+            sb.AppendLine($"**Operating System:** {os.OsName} (Build {os.BuildNumber})");
+            sb.AppendLine($"**CPU:** {rep.Cpu.Model} ({rep.Cpu.PhysicalCores} Cores / {rep.Cpu.LogicalProcessors} Logical Threads)");
+            sb.AppendLine($"**CPU Utilization:** {rep.CpuUsage.TotalUtilizationPercent}% (Process: {rep.CpuUsage.ProcessCpuPercent}%)");
+            sb.AppendLine($"**RAM:** {rep.Memory.UsedGb:0.0} GB used / {rep.Memory.TotalPhysicalGb:0.0} GB total ({rep.Memory.AvailableGb:0.0} GB free)");
+            sb.AppendLine($"**Physical Memory:** {rep.Memory.TotalPhysicalGb:0.00} GB total, {rep.Memory.AvailableGb:0.00} GB available ({rep.Memory.UtilizationPercent}% used)");
+            sb.AppendLine($"**Process Working Set:** {rep.Memory.ProcessWorkingSetMb:0.0} MB");
             sb.AppendLine();
 
-            // 2. CPU & Memory Metrics
-            var cpuTask = Task.Run(() =>
-            {
-                string name = "Unknown CPU";
-                int cores = Environment.ProcessorCount;
-                int logical = Environment.ProcessorCount;
-                try
-                {
-                    using var searcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor");
-                    foreach (var obj in searcher.Get())
-                    {
-                        name = obj["Name"]?.ToString()?.Trim() ?? name;
-                        cores = Convert.ToInt32(obj["NumberOfCores"] ?? cores);
-                        logical = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? logical);
-                        break;
-                    }
-                }
-                catch { }
-                return (Name: name, Cores: cores, Logical: logical);
-            }, ct);
-
-            var ramTask = Task.Run(() =>
-            {
-                double total = 0, free = 0;
-                try
-                {
-                    using var s1 = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem");
-                    foreach (var o in s1.Get()) { total = Convert.ToUInt64(o["TotalPhysicalMemory"] ?? 0) / (1024.0 * 1024 * 1024); break; }
-                    using var s2 = new ManagementObjectSearcher("SELECT FreePhysicalMemory FROM Win32_OperatingSystem");
-                    foreach (var o in s2.Get()) { free = Convert.ToUInt64(o["FreePhysicalMemory"] ?? 0) / (1024.0 * 1024); break; }
-                }
-                catch { }
-                return (Total: total, Free: free, Used: Math.Max(0, total - free));
-            }, ct);
-
-            var gpuTask = Task.Run(async () =>
-            {
-                var gpuProfiler = new Klydis.Core.Hardware.GpuProfiler();
-                return await gpuProfiler.GetGpuInfoAsync();
-            }, ct);
-
-            await Task.WhenAll(cpuTask, ramTask, gpuTask);
-
-            var cpu = await cpuTask;
-            sb.AppendLine($"**CPU:** {cpu.Name} ({cpu.Cores} Cores / {cpu.Logical} Logical Threads)");
-
-            var ram = await ramTask;
-            sb.AppendLine($"**RAM:** {ram.Used:0.0} GB used / {ram.Total:0.0} GB total ({ram.Free:0.0} GB free)");
-            sb.AppendLine($"**Klydis Working Set:** {Environment.WorkingSet / (1024 * 1024)} MB");
-            sb.AppendLine();
-
-            // 3. GPU Telemetry
-            var gpu = await gpuTask;
             sb.AppendLine("#### GPU & Graphics Acceleration");
-            if (gpu != null)
+            foreach (var gpu in rep.Gpus)
             {
-                sb.AppendLine($"* **Name:** {gpu.Name}");
-                sb.AppendLine($"* **VRAM:** {gpu.UsedVramMb} MB used / {gpu.TotalVramMb} MB total ({gpu.FreeVramMb} MB free)");
-                if (gpu.GpuUtilPercent > 0) sb.AppendLine($"* **GPU Core Utilization:** {gpu.GpuUtilPercent}%");
-                if (gpu.Temperature > 0) sb.AppendLine($"* **Temperature:** {gpu.Temperature}°C");
-                if (!string.IsNullOrEmpty(gpu.ComputeCapability)) sb.AppendLine($"* **Compute Capability:** {gpu.ComputeCapability}");
-                if (!string.IsNullOrEmpty(gpu.DriverVersion)) sb.AppendLine($"* **Driver Version:** {gpu.DriverVersion}");
+                sb.AppendLine($"* **GPU:** {gpu.Model} | VRAM: {gpu.UsedVramMb:0} MB used / {gpu.TotalVramMb:0} MB total ({gpu.FreeVramMb:0} MB free)");
+                if (!string.IsNullOrEmpty(gpu.DriverVersion)) sb.AppendLine($"  Driver: {gpu.DriverVersion} | Compute: {gpu.ComputeCapability ?? "N/A"}");
             }
-            else
+            if (rep.Temperatures.GpuTemperatureCelsius.HasValue)
             {
-                sb.AppendLine("* **Name:** None detected / standard display adapter");
+                sb.AppendLine($"* **GPU Core Temp:** {rep.Temperatures.GpuTemperatureCelsius.Value}°C");
             }
             sb.AppendLine();
 
-            // 4. Disks & Storage
             sb.AppendLine("#### Storage Drives");
-            foreach (var d in DriveInfo.GetDrives().Where(d => d.IsReady))
+            foreach (var d in rep.Disks.Drives)
             {
-                double totalGb = d.TotalSize / (1024.0 * 1024 * 1024);
-                double freeGb = d.TotalFreeSpace / (1024.0 * 1024 * 1024);
-                double pctUsed = totalGb > 0 ? ((totalGb - freeGb) / totalGb) * 100 : 0;
-                sb.AppendLine($"* **Drive {d.Name}** ({d.DriveFormat}): {freeGb:0.0} GB free of {totalGb:0.0} GB ({pctUsed:0.0}% used)");
+                sb.AppendLine($"* **Drive {d.Name}** [{d.Format}] {d.VolumeLabel}: {d.FreeGb:0.0} GB free of {d.TotalGb:0.0} GB ({d.UtilizationPercent}% used)");
             }
-            sb.AppendLine();
 
-            // 5. Active Processes Snapshot
-            var procs = Process.GetProcesses();
-            sb.AppendLine($"**Active Processes:** {procs.Length} processes currently running");
+            return new ToolResult("system_report", true, sb.ToString().TrimEnd(), null);
         }
         catch (Exception ex)
         {
-            sb.AppendLine($"\n[Telemetry query notice: {ex.Message}]");
+            return new ToolResult("system_report", false, string.Empty, $"Failed to generate system report: {ex.Message}");
         }
-
-        return new ToolResult("system_report", true, sb.ToString().TrimEnd(), null);
     }
 
-    private Task<ToolResult> GetSystemCpuMetricsAsync(CancellationToken ct)
+    private async Task<ToolResult> GetSystemCpuInfoAsync(CancellationToken ct)
     {
         try
         {
-            string name = "Unknown CPU";
-            int cores = Environment.ProcessorCount;
-            int logical = Environment.ProcessorCount;
-            uint maxClockSpeed = 0;
-            ushort? loadPercentage = null;
-
-            using (var searcher = new ManagementObjectSearcher("SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, LoadPercentage FROM Win32_Processor"))
-            {
-                foreach (var obj in searcher.Get())
-                {
-                    name = obj["Name"]?.ToString()?.Trim() ?? name;
-                    cores = Convert.ToInt32(obj["NumberOfCores"] ?? cores);
-                    logical = Convert.ToInt32(obj["NumberOfLogicalProcessors"] ?? logical);
-                    maxClockSpeed = Convert.ToUInt32(obj["MaxClockSpeed"] ?? 0);
-                    if (obj["LoadPercentage"] != null)
-                    {
-                        loadPercentage = Convert.ToUInt16(obj["LoadPercentage"]);
-                    }
-                    break;
-                }
-            }
-
+            var cpu = await _systemDiagnostics.GetCpuInfoAsync(ct);
             var sb = new StringBuilder();
-            sb.AppendLine($"**CPU Model:** {name}");
-            sb.AppendLine($"**Cores / Logical Processors:** {cores} Cores, {logical} Threads");
-            if (loadPercentage.HasValue) sb.AppendLine($"**Current CPU Utilization:** {loadPercentage.Value}%");
-            if (maxClockSpeed > 0) sb.AppendLine($"**Base / Max Clock:** {maxClockSpeed} MHz");
-            sb.AppendLine($"**Logical Processor Count (Environment):** {Environment.ProcessorCount}");
-            sb.AppendLine($"**Current App Process Affinity Count:** {Environment.ProcessorCount}");
+            sb.AppendLine($"**CPU Model:** {cpu.Model}");
+            sb.AppendLine($"**Cores / Processors:** {cpu.PhysicalCores} Physical Cores, {cpu.LogicalProcessors} Logical Processors (Sockets: {cpu.Sockets})");
+            sb.AppendLine($"**Architecture:** {cpu.Architecture}");
+            if (cpu.MaxClockSpeedMHz > 0) sb.AppendLine($"**Max Clock Speed:** {cpu.MaxClockSpeedMHz} MHz");
 
-            return Task.FromResult(new ToolResult("system_cpu_metrics", true, sb.ToString().TrimEnd(), null));
+            return new ToolResult("system_cpu_info", true, sb.ToString().TrimEnd(), null);
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new ToolResult("system_cpu_metrics", false, string.Empty, $"Failed to retrieve CPU metrics: {ex.Message}"));
+            return new ToolResult("system_cpu_info", false, string.Empty, $"Failed to retrieve CPU info: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemCpuUsageAsync(CancellationToken ct)
+    {
+        try
+        {
+            var usage = await _systemDiagnostics.GetCpuUsageAsync(ct);
+            var sb = new StringBuilder();
+            sb.AppendLine($"**Current Total CPU Utilization:** {usage.TotalUtilizationPercent}%");
+            sb.AppendLine($"**Klydis Process CPU Consumption:** {usage.ProcessCpuPercent}%");
+
+            return new ToolResult("system_cpu_usage", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_cpu_usage", false, string.Empty, $"Failed to retrieve CPU usage: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemCpuMetricsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var cpuTask = _systemDiagnostics.GetCpuInfoAsync(ct);
+            var usageTask = _systemDiagnostics.GetCpuUsageAsync(ct);
+            await Task.WhenAll(cpuTask, usageTask);
+
+            var cpu = await cpuTask;
+            var usage = await usageTask;
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"**CPU Model:** {cpu.Model}");
+            sb.AppendLine($"**Cores / Logical Processors:** {cpu.PhysicalCores} Cores, {cpu.LogicalProcessors} Threads");
+            sb.AppendLine($"**Current CPU Utilization:** {usage.TotalUtilizationPercent}%");
+            if (cpu.MaxClockSpeedMHz > 0) sb.AppendLine($"**Base / Max Clock:** {cpu.MaxClockSpeedMHz} MHz");
+            sb.AppendLine($"**Architecture:** {cpu.Architecture}");
+            sb.AppendLine($"**Process CPU Consumption:** {usage.ProcessCpuPercent}%");
+
+            return new ToolResult("system_cpu_metrics", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_cpu_metrics", false, string.Empty, $"Failed to retrieve CPU metrics: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemGpuInfoAsync(CancellationToken ct)
+    {
+        try
+        {
+            var gpus = await _systemDiagnostics.GetGpuInfoAsync(ct);
+            var sb = new StringBuilder();
+            sb.AppendLine($"### Installed GPU Devices ({gpus.Count})");
+            foreach (var gpu in gpus)
+            {
+                sb.AppendLine($"* **Device:** {gpu.Model}");
+                sb.AppendLine($"  **VRAM:** {gpu.UsedVramMb:0} MB used / {gpu.TotalVramMb:0} MB total ({gpu.FreeVramMb:0} MB free)");
+                if (!string.IsNullOrEmpty(gpu.DriverVersion)) sb.AppendLine($"  **Driver:** {gpu.DriverVersion}");
+                if (!string.IsNullOrEmpty(gpu.ComputeCapability)) sb.AppendLine($"  **Compute Capability:** {gpu.ComputeCapability}");
+            }
+
+            return new ToolResult("system_gpu_info", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_gpu_info", false, string.Empty, $"Failed to retrieve GPU info: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemGpuUsageAsync(CancellationToken ct)
+    {
+        try
+        {
+            var usage = await _systemDiagnostics.GetGpuUsageAsync(ct);
+            if (usage == null)
+            {
+                return new ToolResult("system_gpu_usage", true, "GPU load telemetry is unavailable (standard display adapter or non-NVIDIA GPU).", null);
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"**GPU Core Utilization:** {usage.UtilizationPercent}%");
+            sb.AppendLine($"**GPU Memory Utilization:** {usage.MemoryUtilizationPercent}%");
+            if (usage.TemperatureCelsius > 0) sb.AppendLine($"**GPU Core Temperature:** {usage.TemperatureCelsius}°C");
+            if (usage.PowerUsageWatts > 0) sb.AppendLine($"**GPU Power Consumption:** {usage.PowerUsageWatts} W");
+
+            return new ToolResult("system_gpu_usage", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_gpu_usage", false, string.Empty, $"Failed to retrieve GPU usage: {ex.Message}");
         }
     }
 
@@ -2004,21 +2108,22 @@ public class ToolExecutor(
     {
         try
         {
-            var gpuProfiler = new Klydis.Core.Hardware.GpuProfiler();
-            var gpu = await gpuProfiler.GetGpuInfoAsync();
-
-            if (gpu == null)
-            {
-                return new ToolResult("system_gpu_metrics", true, "**GPU Device:** None detected or standard display adapter.", null);
-            }
+            var gpus = await _systemDiagnostics.GetGpuInfoAsync(ct);
+            var usage = await _systemDiagnostics.GetGpuUsageAsync(ct);
 
             var sb = new StringBuilder();
-            sb.AppendLine($"**GPU Device:** {gpu.Name}");
-            sb.AppendLine($"**VRAM:** {gpu.UsedVramMb} MB used / {gpu.TotalVramMb} MB total ({gpu.FreeVramMb} MB free)");
-            if (gpu.GpuUtilPercent > 0) sb.AppendLine($"**GPU Utilization:** {gpu.GpuUtilPercent}%");
-            if (gpu.Temperature > 0) sb.AppendLine($"**Temperature:** {gpu.Temperature}°C");
-            if (!string.IsNullOrEmpty(gpu.ComputeCapability)) sb.AppendLine($"**Compute Capability:** {gpu.ComputeCapability}");
-            if (!string.IsNullOrEmpty(gpu.DriverVersion)) sb.AppendLine($"**Driver Version:** {gpu.DriverVersion}");
+            foreach (var gpu in gpus)
+            {
+                sb.AppendLine($"**GPU Device:** {gpu.Model}");
+                sb.AppendLine($"**VRAM:** {gpu.UsedVramMb:0} MB used / {gpu.TotalVramMb:0} MB total ({gpu.FreeVramMb:0} MB free)");
+                if (usage != null)
+                {
+                    sb.AppendLine($"**GPU Utilization:** {usage.UtilizationPercent}%");
+                    if (usage.TemperatureCelsius > 0) sb.AppendLine($"**Temperature:** {usage.TemperatureCelsius}°C");
+                }
+                if (!string.IsNullOrEmpty(gpu.ComputeCapability)) sb.AppendLine($"**Compute Capability:** {gpu.ComputeCapability}");
+                if (!string.IsNullOrEmpty(gpu.DriverVersion)) sb.AppendLine($"**Driver Version:** {gpu.DriverVersion}");
+            }
 
             return new ToolResult("system_gpu_metrics", true, sb.ToString().TrimEnd(), null);
         }
@@ -2028,92 +2133,101 @@ public class ToolExecutor(
         }
     }
 
-    private Task<ToolResult> GetSystemMemoryMetricsAsync(CancellationToken ct)
+    private async Task<ToolResult> GetSystemMemoryMetricsAsync(CancellationToken ct)
     {
         try
         {
-            double totalRamGb = 0;
-            double availableRamGb = 0;
-            using (var s1 = new ManagementObjectSearcher("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem"))
-            {
-                foreach (var o in s1.Get())
-                {
-                    totalRamGb = Convert.ToUInt64(o["TotalPhysicalMemory"] ?? 0) / (1024.0 * 1024 * 1024);
-                    break;
-                }
-            }
-            using (var s2 = new ManagementObjectSearcher("SELECT FreePhysicalMemory FROM Win32_OperatingSystem"))
-            {
-                foreach (var o in s2.Get())
-                {
-                    availableRamGb = Convert.ToUInt64(o["FreePhysicalMemory"] ?? 0) / (1024.0 * 1024);
-                    break;
-                }
-            }
-
-            double usedRamGb = Math.Max(0, totalRamGb - availableRamGb);
-            double pctUsed = totalRamGb > 0 ? (usedRamGb / totalRamGb) * 100 : 0;
-
+            var mem = await _systemDiagnostics.GetMemoryAsync(ct);
             var sb = new StringBuilder();
-            sb.AppendLine($"**Total Physical Memory:** {totalRamGb:0.00} GB");
-            sb.AppendLine($"**Available / Free Memory:** {availableRamGb:0.00} GB");
-            sb.AppendLine($"**Used Memory:** {usedRamGb:0.00} GB ({pctUsed:0.0}% used)");
-            sb.AppendLine($"**Process Working Set:** {Environment.WorkingSet / (1024 * 1024)} MB");
+            sb.AppendLine($"**Total Physical Memory:** {mem.TotalPhysicalGb:0.00} GB");
+            sb.AppendLine($"**Available / Free Memory:** {mem.AvailableGb:0.00} GB");
+            sb.AppendLine($"**Used Memory:** {mem.UsedGb:0.00} GB ({mem.UtilizationPercent}% used)");
+            sb.AppendLine($"**Process Working Set:** {mem.ProcessWorkingSetMb:0.0} MB");
 
-            return Task.FromResult(new ToolResult("system_memory_metrics", true, sb.ToString().TrimEnd(), null));
+            return new ToolResult("system_memory_metrics", true, sb.ToString().TrimEnd(), null);
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new ToolResult("system_memory_metrics", false, string.Empty, $"Failed to retrieve Memory metrics: {ex.Message}"));
+            return new ToolResult("system_memory_metrics", false, string.Empty, $"Failed to retrieve memory metrics: {ex.Message}");
         }
     }
 
-    private Task<ToolResult> GetSystemDiskMetricsAsync(CancellationToken ct)
+    private async Task<ToolResult> GetSystemDiskMetricsAsync(CancellationToken ct)
     {
         try
         {
-            var drives = DriveInfo.GetDrives().Where(d => d.IsReady).ToList();
+            var disks = await _systemDiagnostics.GetDisksAsync(ct);
             var sb = new StringBuilder();
             sb.AppendLine("### Storage & Disk Metrics");
-            foreach (var d in drives)
+            foreach (var d in disks.Drives)
             {
-                double totalGb = d.TotalSize / (1024.0 * 1024 * 1024);
-                double freeGb = d.TotalFreeSpace / (1024.0 * 1024 * 1024);
-                double usedGb = totalGb - freeGb;
-                double pctUsed = totalGb > 0 ? (usedGb / totalGb) * 100 : 0;
-                sb.AppendLine($"* **Drive {d.Name}** [{d.DriveFormat}] {d.VolumeLabel}: {freeGb:0.0} GB free of {totalGb:0.0} GB ({pctUsed:0.0}% used)");
+                sb.AppendLine($"* **Drive {d.Name}** [{d.Format}] {d.VolumeLabel}: {d.FreeGb:0.0} GB free of {d.TotalGb:0.0} GB ({d.UtilizationPercent}% used)");
             }
+            sb.AppendLine($"**Total Capacity:** {disks.TotalCapacityGb:0.0} GB ({disks.TotalFreeGb:0.0} GB free total)");
 
-            return Task.FromResult(new ToolResult("system_disk_metrics", true, sb.ToString().TrimEnd(), null));
+            return new ToolResult("system_disk_metrics", true, sb.ToString().TrimEnd(), null);
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new ToolResult("system_disk_metrics", false, string.Empty, $"Failed to retrieve Disk metrics: {ex.Message}"));
+            return new ToolResult("system_disk_metrics", false, string.Empty, $"Failed to retrieve disk metrics: {ex.Message}");
         }
     }
 
-    private Task<ToolResult> GetSystemOsInfoAsync(CancellationToken ct)
+    private async Task<ToolResult> GetSystemOsInfoAsync(CancellationToken ct)
     {
         try
         {
-            var sb = new StringBuilder();
-            sb.AppendLine($"**Operating System:** {Environment.OSVersion}");
-            sb.AppendLine($"**Architecture:** {(Environment.Is64BitOperatingSystem ? "64-bit OS" : "32-bit OS")}, {(Environment.Is64BitProcess ? "64-bit Process" : "32-bit Process")}");
-            sb.AppendLine($"**Machine Name:** {Environment.MachineName}");
-            sb.AppendLine($"**User Domain / Name:** {Environment.UserDomainName}\\{Environment.UserName}");
-            sb.AppendLine($"**System Directory:** {Environment.SystemDirectory}");
-            sb.AppendLine($"**CLR Runtime Version:** {Environment.Version}");
-            sb.AppendLine($"**System Up Time:** {TimeSpan.FromMilliseconds(Environment.TickCount64):d\\.hh\\:mm\\:ss}");
+            var os = await _systemDiagnostics.GetOperatingSystemAsync(ct);
+            var uptime = await _systemDiagnostics.GetUptimeAsync(ct);
 
-            return Task.FromResult(new ToolResult("system_os_info", true, sb.ToString().TrimEnd(), null));
+            var sb = new StringBuilder();
+            sb.AppendLine($"**Operating System:** {os.OsName}");
+            sb.AppendLine($"**Version / Build:** {os.Version} (Build {os.BuildNumber})");
+            sb.AppendLine($"**Architecture:** {os.Architecture}");
+            sb.AppendLine($"**Machine Name:** {os.MachineName}");
+            sb.AppendLine($"**User Account:** {os.UserName}");
+            sb.AppendLine($"**System Up Time:** {uptime.FormattedUptime} (Boot: {uptime.SystemBootTimeUtc:yyyy-MM-dd HH:mm:ss} UTC)");
+
+            return new ToolResult("system_os_info", true, sb.ToString().TrimEnd(), null);
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new ToolResult("system_os_info", false, string.Empty, $"Failed to retrieve OS info: {ex.Message}"));
+            return new ToolResult("system_os_info", false, string.Empty, $"Failed to retrieve OS info: {ex.Message}");
         }
     }
 
-    private Task<ToolResult> GetSystemProcessesAsync(ToolCallRequest request, CancellationToken ct)
+    private async Task<ToolResult> GetSystemTemperaturesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var temps = await _systemDiagnostics.GetTemperaturesAsync(ct);
+            var sb = new StringBuilder();
+            sb.AppendLine("### System Temperature Sensors");
+            if (temps.CpuTemperatureCelsius.HasValue) sb.AppendLine($"* **CPU Thermal Zone:** {temps.CpuTemperatureCelsius.Value}°C");
+            if (temps.GpuTemperatureCelsius.HasValue) sb.AppendLine($"* **GPU Core:** {temps.GpuTemperatureCelsius.Value}°C");
+            if (temps.SensorReadings != null)
+            {
+                foreach (var (k, v) in temps.SensorReadings)
+                {
+                    if (k != "CPU Thermal Zone" && k != "GPU Core")
+                        sb.AppendLine($"* **{k}:** {v}°C");
+                }
+            }
+
+            if (!temps.CpuTemperatureCelsius.HasValue && !temps.GpuTemperatureCelsius.HasValue)
+            {
+                sb.AppendLine("* No thermal sensors exposed via standard WMI / NVML interfaces on this hardware.");
+            }
+
+            return new ToolResult("system_temperatures", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_temperatures", false, string.Empty, $"Failed to retrieve temperatures: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemProcessesAsync(ToolCallRequest request, CancellationToken ct)
     {
         try
         {
@@ -2125,42 +2239,107 @@ public class ToolExecutor(
             }
 
             string? filter = GetStringArg(request.Arguments, "filter");
-
-            var allProcs = Process.GetProcesses();
-            var query = allProcs.AsEnumerable();
-
-            if (!string.IsNullOrWhiteSpace(filter))
-            {
-                query = query.Where(p => p.ProcessName.Contains(filter, StringComparison.OrdinalIgnoreCase));
-            }
-
-            var sorted = query
-                .OrderByDescending(p =>
-                {
-                    try { return p.WorkingSet64; } catch { return 0; }
-                })
-                .Take(topN)
-                .ToList();
+            var procs = await _systemDiagnostics.GetProcessesAsync(topN, filter, ct);
 
             var sb = new StringBuilder();
-            sb.AppendLine($"Total Running Processes: {allProcs.Length}");
-            sb.AppendLine($"Showing Top {sorted.Count} Processes (by Memory Working Set):");
+            sb.AppendLine($"Total Running Processes: {procs.TotalProcessCount}");
+            sb.AppendLine($"Showing Top {procs.TopProcesses.Count} Processes (by Memory Working Set):");
             sb.AppendLine();
-            sb.AppendLine("| PID | Process Name | Working Set (MB) |");
-            sb.AppendLine("|---|---|---|");
+            sb.AppendLine("| PID | Process Name | Working Set (MB) | Window Title |");
+            sb.AppendLine("|---|---|---|---|");
 
-            foreach (var p in sorted)
+            foreach (var p in procs.TopProcesses)
             {
-                long memMb = 0;
-                try { memMb = p.WorkingSet64 / (1024 * 1024); } catch { }
-                sb.AppendLine($"| {p.Id} | {p.ProcessName} | {memMb} MB |");
+                sb.AppendLine($"| {p.Pid} | {p.Name} | {p.WorkingSetMb:0.0} MB | {p.MainWindowTitle ?? "—"} |");
             }
 
-            return Task.FromResult(new ToolResult("system_processes", true, sb.ToString().TrimEnd(), null));
+            return new ToolResult("system_processes", true, sb.ToString().TrimEnd(), null);
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new ToolResult("system_processes", false, string.Empty, $"Failed to enumerate processes: {ex.Message}"));
+            return new ToolResult("system_processes", false, string.Empty, $"Failed to enumerate processes: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemGpuProcessesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var gpuProcs = await _systemDiagnostics.GetGpuProcessesAsync(ct);
+            var sb = new StringBuilder();
+            sb.AppendLine($"### Processes Utilizing GPU Acceleration ({gpuProcs.GpuProcesses.Count})");
+            sb.AppendLine();
+            if (gpuProcs.GpuProcesses.Count == 0)
+            {
+                sb.AppendLine("No compute/graphics applications currently reported utilizing dedicated GPU VRAM.");
+            }
+            else
+            {
+                sb.AppendLine("| PID | Process Name | VRAM (MB) |");
+                sb.AppendLine("|---|---|---|");
+                foreach (var p in gpuProcs.GpuProcesses)
+                {
+                    sb.AppendLine($"| {p.Pid} | {p.Name} | {p.UsedVramMb:0.0} MB |");
+                }
+            }
+
+            return new ToolResult("system_gpu_processes", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_gpu_processes", false, string.Empty, $"Failed to retrieve GPU processes: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemUptimeAsync(CancellationToken ct)
+    {
+        try
+        {
+            var up = await _systemDiagnostics.GetUptimeAsync(ct);
+            var sb = new StringBuilder();
+            sb.AppendLine($"**System Uptime:** {up.FormattedUptime}");
+            sb.AppendLine($"**Boot Timestamp:** {up.SystemBootTimeUtc:yyyy-MM-dd HH:mm:ss} UTC");
+
+            return new ToolResult("system_uptime", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_uptime", false, string.Empty, $"Failed to retrieve system uptime: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemHardwareReportAsync(CancellationToken ct)
+    {
+        return await GetSystemReportAsync(ct);
+    }
+
+    private async Task<ToolResult> GetSystemSoftwareReportAsync(CancellationToken ct)
+    {
+        try
+        {
+            var rep = await _systemDiagnostics.GetSoftwareReportAsync(ct);
+            var sb = new StringBuilder();
+            sb.AppendLine("### Comprehensive Software Diagnostic Report");
+            sb.AppendLine();
+            sb.AppendLine($"**Operating System:** {rep.OperatingSystem.OsName} (Build {rep.OperatingSystem.BuildNumber})");
+            sb.AppendLine($"**Machine / User:** {rep.OperatingSystem.MachineName}\\{rep.OperatingSystem.UserName}");
+            sb.AppendLine($"**System Uptime:** {rep.Uptime.FormattedUptime}");
+            sb.AppendLine($"**Total Processes:** {rep.Processes.TotalProcessCount}");
+            sb.AppendLine();
+            if (rep.InstalledRuntimes != null)
+            {
+                sb.AppendLine("#### Runtime Environments");
+                foreach (var r in rep.InstalledRuntimes)
+                {
+                    sb.AppendLine($"* {r}");
+                }
+            }
+
+            return new ToolResult("system_software_report", true, sb.ToString().TrimEnd(), null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_software_report", false, string.Empty, $"Failed to generate software report: {ex.Message}");
         }
     }
 

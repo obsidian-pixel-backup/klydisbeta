@@ -32,12 +32,19 @@ public enum CommandErrorClassification
     CommandNotFound,
     InvalidArgument,
     PermissionDenied,
+    PathNotFound,
     Timeout,
     ProcessCrash,
-    NonZeroExit,
+    ShellSyntaxError,
+    ParserError,
+    ToolUnavailable,
+    NetworkError,
+    AuthenticationError,
+    ResourceLimit,
     OutputLimit,
     WorkingDirectoryInvalid,
     EnvironmentError,
+    NonZeroExit,
     Cancelled,
     Unknown
 }
@@ -79,16 +86,27 @@ public sealed class CommandExecution
         if (lower.Contains("is not recognized as an internal or external command") ||
             lower.Contains("the term '") && lower.Contains("' is not recognized") ||
             lower.Contains("command not found") ||
-            lower.Contains("cannot find the path specified") && lower.Contains("command"))
+            lower.Contains("cannot find the path specified") && lower.Contains("command") ||
+            lower.Contains("no such file or directory") && (lower.Contains("bin") || lower.Contains("exe")))
         {
             return CommandErrorClassification.CommandNotFound;
         }
 
         if (lower.Contains("access is denied") ||
             lower.Contains("permission denied") ||
-            lower.Contains("unauthorizedaccessexception"))
+            lower.Contains("unauthorizedaccessexception") ||
+            lower.Contains("requires elevation") ||
+            lower.Contains("run as administrator"))
         {
             return CommandErrorClassification.PermissionDenied;
+        }
+
+        if (lower.Contains("cannot find path") ||
+            lower.Contains("path does not exist") ||
+            lower.Contains("the system cannot find the path specified") ||
+            lower.Contains("directory not found"))
+        {
+            return CommandErrorClassification.PathNotFound;
         }
 
         if (lower.Contains("working directory does not exist") ||
@@ -97,17 +115,41 @@ public sealed class CommandExecution
             return CommandErrorClassification.WorkingDirectoryInvalid;
         }
 
+        if (lower.Contains("syntax error") ||
+            lower.Contains("unexpected token") ||
+            lower.Contains("parsererror") ||
+            lower.Contains("invalid characters in path") ||
+            lower.Contains("the token '") ||
+            lower.Contains("at line:") && lower.Contains("char:"))
+        {
+            return CommandErrorClassification.ShellSyntaxError;
+        }
+
         if (lower.Contains("missing an argument") ||
             lower.Contains("parameter format not correct") ||
             lower.Contains("invalid parameter") ||
-            lower.Contains("a positional parameter cannot be found"))
+            lower.Contains("a positional parameter cannot be found") ||
+            lower.Contains("cannot bind argument"))
         {
             return CommandErrorClassification.InvalidArgument;
         }
 
-        if (lower.Contains("output exceeded") || lower.Contains("context budget"))
+        if (lower.Contains("output exceeded") || lower.Contains("context budget") || lower.Contains("tool output exceeded"))
         {
             return CommandErrorClassification.OutputLimit;
+        }
+
+        if (lower.Contains("connection refused") ||
+            lower.Contains("network is unreachable") ||
+            lower.Contains("name or service not known") ||
+            lower.Contains("could not resolve host"))
+        {
+            return CommandErrorClassification.NetworkError;
+        }
+
+        if (lower.Contains("out of memory") || lower.Contains("insufficient system resources"))
+        {
+            return CommandErrorClassification.ResourceLimit;
         }
 
         if (exitCode.HasValue && exitCode.Value != 0)
@@ -122,6 +164,33 @@ public sealed class CommandExecution
 
         return CommandErrorClassification.None;
     }
+
+    public static string GetGuidance(CommandErrorClassification classification) => classification switch
+    {
+        CommandErrorClassification.CommandNotFound =>
+            "COMMAND_NOT_FOUND: The executable/cmdlet was not found on this machine. Use a standard PowerShell cmdlet, a native tool, or verify the executable exists in PATH.",
+        CommandErrorClassification.InvalidArgument =>
+            "INVALID_ARGUMENT: A positional or named parameter is invalid or missing. Check parameter names and syntax.",
+        CommandErrorClassification.PermissionDenied =>
+            "PERMISSION_DENIED: Access denied or elevation required. Select an alternative non-privileged command or approach.",
+        CommandErrorClassification.PathNotFound =>
+            "PATH_NOT_FOUND: Target path does not exist. Inspect parent directory with 'list_directory' or verify file path before retrying.",
+        CommandErrorClassification.Timeout =>
+            "TIMEOUT: Command exceeded timeout budget. Split operation into smaller batches or optimize query parameters.",
+        CommandErrorClassification.ShellSyntaxError =>
+            "SHELL_SYNTAX_ERROR: Command syntax is invalid for the shell. Avoid Linux-only syntax on Windows (e.g. 4>/dev/null, head/grep). Write pure PowerShell or CMD syntax.",
+        CommandErrorClassification.OutputLimit =>
+            "OUTPUT_TOO_LARGE: Tool output exceeded context limit. Filter or pipe results (e.g. Select-Object -First 25 or pagination).",
+        CommandErrorClassification.WorkingDirectoryInvalid =>
+            "INVALID_WORKING_DIRECTORY: Specified working directory does not exist. Use valid project directory or omit working_directory.",
+        CommandErrorClassification.NetworkError =>
+            "NETWORK_ERROR: Network resource unreachable. Verify host address and connection.",
+        CommandErrorClassification.ResourceLimit =>
+            "RESOURCE_LIMIT: Operation hit memory or system limit.",
+        CommandErrorClassification.NonZeroExit =>
+            "NON_ZERO_EXIT: Command returned a non-zero exit code. Review stderr output to determine root cause and adjust command parameters.",
+        _ => "COMMAND_FAILED: Review stderr and stdout output to adjust command."
+    };
 }
 
 /// <summary>

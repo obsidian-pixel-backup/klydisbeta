@@ -108,7 +108,10 @@ public partial class HuggingFaceClient
         }
     }
 
-    [GeneratedRegex(@"(?i)Q[0-8]_[A-Z0-9_]+")]
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset Timestamp, List<HfFileInfo> Files)> _modelFilesCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(10);
+
+    [GeneratedRegex(@"(?i)\b(I?Q[0-9]_[A-Z0-9_]+|TQ[0-9]_[A-Z0-9_]+|BF16|FP16|F16|FP32|F32)\b|(?i)(I?Q[0-9]_[A-Z0-9_]+|TQ[0-9]_[A-Z0-9_]+|BF16|FP16|F16|FP32|F32)")]
     private static partial Regex QuantTypeRegex();
 
     [GeneratedRegex(@"(?i)(\d+(?:\.\d+)?[BT])")]
@@ -152,13 +155,6 @@ public partial class HuggingFaceClient
     /// </summary>
     /// <param name="query">The search query.</param>
     /// <param name="limit">The maximum number of results to return.</param>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>A list of model information records.</returns>
-    /// <summary>
-    /// Searches the Hugging Face API for GGUF models.
-    /// </summary>
-    /// <param name="query">The search query.</param>
-    /// <param name="limit">The maximum number of results to return.</param>
     /// <param name="sort">The sort parameter (downloads, likes, etc.).</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A list of model information records.</returns>
@@ -177,20 +173,64 @@ public partial class HuggingFaceClient
 
         var results = new List<HfModelInfo>();
 
-        if (jsonDocs == null) return results;
-
-        foreach (var element in jsonDocs)
+        if (jsonDocs != null)
         {
-            var id = element.GetProperty("id").GetString() ?? string.Empty;
-            
-            // Filter out MTP architectures since they are unsupported by the current LLamaSharp version
-            if (id.Contains("-mtp", StringComparison.OrdinalIgnoreCase) || 
-                id.Contains("mtp-", StringComparison.OrdinalIgnoreCase) || 
-                id.EndsWith("-mtp", StringComparison.OrdinalIgnoreCase))
+            foreach (var element in jsonDocs)
             {
-                continue;
-            }
+                var id = element.GetProperty("id").GetString() ?? string.Empty;
+                
+                // Filter out MTP architectures since they are unsupported by the current LLamaSharp version
+                if (id.Contains("-mtp", StringComparison.OrdinalIgnoreCase) || 
+                    id.Contains("mtp-", StringComparison.OrdinalIgnoreCase) || 
+                    id.EndsWith("-mtp", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
+                var parts = id.Split('/');
+                var author = parts.Length > 1 ? parts[0] : "unknown";
+                var modelName = parts.Length > 1 ? parts[1] : id;
+                var downloads = element.TryGetProperty("downloads", out var dl) ? dl.GetInt32() : 0;
+                var likes = element.TryGetProperty("likes", out var lk) ? lk.GetInt32() : 0;
+                var tags = element.TryGetProperty("tags", out var tg)
+                    ? tg.EnumerateArray().Select(t => t.GetString() ?? string.Empty).ToArray()
+                    : [];
+                
+                var pipelineTag = element.TryGetProperty("pipeline_tag", out var pt) ? pt.GetString() ?? string.Empty : string.Empty;
+
+                var lastModified = element.TryGetProperty("lastModified", out var lm) 
+                    ? lm.GetDateTimeOffset() 
+                    : DateTimeOffset.UtcNow;
+
+                results.Add(new HfModelInfo(id, author, modelName, downloads, likes, lastModified, tags, "", pipelineTag));
+            }
+        }
+
+        // Direct repo lookup fallback if query looks like "author/model" and generic search returned nothing
+        if (results.Count == 0 && !string.IsNullOrWhiteSpace(query) && query.Contains('/') && !query.Contains(' '))
+        {
+            var directModel = await GetModelInfoDirectAsync(query.Trim(), ct);
+            if (directModel != null)
+            {
+                results.Add(directModel);
+            }
+        }
+
+        return results;
+    }
+
+    private async Task<HfModelInfo?> GetModelInfoDirectAsync(string repoId, CancellationToken ct)
+    {
+        try
+        {
+            var url = $"{BaseUrl}/api/models/{repoId}";
+            using var response = await SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Get, url), ct);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var content = await response.Content.ReadAsStringAsync(ct);
+            var element = JsonSerializer.Deserialize<JsonElement>(content);
+
+            var id = element.TryGetProperty("id", out var idProp) ? idProp.GetString() ?? repoId : repoId;
             var parts = id.Split('/');
             var author = parts.Length > 1 ? parts[0] : "unknown";
             var modelName = parts.Length > 1 ? parts[1] : id;
@@ -199,32 +239,164 @@ public partial class HuggingFaceClient
             var tags = element.TryGetProperty("tags", out var tg)
                 ? tg.EnumerateArray().Select(t => t.GetString() ?? string.Empty).ToArray()
                 : [];
-            
             var pipelineTag = element.TryGetProperty("pipeline_tag", out var pt) ? pt.GetString() ?? string.Empty : string.Empty;
-
-            var lastModified = element.TryGetProperty("lastModified", out var lm) 
-                ? lm.GetDateTimeOffset() 
+            var lastModified = element.TryGetProperty("lastModified", out var lm)
+                ? lm.GetDateTimeOffset()
                 : DateTimeOffset.UtcNow;
 
-            results.Add(new HfModelInfo(id, author, modelName, downloads, likes, lastModified, tags, "", pipelineTag));
+            return new HfModelInfo(id, author, modelName, downloads, likes, lastModified, tags, "", pipelineTag);
         }
-
-        return results;
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Direct model lookup failed for {RepoId}", repoId);
+            return null;
+        }
     }
 
     /// <summary>
     /// Lists all GGUF files in a specific model repository.
     /// </summary>
     /// <param name="repoId">The repository ID.</param>
+    /// <param name="forceRefresh">Whether to bypass the in-memory cache.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A list of file information records.</returns>
-    public async Task<List<HfFileInfo>> GetModelFilesAsync(string repoId, CancellationToken ct = default)
+    public async Task<List<HfFileInfo>> GetModelFilesAsync(string repoId, bool forceRefresh = false, CancellationToken ct = default)
     {
-        var url = $"{BaseUrl}/api/models/{repoId}";
+        if (string.IsNullOrWhiteSpace(repoId)) return [];
+
+        if (!forceRefresh && _modelFilesCache.TryGetValue(repoId, out var cached))
+        {
+            if (DateTimeOffset.UtcNow - cached.Timestamp < CacheTtl)
+            {
+                return cached.Files;
+            }
+        }
+
         _logger.LogInformation("Fetching files for repository: {RepoId}", repoId);
 
+        List<HfFileInfo> files;
+        try
+        {
+            // 1. Primary approach: Hugging Face Tree API (recursive=true) on main branch
+            files = await FetchFilesFromTreeApiAsync(repoId, "main", ct);
+
+            // 2. If main branch returns empty, try master branch
+            if (files.Count == 0)
+            {
+                files = await FetchFilesFromTreeApiAsync(repoId, "master", ct);
+            }
+
+            // 3. Fallback approach: Model metadata API with siblings
+            if (files.Count == 0)
+            {
+                files = await FetchFilesFromModelApiAsync(repoId, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch files from tree API for {RepoId}, falling back to model metadata API.", repoId);
+            files = await FetchFilesFromModelApiAsync(repoId, ct);
+        }
+
+        _modelFilesCache[repoId] = (DateTimeOffset.UtcNow, files);
+        return files;
+    }
+
+    /// <summary>
+    /// Overload for backwards compatibility.
+    /// </summary>
+    public Task<List<HfFileInfo>> GetModelFilesAsync(string repoId, CancellationToken ct) =>
+        GetModelFilesAsync(repoId, forceRefresh: false, ct);
+
+    private async Task<List<HfFileInfo>> FetchFilesFromTreeApiAsync(string repoId, string branch, CancellationToken ct)
+    {
+        var url = $"{BaseUrl}/api/models/{repoId}/tree/{branch}?recursive=true";
         using var response = await SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Get, url), ct);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            return [];
+        }
+
+        var content = await response.Content.ReadAsStringAsync(ct);
+        var items = JsonSerializer.Deserialize<JsonElement[]>(content);
+        if (items == null || items.Length == 0)
+        {
+            return [];
+        }
+
+        var files = new List<HfFileInfo>();
+        foreach (var element in items)
+        {
+            if (!element.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "file")
+                continue;
+
+            if (!element.TryGetProperty("path", out var pathProp))
+                continue;
+
+            var filename = pathProp.GetString();
+            if (string.IsNullOrWhiteSpace(filename) ||
+                !filename.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) ||
+                filename.Contains("-mtp", StringComparison.OrdinalIgnoreCase) ||
+                filename.Contains("mtp-", StringComparison.OrdinalIgnoreCase) ||
+                repoId.Contains("-mtp", StringComparison.OrdinalIgnoreCase) ||
+                repoId.Contains("mtp-", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            long sizeBytes = 0;
+            string sha256 = string.Empty;
+
+            if (element.TryGetProperty("lfs", out var lfsProp) && lfsProp.ValueKind == JsonValueKind.Object)
+            {
+                if (lfsProp.TryGetProperty("size", out var lfsSizeProp) && lfsSizeProp.ValueKind == JsonValueKind.Number)
+                {
+                    sizeBytes = lfsSizeProp.GetInt64();
+                }
+                if (lfsProp.TryGetProperty("oid", out var oidProp) && oidProp.ValueKind == JsonValueKind.String)
+                {
+                    sha256 = oidProp.GetString() ?? string.Empty;
+                }
+                else if (lfsProp.TryGetProperty("sha256", out var shaProp) && shaProp.ValueKind == JsonValueKind.String)
+                {
+                    sha256 = shaProp.GetString() ?? string.Empty;
+                }
+            }
+
+            if (sizeBytes <= 0 && element.TryGetProperty("size", out var sizeProp) && sizeProp.ValueKind == JsonValueKind.Number)
+            {
+                sizeBytes = sizeProp.GetInt64();
+            }
+
+            if (string.IsNullOrEmpty(sha256) && element.TryGetProperty("oid", out var fileOidProp) && fileOidProp.ValueKind == JsonValueKind.String)
+            {
+                var oid = fileOidProp.GetString();
+                if (!string.IsNullOrEmpty(oid) && oid.Length == 64)
+                {
+                    sha256 = oid;
+                }
+            }
+
+            var quantMatch = QuantTypeRegex().Match(filename);
+            var quantType = quantMatch.Success ? quantMatch.Value.ToUpperInvariant() : "Unknown";
+
+            var paramMatch = ParameterSizeRegex().Match(repoId + "/" + filename);
+            var paramSize = paramMatch.Success ? paramMatch.Value.ToUpperInvariant() : "Unknown";
+
+            files.Add(new HfFileInfo(filename, sizeBytes, quantType, paramSize, sha256));
+        }
+
+        return files;
+    }
+
+    private async Task<List<HfFileInfo>> FetchFilesFromModelApiAsync(string repoId, CancellationToken ct)
+    {
+        var url = $"{BaseUrl}/api/models/{repoId}";
+        using var response = await SendWithRetryAsync(() => new HttpRequestMessage(HttpMethod.Get, url), ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            return [];
+        }
 
         var content = await response.Content.ReadAsStringAsync(ct);
         var root = JsonSerializer.Deserialize<JsonElement>(content);
@@ -262,8 +434,6 @@ public partial class HuggingFaceClient
                 sizeBytes = lfsSizeProp.GetInt64();
             }
 
-            // LFS files publish a SHA-256; capture it so downloads can be verified for
-            // integrity (catches truncated/corrupted partial files on resume).
             if (element.TryGetProperty("lfs", out var lfsShaProp) && lfsShaProp.ValueKind == JsonValueKind.Object &&
                 lfsShaProp.TryGetProperty("sha256", out var shaProp) && shaProp.ValueKind == JsonValueKind.String)
             {
@@ -276,10 +446,10 @@ public partial class HuggingFaceClient
             }
 
             var quantMatch = QuantTypeRegex().Match(filename);
-            var quantType = quantMatch.Success ? quantMatch.Value : "Unknown";
+            var quantType = quantMatch.Success ? quantMatch.Value.ToUpperInvariant() : "Unknown";
 
             var paramMatch = ParameterSizeRegex().Match(repoId + "/" + filename);
-            var paramSize = paramMatch.Success ? paramMatch.Value : "Unknown";
+            var paramSize = paramMatch.Success ? paramMatch.Value.ToUpperInvariant() : "Unknown";
 
             files.Add(new HfFileInfo(filename, sizeBytes, quantType, paramSize, sha256));
         }

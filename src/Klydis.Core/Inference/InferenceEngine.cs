@@ -895,7 +895,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
         Task? generationTask = null;
         try
         {
-            await _modelLock.WaitAsync(ct);
+            await _modelLock.WaitAsync(generationToken);
         }
         catch
         {
@@ -1597,7 +1597,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             try
             {
                 // Yield tokens from the channel
-                await foreach (var token in channel.Reader.ReadAllAsync(ct))
+                await foreach (var token in channel.Reader.ReadAllAsync(generationToken))
                 {
                     yield return token;
                 }

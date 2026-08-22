@@ -661,41 +661,86 @@ public partial class ModelLibraryViewModel : ObservableObject
             IsThinking = isThinking
         };
 
-        Klydis.Core.Diagnostics.FireAndForget.Observe(LoadGgufFilesAsync(card, info.RepoId), operation: nameof(LoadGgufFilesAsync));
+        card.LoadFilesAction = async (targetCard, forceReload) =>
+        {
+            await LoadGgufFilesAsync(targetCard, info.RepoId, forceReload);
+        };
+
         return card;
     }
 
-    private async Task LoadGgufFilesAsync(HfModelCardViewModel card, string repoId)
+    private async Task LoadGgufFilesAsync(HfModelCardViewModel card, string repoId, bool forceReload = false)
     {
+        if (card.IsLoadingFiles) return;
+
+        void SetLoadingState(bool loading, string? error = null)
+        {
+            Action act = () =>
+            {
+                card.IsLoadingFiles = loading;
+                card.LoadError = error;
+            };
+            if (System.Windows.Application.Current != null)
+                System.Windows.Application.Current.Dispatcher.Invoke(act);
+            else
+                act();
+        }
+
+        SetLoadingState(true, null);
+
         try
         {
-            var files = await _hfClient.GetModelFilesAsync(repoId);
+            var files = await _hfClient.GetModelFilesAsync(repoId, forceReload);
             var sortedFiles = files.OrderByDescending(f => 
-                f.QuantType.Contains("Q4_K_M", StringComparison.OrdinalIgnoreCase) ? 3 :
+                f.QuantType.Contains("Q4_K_M", StringComparison.OrdinalIgnoreCase) ? 4 :
+                f.QuantType.Contains("Q5_K_M", StringComparison.OrdinalIgnoreCase) ? 3 :
                 f.QuantType.Contains("Q4_0", StringComparison.OrdinalIgnoreCase) ? 2 :
                 f.QuantType.Contains("Q4", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
-                .ThenBy(f => f.SizeBytes);
+                .ThenBy(f => f.SizeBytes)
+                .ToList();
 
-            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+            Action updateUi = () =>
             {
+                card.GgufFiles.Clear();
                 foreach (var file in sortedFiles)
                 {
                     long estimatedVramMb = (long)((file.SizeBytes / (1024.0 * 1024.0)) * 1.2);
                     bool fitsInVram = VramTotalMb == 0 || estimatedVramMb <= VramTotalMb;
 
+                    string sizeText = file.SizeBytes > 0
+                        ? (file.SizeBytes / (1024.0 * 1024.0 * 1024.0)).ToString("F2") + " GB"
+                        : "Unknown size";
+
                     card.GgufFiles.Add(new HfFileViewModel
                     {
                         FileName = file.Filename,
-                        Size = (file.SizeBytes / (1024.0 * 1024.0 * 1024.0)).ToString("F2") + " GB",
+                        Size = sizeText,
                         QuantType = file.QuantType,
                         RepoId = repoId,
                         CanFitInVram = fitsInVram,
                         Sha256 = file.Sha256
                     });
                 }
-            });
+
+                card.HasLoadedFiles = true;
+                card.IsLoadingFiles = false;
+                card.LoadError = null;
+            };
+
+            if (System.Windows.Application.Current != null)
+            {
+                System.Windows.Application.Current.Dispatcher.Invoke(updateUi);
+            }
+            else
+            {
+                updateUi();
+            }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to load GGUF files for {repoId}: {ex.Message}");
+            SetLoadingState(false, "Failed to load files from Hugging Face.");
+        }
     }
 
     [RelayCommand]
@@ -836,9 +881,17 @@ public partial class ModelLibraryViewModel : ObservableObject
             {
                 if (ct.IsCancellationRequested) return;
                 HfResults.Clear();
+                int idx = 0;
                 foreach (var item in rankedList)
                 {
-                    HfResults.Add(CreateHfCard(item));
+                    var card = CreateHfCard(item);
+                    HfResults.Add(card);
+                    // Pre-fetch top 3 results for instant responsiveness without flooding
+                    if (idx < 3)
+                    {
+                        Klydis.Core.Diagnostics.FireAndForget.Observe(card.LoadFilesCommand.ExecuteAsync(false), operation: nameof(card.LoadFilesCommand));
+                    }
+                    idx++;
                 }
             };
 

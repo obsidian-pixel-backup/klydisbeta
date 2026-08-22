@@ -645,7 +645,7 @@ public class SystemPromptManager
         }
 
         // Always inject real host facts (OS, workspace root, user home) so conversational turns never hallucinate.
-        AppendHostEnvironmentContext(sb);
+        AppendHostEnvironmentContext(sb, includeActionSpace: false);
 
         return sb.ToString().Trim();
     }
@@ -664,24 +664,50 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
 - Your humor is genuine and never mean-spirited. When the user's tone turns serious, drop the playfulness immediately and match the moment.";
     }
 
-    private static void AppendHostEnvironmentContext(StringBuilder sb)
+    private static void AppendHostEnvironmentContext(StringBuilder sb, bool includeActionSpace = true)
     {
         string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         string currentDir = Environment.CurrentDirectory;
         string userName = Environment.UserName;
         string osName = Environment.OSVersion.ToString();
+        string arch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
+
+        if (!includeActionSpace)
+        {
+            sb.AppendLine();
+            sb.AppendLine("### HOST ENVIRONMENT CONTEXT");
+            sb.AppendLine($"- Host: {osName} ({arch}), User: {userName}");
+            sb.AppendLine($"- Active Workspace: {currentDir}");
+            sb.AppendLine();
+            return;
+        }
 
         sb.AppendLine();
         sb.AppendLine("### HOST ENVIRONMENT & ACTION-SPACE CONTRACT");
-        sb.AppendLine($"- LOCAL_MACHINE_ACCESS = AVAILABLE (Host: {osName}, Elev: Standard/Admin)");
-        sb.AppendLine($"- Operating System: {osName} (PowerShell & Cmd available via run_command)");
-        sb.AppendLine($"- Active Workspace Root: {currentDir}");
-        sb.AppendLine($"- User Home Directory: {userProfile}");
-        sb.AppendLine($"- User Account Name: {userName}");
+        sb.AppendLine("```json");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"environment\": {");
+        sb.AppendLine("    \"os\": \"windows\",");
+        sb.AppendLine($"    \"os_version\": \"{osName}\",");
+        sb.AppendLine($"    \"architecture\": \"{arch}\",");
+        sb.AppendLine("    \"shells\": [\"powershell\", \"cmd\"],");
+        sb.AppendLine("    \"default_shell\": \"powershell\",");
+        sb.AppendLine($"    \"working_directory\": \"{currentDir.Replace("\\", "\\\\")}\",");
+        sb.AppendLine($"    \"user_profile\": \"{userProfile.Replace("\\", "\\\\")}\"");
+        sb.AppendLine("  },");
+        sb.AppendLine("  \"capabilities\": {");
+        sb.AppendLine("    \"typed_system_tools\": [\"system_cpu_info\", \"system_cpu_usage\", \"system_gpu_info\", \"system_gpu_usage\", \"system_memory\", \"system_disks\", \"system_os\", \"system_temperatures\", \"system_processes\", \"system_gpu_processes\", \"system_uptime\", \"system_hardware_report\", \"system_software_report\"],");
+        sb.AppendLine("    \"shell_tool\": \"run_command (powershell, cmd)\",");
+        sb.AppendLine("    \"filesystem_tools\": [\"read_file\", \"write_file\", \"edit_file\", \"list_directory\", \"search_files\", \"replace_lines\", \"apply_patch\"]");
+        sb.AppendLine("  }");
+        sb.AppendLine("}");
+        sb.AppendLine("```");
+        sb.AppendLine($"- LOCAL_MACHINE_ACCESS = AVAILABLE (Host: {osName}, Architecture: {arch}, User: {userName})");
+        sb.AppendLine("- Hierarchy: Prefer typed native system tools (`system_*`) > specialized tools > raw `run_command` shell commands.");
+        sb.AppendLine("- Operating System: Windows. PowerShell is the default shell for `run_command`. Do NOT use Linux syntax (e.g. `4>/dev/null`, `head`, `grep`, `cat /proc/*`).");
         sb.AppendLine("- You have active, verified access to local machine capabilities, hardware telemetry, filesystem, and processes.");
         sb.AppendLine("- PROHIBITED: NEVER claim 'I cannot access your local machine/hardware' or 'as an AI I do not have access'. You MUST execute the corresponding tool.");
-        sb.AppendLine("- When referencing paths or creating files, use actual valid paths on this machine. Never hallucinate user directories.");
-        sb.AppendLine("- Epistemic Rule: You cannot answer environmental, hardware, CPU, RAM, GPU, disk, or network queries from internal inference. You MUST obtain real evidence via tools (system_report, system_cpu_metrics, system_gpu_metrics, system_memory_metrics, system_disk_metrics, system_os_info, system_processes, run_command). If tools are unavailable or no evidence exists, state UNKNOWN.");
+        sb.AppendLine("- Epistemic Rule: You cannot answer environmental, hardware, CPU, RAM, GPU, disk, or network queries from internal inference. You MUST obtain real evidence via tools. If tools are unavailable or no evidence exists, state UNKNOWN.");
         sb.AppendLine("- Epistemic Rule: Accuracy > Completeness > Brevity. Never simulate or invent facts.");
         sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, replace_lines, run_command). Distinguish confirmed requirements from creative suggestions.");
         sb.AppendLine();

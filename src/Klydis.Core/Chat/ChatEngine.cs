@@ -1222,6 +1222,11 @@ public class ChatEngine(
                         break;
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    logger.LogInformation("StreamResponseCoreAsync cancelled for session {SessionId}.", generatingSessionId);
+                    break;
+                }
                 catch (Exception ex)
                 {
                     caughtEx = ex;
@@ -1603,6 +1608,12 @@ public class ChatEngine(
 
         while (iterationCount < maxIterations)
         {
+            if (ct.IsCancellationRequested || stallCts.Token.IsCancellationRequested)
+            {
+                logger.LogInformation("Turn cancelled; terminating agent loop.");
+                yield break;
+            }
+
             iterationCount++;
             lastTurnActivityUtc = DateTime.UtcNow;
 
@@ -2511,6 +2522,12 @@ public class ChatEngine(
                 }
             }
         }
+        
+        if (ct.IsCancellationRequested || stallCts.Token.IsCancellationRequested || inferenceEngine.LastGenerationWasCancelled)
+        {
+            logger.LogInformation("Generation was cancelled; terminating turn immediately.");
+            yield break;
+        }
 
         if (generationStalled)
         {
@@ -3075,31 +3092,18 @@ public class ChatEngine(
                     {
                         _consecutiveBlockedToolCalls++;
                         logger.LogWarning("Repeated tool call loop detected for {ToolName} (attempt {AttemptCount}).", req.Name, matchCount + 1);
-                        NoteLesson("tool_loop_guardrail", $"Repeated identical tool call '{req.Name}' detected after {matchCount + 1} attempts; tiered guardrail feedback injected.");
+                        NoteLesson("tool_loop_guardrail", $"Repeated identical tool call '{req.Name}' detected after {matchCount + 1} attempts; structured recovery injected.");
 
-                        string guardrailMsg;
                         var cachedResult = matches.LastOrDefault().PriorResult ?? "No prior result cached.";
-                        
-                        // Truncate cached result if excessively long to save context budget
-                        if (cachedResult.Length > 2000)
-                        {
-                            cachedResult = cachedResult.Substring(0, 2000) + "\n...[cached output truncated for length]...";
-                        }
+                        string guardrailMsg = Klydis.Core.Tasks.RecoveryController.BuildRecoveryPayload(
+                            req.Name,
+                            matchCount + 1,
+                            "REPEATED_ATTEMPT",
+                            req.Arguments != null ? new Dictionary<string, object?>(req.Arguments.Select(kv => new KeyValuePair<string, object?>(kv.Key, (object?)kv.Value))) : null,
+                            cachedResult);
 
-                        if (matchCount < tier2Threshold)
+                        if (matchCount >= tier3Threshold)
                         {
-                            // Tier 1: Soft Warning + Cached Output Injection
-                            guardrailMsg = $"[System Warning: Duplicate tool call detected for '{req.Name}' (attempt {matchCount + 1}). Below is the cached result from your previous call. Use this cached data to complete your plan or adjust offset/line arguments to read the next section.\n\n--- CACHED TOOL RESULT ---\n{cachedResult}]";
-                        }
-                        else if (matchCount >= tier2Threshold && matchCount < tier3Threshold)
-                        {
-                            // Tier 2: Hard Block + Suggested Alternatives
-                            guardrailMsg = $"[System ERROR: BLOCKED — Tool '{req.Name}' with identical arguments was attempted {matchCount + 1} times. Execution has been blocked. You MUST NOT call this tool again with these exact parameters.\n\nSuggested Next Steps:\n1. If chunking a large file, update your StartLine/EndLine or ContentOffset parameters to read a DIFFERENT line range or section.\n2. Use the cached result provided in previous messages.\n3. Complete your turn and report findings to the user.\n\n--- CACHED TOOL RESULT ---\n{cachedResult}]";
-                        }
-                        else
-                        {
-                            // Tier 3: Turn Termination — Force loop exit & turn response
-                            guardrailMsg = $"[SYSTEM OVERRIDE: Persistent loop detected on '{req.Name}' after {matchCount + 1} attempts. Tool calling is SUSPENDED for this turn. You MUST now synthesize your final response to the user using your existing context.]";
                             forceTurnTermination = true;
                         }
 
@@ -3309,7 +3313,15 @@ public class ChatEngine(
                             yield return new ChatStreamEvent(ChatStreamEventType.Error, "⚠ The action was blocked because its durable execution record could not be written. It was NOT executed.");
                             continue;
                         }
-                        result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, stallCts.Token, inferenceEngine.CurrentModelPath);
+                        try
+                        {
+                            result = await toolExecutor.ExecuteToolAsync(req, generatingSessionId, stallCts.Token, inferenceEngine.CurrentModelPath);
+                        }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested || stallCts.IsCancellationRequested)
+                        {
+                            logger.LogInformation("Tool execution cancelled for tool {ToolName}; terminating turn.", req.Name);
+                            yield break;
+                        }
                         actionFinalStatus = result.Success
                             ? Klydis.Core.Tasks.ActionExecutionStatus.Succeeded
                             : Klydis.Core.Tasks.ActionExecutionStatus.Failed;

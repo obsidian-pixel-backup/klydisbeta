@@ -1636,12 +1636,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
             // Auto-rename chat if it is the first interaction
             var responseText = fullAssistantText.ToString();
-            if (stillOwner && localGeneratingSessionId != null && SelectedSession?.Id == localGeneratingSessionId && SessionTitle == "New Chat" && Messages.Count >= 2 && !string.IsNullOrWhiteSpace(responseText))
+            if (stillOwner && !isCancelled && localGeneratingSessionId != null && FindSession(localGeneratingSessionId) != null && SelectedSession?.Id == localGeneratingSessionId && SessionTitle == "New Chat" && Messages.Count >= 2 && !string.IsNullOrWhiteSpace(responseText))
             {
                 FireAndForget.Run(async () =>
                 {
                     var newTitle = CleanTitle(await _chatEngine!.GenerateTitleAsync(userMessage, responseText));
-                    if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat" && SelectedSession?.Id == localGeneratingSessionId)
+                    if (!string.IsNullOrEmpty(newTitle) && newTitle != "New Chat" && SelectedSession?.Id == localGeneratingSessionId && FindSession(localGeneratingSessionId) != null)
                     {
                         _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                         {
@@ -1660,7 +1660,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // and auto-feeding the next of 64 queued messages into it turns a bounded per-turn
             // correction budget into an unbounded full-context-rebuild loop until the app dies.
             // A failed turn surfaces its error to the user instead of silently churning the queue.
-            if (stillOwner && !isCancelled && turnProducedOutput)
+            if (stillOwner && !isCancelled && localGeneratingSessionId != null && FindSession(localGeneratingSessionId) != null && turnProducedOutput)
             {
                 ProcessNextQueuedMessageIfAvailable(localGeneratingSessionId);
             }
@@ -1988,10 +1988,52 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
+    private async Task CancelAsync()
+    {
+        _generationCts?.Cancel();
+        DismissPendingApproval(false);
+        if (_chatEngine != null)
+        {
+            try
+            {
+                await _chatEngine.CancelActiveGenerationAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error cancelling active generation in ChatEngine: {ex.Message}");
+            }
+        }
+        else if (_inferenceEngine != null)
+        {
+            try
+            {
+                await _inferenceEngine.CancelActiveGenerationAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error cancelling active generation in InferenceEngine: {ex.Message}");
+            }
+        }
+    }
+
     private void Cancel()
     {
         _generationCts?.Cancel();
         DismissPendingApproval(false);
+        if (_chatEngine != null)
+        {
+            FireAndForget.Run(async () =>
+            {
+                await _chatEngine.CancelActiveGenerationAsync();
+            }, operation: "CancelActiveGeneration");
+        }
+        else if (_inferenceEngine != null)
+        {
+            FireAndForget.Run(async () =>
+            {
+                await _inferenceEngine.CancelActiveGenerationAsync();
+            }, operation: "CancelActiveGenerationInference");
+        }
     }
 
     private void DispatcherSafe(Action action)
@@ -2292,13 +2334,39 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         if (session == null) return;
 
-        if (IsGenerating && (session.Id == _generatingSessionId || session.Id == SelectedSession?.Id || session.Id == _chatEngine?.CurrentSessionId))
+        bool isSessionGenerating = IsGenerating &&
+            (session.Id == _generatingSessionId ||
+             session.Id == SelectedSession?.Id ||
+             session.Id == _chatEngine?.CurrentSessionId);
+
+        if (isSessionGenerating)
         {
-            Cancel();
+            _generationCts?.Cancel();
+            DismissPendingApproval(false);
             if (_chatEngine != null)
             {
-                await _chatEngine.CancelActiveGenerationAsync();
+                try
+                {
+                    await _chatEngine.CancelActiveGenerationAsync();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Error cancelling active generation on session delete: {ex.Message}");
+                }
             }
+            else if (_inferenceEngine != null)
+            {
+                try
+                {
+                    await _inferenceEngine.CancelActiveGenerationAsync();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Error cancelling active generation in InferenceEngine on session delete: {ex.Message}");
+                }
+            }
+
+            await Task.Delay(100);
         }
 
         _messageQueue?.Clear(session.Id);

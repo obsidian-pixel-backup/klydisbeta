@@ -1,5 +1,8 @@
+using System;
 using System.Collections.ObjectModel;
+using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 
 namespace Klydis.App.ViewModels;
 
@@ -60,5 +63,42 @@ public partial class HfModelCardViewModel : ObservableObject
     private bool _isExpanded;
 
     [ObservableProperty]
+    private bool _isLoadingFiles;
+
+    [ObservableProperty]
+    private bool _hasLoadedFiles;
+
+    [ObservableProperty]
+    private string? _loadError;
+
+    [ObservableProperty]
     private string[] _tags = [];
+
+    /// <summary>
+    /// Callback action to fetch files for this card.
+    /// </summary>
+    public Func<HfModelCardViewModel, bool, Task>? LoadFilesAction { get; set; }
+
+    partial void OnIsExpandedChanged(bool value)
+    {
+        if (value && !HasLoadedFiles && !IsLoadingFiles && LoadFilesAction != null)
+        {
+            Klydis.Core.Diagnostics.FireAndForget.Observe(LoadFilesCommand.ExecuteAsync(false), operation: nameof(LoadFilesCommand));
+        }
+    }
+
+    [RelayCommand]
+    private async Task LoadFilesAsync(bool forceReload = false)
+    {
+        if (LoadFilesAction != null)
+        {
+            await LoadFilesAction(this, forceReload);
+        }
+    }
+
+    [RelayCommand]
+    private async Task RetryLoadFilesAsync()
+    {
+        await LoadFilesAsync(forceReload: true);
+    }
 }

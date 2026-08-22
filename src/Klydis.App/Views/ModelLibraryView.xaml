@@ -33,36 +33,71 @@
                             <TextBlock Text="{Binding Likes, StringFormat='♥ {0}'}" Foreground="{DynamicResource TextSecondaryBrush}" />
                         </StackPanel>
                     </Grid>
-                    <Expander Header="Available GGUF Files" Margin="0,5,0,0" Foreground="{DynamicResource TextPrimaryBrush}">
-                        <ItemsControl ItemsSource="{Binding GgufFiles}" Margin="0,5,0,0">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Grid Margin="0,2">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <Grid Grid.Column="0" Margin="0,0,10,0">
+                    <Expander Header="Available GGUF Files" IsExpanded="{Binding IsExpanded, Mode=TwoWay}" Margin="0,5,0,0" Foreground="{DynamicResource TextPrimaryBrush}">
+                        <StackPanel Margin="0,5,0,0">
+                            <!-- Loading State -->
+                            <StackPanel Orientation="Horizontal" Margin="0,6,0,6" Visibility="{Binding IsLoadingFiles, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <ProgressBar IsIndeterminate="True" Width="80" Height="4" Margin="0,0,10,0" Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" VerticalAlignment="Center" />
+                                <TextBlock Text="Fetching GGUF files from Hugging Face..." FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" />
+                            </StackPanel>
+
+                            <!-- Error State -->
+                            <StackPanel Orientation="Horizontal" Margin="0,4,0,6" Visibility="{Binding LoadError, Converter={StaticResource StringToVisibilityConverter}}">
+                                <TextBlock Text="{Binding LoadError}" Foreground="{DynamicResource ErrorBrush}" FontSize="11" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                <Button Content="🔄 Retry" Command="{Binding RetryLoadFilesCommand}" Style="{StaticResource SecondaryButton}" Padding="6,2" FontSize="11" />
+                            </StackPanel>
+
+                            <!-- Empty State -->
+                            <TextBlock Text="No GGUF files found in this repository." FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,4,0,4">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding HasLoadedFiles}" Value="True" />
+                                                    <Condition Binding="{Binding IsLoadingFiles}" Value="False" />
+                                                    <Condition Binding="{Binding GgufFiles.Count}" Value="0" />
+                                                    <Condition Binding="{Binding LoadError}" Value="{x:Null}" />
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+
+                            <!-- Files List -->
+                            <ItemsControl ItemsSource="{Binding GgufFiles}" Margin="0,2,0,0">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,2">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="{Binding FileName}" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,10,0" TextTrimming="CharacterEllipsis" ToolTip="{Binding FileName}" VerticalAlignment="Center" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Size}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,10,0" VerticalAlignment="Center" />
-                                            <Border Grid.Column="2" Background="{DynamicResource BackgroundTertiary}" CornerRadius="4" Padding="4,2" Margin="0,0,5,0" VerticalAlignment="Center">
-                                                <TextBlock Text="{Binding QuantType}" FontSize="10" Foreground="{DynamicResource TextPrimaryBrush}" />
-                                            </Border>
-                                            <TextBlock Grid.Column="3" Text="⚠ Exceeds VRAM" FontSize="10" Foreground="{DynamicResource ErrorBrush}" VerticalAlignment="Center" Visibility="{Binding CanFitInVram, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
+                                            <Grid Grid.Column="0" Margin="0,0,10,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="{Binding FileName}" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,10,0" TextTrimming="CharacterEllipsis" ToolTip="{Binding FileName}" VerticalAlignment="Center" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Size}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                                <Border Grid.Column="2" Background="{DynamicResource BackgroundTertiary}" CornerRadius="4" Padding="4,2" Margin="0,0,5,0" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding QuantType}" FontSize="10" Foreground="{DynamicResource TextPrimaryBrush}" />
+                                                </Border>
+                                                <TextBlock Grid.Column="3" Text="⚠ Exceeds VRAM" FontSize="10" Foreground="{DynamicResource ErrorBrush}" VerticalAlignment="Center" Visibility="{Binding CanFitInVram, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
+                                            </Grid>
+                                            <Button Grid.Column="1" Content="Download" Style="{StaticResource SecondaryButton}" Padding="8,3" FontSize="11"
+                                                    Command="{Binding DataContext.DownloadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" 
+                                                    CommandParameter="{Binding}" />
                                         </Grid>
-                                        <Button Grid.Column="1" Content="Download" Style="{StaticResource SecondaryButton}" Padding="8,3" FontSize="11"
-                                                Command="{Binding DataContext.DownloadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" 
-                                                CommandParameter="{Binding}" />
-                                    </Grid>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
                     </Expander>
                 </StackPanel>
             </Border>
