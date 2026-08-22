@@ -1,0 +1,161 @@
+Use these as independent prompts. They are deliberately mixed so you can test **direct actions, skill selection, planning, tool chaining, verification, recovery, desktop control, filesystem access, process management, and long-horizon behavior**.
+
+### Basic system diagnostics
+
+1. `What is the current CPU utilization?`
+2. `What is the current GPU utilization?`
+3. `How much RAM is currently being used?`
+4. `How much free disk space do I have on every drive?`
+5. `What operating system and version is this machine running?`
+6. `What CPU is installed in this machine?`
+7. `What GPU is installed in this machine?`
+8. `Give me the current temperatures of all available hardware sensors.`
+9. `How many processes are currently running?`
+10. `List the five processes using the most CPU right now.`
+11. `List the five processes using the most memory right now.`
+12. `List the processes currently using the GPU.`
+13. `Tell me how long this machine has been running since its last boot.`
+14. `Give me a complete hardware report for this machine.`
+15. `Give me a complete software and operating-system report for this machine.`
+
+### Process management
+
+16. `Find the process using the most CPU and tell me what application it belongs to.`
+17. `Find the process using the most RAM and investigate why it is using so much memory.`
+18. `Find all processes belonging to Chrome.`
+19. `Tell me whether Ollama is currently running.`
+20. `Find out whether Klydis itself has any child processes running.`
+21. `Show me all processes that have been running for more than one hour.`
+22. `Find processes that appear to be consuming unusually high resources and investigate them.`
+23. `Identify any processes that appear to be hung or unresponsive.`
+24. `Check whether there are multiple instances of the same application running unnecessarily.`
+25. `Give me a diagnostic report of the currently running processes.`
+
+### GPU / AI diagnostics
+
+26. `Determine whether the GPU is currently being used for model inference.`
+27. `Find out which process is currently using the most GPU memory.`
+28. `Determine how much VRAM is currently free.`
+29. `Check whether Ollama is using the GPU or CPU for inference.`
+30. `Determine whether Klydis is currently consuming GPU resources.`
+31. `Find the current GPU temperature, utilization, memory usage, and power usage.`
+32. `Check whether the GPU is currently under thermal or memory pressure.`
+33. `Determine whether the installed GPU is capable of running the current Klydis model.`
+34. `Investigate why GPU utilization might currently be low.`
+35. `Give me a complete GPU diagnostic and explain anything unusual you find.`
+
+### Desktop automation
+
+36. `Open Chrome.`
+37. `Open Chrome on monitor 3.`
+38. `Move the Chrome window to monitor 2.`
+39. `Maximize the currently active window.`
+40. `Tell me how many monitors are connected.`
+41. `Give me the resolution of every connected monitor.`
+42. `Tell me which monitor is currently the primary display.`
+43. `Open Notepad and move it to the secondary monitor.`
+44. `Open Calculator and place it in the bottom-right corner of the primary monitor.`
+45. `Take a screenshot of the current desktop and inspect what applications are open.`
+
+### Filesystem tests
+
+46. `Find all files larger than 1 GB on my C drive.`
+47. `Find the most recently modified files in my Downloads folder.`
+48. `Find all PDF files modified in the last seven days.`
+49. `Find every file named README.md under the Klydis project.`
+50. `Tell me how much space the Klydis project is consuming.`
+51. `Find duplicate files in my Downloads folder.`
+52. `Find the largest folders in my user profile.`
+53. `Find files in the Klydis project that contain the word "TODO".`
+54. `Find files in the Klydis project containing "default plan".`
+55. `Search the Klydis source code for hardcoded TODO lists or task templates.`
+
+### Klydis self-diagnostics
+
+56. `Give me a complete diagnostic report of your available capabilities.`
+57. `List every capability you currently have access to.`
+58. `List the skills currently available to you.`
+59. `Which capabilities are currently activated?`
+60. `Which tools are currently exposed to you?`
+61. `Explain how you selected the capabilities required for this request.`
+62. `Tell me which skills you considered before answering this request.`
+63. `Tell me whether any capability was available but not exposed to you.`
+64. `Check whether you have access to the local filesystem.`
+65. `Check whether you have access to the local operating system.`
+66. `Check whether you have access to running processes.`
+67. `Check whether you have access to desktop automation.`
+68. `Check whether you have access to the GPU telemetry of this machine.`
+69. `Perform a complete capability self-test and report every successful and failed test.`
+70. `Perform a complete tool-access diagnostic without assuming that any capability is unavailable.`
+
+### Skill-selection tests
+
+71. `Find the appropriate capability to determine my GPU load, then use it.`
+72. `Find the appropriate capability to inspect running processes, then identify the five largest memory consumers.`
+73. `Find the appropriate capability to inspect my displays and tell me their configuration.`
+74. `Determine which skill is appropriate for opening an application and use it to open Notepad.`
+75. `Determine which capabilities are required to move Chrome to monitor 3, then execute them.`
+76. `Do not assume you lack hardware access. Determine what hardware-access capabilities are available and use them to diagnose the machine.`
+77. `Determine the minimum set of capabilities required to produce a complete system report, then execute the diagnostic.`
+78. `Find the appropriate skill for filesystem investigation and locate the largest files in the Klydis project.`
+79. `Determine whether this request requires one capability or multiple capabilities, then execute the necessary actions.`
+80. `Explain your capability-selection decision before executing the requested diagnostic.`
+
+### Planning / TODO tests
+
+81. `Create a plan from scratch to diagnose why this machine is running slowly, then execute it.`
+82. `Create your own TODO list for determining whether this machine is suitable for local AI inference, then execute it.`
+83. `Create an objective-specific diagnostic plan for Klydis and do not use a generic checklist.`
+84. `Investigate the health of the Klydis runtime from scratch and decide what needs to be tested.`
+85. `Determine what information you need to diagnose Klydis's current performance, create a plan, and collect it.`
+86. `Create a plan to determine whether Klydis can reliably control this Windows machine, then test every relevant capability.`
+87. `Build your own diagnostic plan for testing the skill activation system and execute the plan.`
+88. `Create a plan to find out whether any Klydis capabilities are being incorrectly hidden from you.`
+89. `Create a plan to test whether the TODO system is generating tasks dynamically or using predefined tasks.`
+90. `Investigate the current orchestration system and create whatever diagnostic tasks you think are necessary.`
+
+### Long-horizon tests
+
+91. `Perform a complete health check of this machine. Decide what needs to be inspected, create a plan, execute it, investigate anything abnormal, and provide a final report.`
+
+92. `Investigate why local AI inference might be performing poorly on this machine. Do not assume the cause. Gather evidence, formulate hypotheses, test them, and determine the most likely cause.`
+
+93. `Perform a full Klydis self-diagnostic. Start by determining what you can access, then test those capabilities, investigate failures, and produce a final report.`
+
+94. `Determine whether this machine is currently suitable for running the configured Qwen model. Inspect the hardware, software, available resources, model configuration, and current runtime state before reaching a conclusion.`
+
+95. `Find anything currently consuming excessive system resources, investigate the cause, and only recommend an intervention if you have evidence that it is necessary.`
+
+96. `Perform a complete diagnostic of the Klydis skill-selection system. Determine what capabilities exist, which are exposed, which skills are available, and whether the correct skills are being selected.`
+
+97. `Test whether you can independently recover from a failed tool invocation. Deliberately diagnose a capability failure, determine why it failed, choose an alternative approach, and verify the result.`
+
+98. `Investigate the current machine as if you were responsible for maintaining it. Decide what diagnostics are useful, execute them, investigate anomalies, and stop only when you have enough evidence to assess its health.`
+
+99. `Perform an autonomous end-to-end test of your ability to understand a goal, create a plan, select skills, activate capabilities, execute tools, verify results, and replan when necessary.`
+
+100. `Run a complete autonomous systems audit. You decide what needs to be inspected and how to inspect it. Do not use a predefined checklist. Generate the plan yourself, execute it, adapt the plan based on evidence, and provide a final verified report.`
+
+### Deliberately difficult tests
+
+101. `I think something is wrong with this machine. Find out what.`
+
+102. `Make this computer healthier.`
+
+103. `Check whether anything needs my attention right now.`
+
+104. `Investigate the computer and fix anything that is obviously broken.`
+
+105. `Determine what is currently preventing this machine from performing at its best.`
+
+106. `Figure out what you can do on this machine and demonstrate the most important capabilities.`
+
+107. `Diagnose yourself.`
+
+108. `Find a useful problem to investigate on this machine, investigate it, and tell me what you found.`
+
+109. `Take a complete look at the current environment and determine whether anything is abnormal.`
+
+110. `Do whatever diagnostics you believe are necessary to establish whether Klydis is functioning correctly. Create the plan yourself and adapt it as you discover information.`
+
+These last ten are particularly useful for testing whether Klydis has actually moved from **template-driven execution to genuine goal-driven orchestration**.
