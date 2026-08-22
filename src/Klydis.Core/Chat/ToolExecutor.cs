@@ -424,6 +424,15 @@ public class ToolExecutor(
             new("filter", "string", "Optional name filter for process names", false)
         }, false),
         new ToolDefinition("system_gpu_processes", "Returns active processes utilizing GPU VRAM and compute resources.", new List<ToolParameter>(), false),
+        new ToolDefinition("system_top_processes", "Returns top running processes sorted deterministically by CPU usage or memory consumption.", new List<ToolParameter>
+        {
+            new("sort_by", "string", "Metric to sort by: 'cpu' or 'memory' (default: 'cpu')", false, new[] { "cpu", "memory", "ram" }),
+            new("limit", "integer", "Maximum number of processes to return (default 5, max 20)", false)
+        }, false),
+        new ToolDefinition("process_find", "Searches running processes matching a name substring or query filter.", new List<ToolParameter>
+        {
+            new("name", "string", "Process name or query substring to search for (e.g. 'chrome', 'ollama', 'klydis')", true)
+        }, false),
         new ToolDefinition("system_uptime", "Returns continuous system uptime and boot timestamp.", new List<ToolParameter>(), false),
         new ToolDefinition("system_hardware_report", "Returns a comprehensive consolidated hardware report covering CPU specs, CPU load, GPUs, RAM, Disks, and Temperatures.", new List<ToolParameter>(), false),
         new ToolDefinition("system_software_report", "Returns a consolidated software report covering OS details, uptime, active processes, and runtime environments.", new List<ToolParameter>(), false),
@@ -650,6 +659,30 @@ public class ToolExecutor(
                 }
             }
         }
+
+        // Automatic Wrong-Wrapper Normalization: if run_command was invoked with a registered tool name as the command
+        if (toolDef != null && string.Equals(toolDef.Name, "run_command", StringComparison.OrdinalIgnoreCase))
+        {
+            string? cmdStr = null;
+            if (request.Arguments != null && request.Arguments.TryGetValue("command", out var cmdObj))
+            {
+                cmdStr = UnwrapJsonElement(cmdObj)?.ToString()?.Trim();
+            }
+
+            if (!string.IsNullOrEmpty(cmdStr))
+            {
+                string cmdClean = cmdStr.Trim().Trim('"', '\'', '(', ')', ';');
+                var directTarget = tools.FirstOrDefault(t =>
+                    string.Equals(t.Name, cmdClean, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(t.Name, "run_command", StringComparison.OrdinalIgnoreCase));
+
+                if (directTarget != null)
+                {
+                    logger.LogInformation("Auto-normalizing run_command('{Command}') to direct tool call '{ToolName}'", cmdClean, directTarget.Name);
+                    toolDef = directTarget;
+                }
+            }
+        }
         
         if (toolDef == null)
         {
@@ -795,6 +828,8 @@ public class ToolExecutor(
                 "system_os_info" => await GetSystemOsInfoAsync(toolCt),
                 "system_temperatures" => await GetSystemTemperaturesAsync(toolCt),
                 "system_processes" => await GetSystemProcessesAsync(request, toolCt),
+                "system_top_processes" => await GetSystemTopProcessesAsync(request, toolCt),
+                "process_find" => await FindProcessAsync(request, toolCt),
                 "system_gpu_processes" => await GetSystemGpuProcessesAsync(toolCt),
                 "system_uptime" => await GetSystemUptimeAsync(toolCt),
                 "system_hardware_report" => await GetSystemHardwareReportAsync(toolCt),
@@ -2258,6 +2293,128 @@ public class ToolExecutor(
         catch (Exception ex)
         {
             return new ToolResult("system_processes", false, string.Empty, $"Failed to enumerate processes: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> GetSystemTopProcessesAsync(ToolCallRequest request, CancellationToken ct)
+    {
+        try
+        {
+            string sortBy = "cpu";
+            if (request.Arguments != null && request.Arguments.TryGetValue("sort_by", out var sortObj))
+            {
+                var s = UnwrapJsonElement(sortObj)?.ToString()?.ToLowerInvariant() ?? "cpu";
+                if (s.Contains("mem") || s.Contains("ram")) sortBy = "memory";
+            }
+
+            int limit = 5;
+            if (request.Arguments != null && request.Arguments.TryGetValue("limit", out var limitObj))
+            {
+                var unwrapped = UnwrapJsonElement(limitObj);
+                if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int n) && n > 0)
+                {
+                    limit = Math.Min(n, 20);
+                }
+            }
+
+            var procs = System.Diagnostics.Process.GetProcesses();
+            var list = new List<object>();
+
+            if (sortBy == "memory")
+            {
+                var sorted = procs.OrderByDescending(p =>
+                {
+                    try { return p.WorkingSet64; } catch { return 0; }
+                }).Take(limit);
+
+                foreach (var p in sorted)
+                {
+                    try
+                    {
+                        list.Add(new
+                        {
+                            Pid = p.Id,
+                            Name = p.ProcessName,
+                            MemoryMb = Math.Round((double)p.WorkingSet64 / (1024 * 1024), 2)
+                        });
+                    }
+                    catch { }
+                }
+            }
+            else
+            {
+                var sorted = procs.OrderByDescending(p =>
+                {
+                    try { return p.TotalProcessorTime.TotalMilliseconds; } catch { return 0; }
+                }).Take(limit);
+
+                foreach (var p in sorted)
+                {
+                    try
+                    {
+                        list.Add(new
+                        {
+                            Pid = p.Id,
+                            Name = p.ProcessName,
+                            MemoryMb = Math.Round((double)p.WorkingSet64 / (1024 * 1024), 2),
+                            TotalCpuTimeSec = Math.Round(p.TotalProcessorTime.TotalSeconds, 1)
+                        });
+                    }
+                    catch { }
+                }
+            }
+
+            string jsonOutput = JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true });
+            return new ToolResult("system_top_processes", true, jsonOutput, null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("system_top_processes", false, string.Empty, $"Failed to retrieve top processes: {ex.Message}");
+        }
+    }
+
+    private async Task<ToolResult> FindProcessAsync(ToolCallRequest request, CancellationToken ct)
+    {
+        try
+        {
+            string query = GetStringArg(request.Arguments, "name") ?? GetStringArg(request.Arguments, "query") ?? "";
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return new ToolResult("process_find", false, string.Empty, "Missing required argument 'name'. Provide a process name or substring to search.");
+            }
+
+            string qLower = query.Trim().ToLowerInvariant();
+            var matches = System.Diagnostics.Process.GetProcesses()
+                .Where(p =>
+                {
+                    try { return p.ProcessName.ToLowerInvariant().Contains(qLower); }
+                    catch { return false; }
+                })
+                .Select(p =>
+                {
+                    try
+                    {
+                        return new
+                        {
+                            Pid = p.Id,
+                            Name = p.ProcessName,
+                            MemoryMb = Math.Round((double)p.WorkingSet64 / (1024 * 1024), 2)
+                        };
+                    }
+                    catch
+                    {
+                        return new { Pid = p.Id, Name = p.ProcessName, MemoryMb = 0.0 };
+                    }
+                })
+                .Take(25)
+                .ToList();
+
+            string jsonOutput = JsonSerializer.Serialize(matches, new JsonSerializerOptions { WriteIndented = true });
+            return new ToolResult("process_find", true, jsonOutput, null);
+        }
+        catch (Exception ex)
+        {
+            return new ToolResult("process_find", false, string.Empty, $"Failed to search processes: {ex.Message}");
         }
     }
 

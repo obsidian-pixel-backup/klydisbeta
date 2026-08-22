@@ -120,13 +120,16 @@ public static class AgentExecutionDossierBuilder
         sb.AppendLine("EXECUTION SUMMARY");
         sb.AppendLine("============================================================");
 
-        int totalTurns = events.Count(e => e.Type == TraceEventType.TurnStarted || e.Type == TraceEventType.TurnCompleted);
+        var distinctTurns = events.Where(e => !string.IsNullOrEmpty(e.TurnId)).Select(e => e.TurnId!).Distinct().Count();
+        int totalTurns = distinctTurns > 0 ? distinctTurns : events.Count(e => e.Type == TraceEventType.TurnStarted);
         if (totalTurns == 0) totalTurns = messages.Count(m => m.Role == ChatRole.User);
 
-        int generations = events.Count(e => e.Type == TraceEventType.GenerationStarted || e.Type == TraceEventType.GenerationCompleted || e.Type == TraceEventType.RawModelOutput || e.Type == TraceEventType.InferenceCompleted);
+        var distinctGenerations = events.Where(e => !string.IsNullOrEmpty(e.GenerationId)).Select(e => e.GenerationId!).Distinct().Count();
+        int generations = distinctGenerations > 0 ? distinctGenerations : events.Count(e => e.Type is TraceEventType.GenerationStarted or TraceEventType.InferenceStarted);
         if (generations == 0) generations = messages.Count(m => m.Role == ChatRole.Assistant);
 
-        int toolCallsProposed = events.Count(e => e.Type == TraceEventType.ToolCallProposed || e.Type == TraceEventType.ToolExecutionStarted);
+        var distinctTools = events.Where(e => !string.IsNullOrEmpty(e.ToolExecutionId)).Select(e => e.ToolExecutionId!).Distinct().Count();
+        int toolCallsProposed = distinctTools > 0 ? distinctTools : events.Count(e => e.Type is TraceEventType.ToolCallProposed or TraceEventType.ToolExecutionStarted);
         int toolSuccesses = events.Count(e => e.Type == TraceEventType.ToolExecutionCompleted || (e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s) == true && true.Equals(s))));
         int toolFailures = events.Count(e => e.Type == TraceEventType.ToolExecutionFailed || e.Type == TraceEventType.ToolCallRejected || (e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s2) == true && false.Equals(s2))));
 
@@ -474,19 +477,15 @@ public static class AgentExecutionDossierBuilder
             }
         }
 
-        double activeAgentMs = Math.Max(0, totalWallMs - userWaitMs - queueWaitMs);
-        if (activeAgentMs == 0 && (modelInferenceMs > 0 || toolExecutionMs > 0))
-        {
-            activeAgentMs = modelInferenceMs + toolExecutionMs + skillExecutionMs + webOpsMs + planningMs + parsingMs + verificationMs;
-            if (totalWallMs < activeAgentMs) totalWallMs = activeAgentMs;
-        }
-
-        double waitingMs = Math.Max(0, totalWallMs - activeAgentMs);
+        double accountedActiveMs = modelInferenceMs + toolExecutionMs + skillExecutionMs + webOpsMs + planningMs + contextBuildMs + parsingMs + verificationMs + compactionMs;
+        double waitingMs = userWaitMs + queueWaitMs;
+        double unattributedMs = Math.Max(0, totalWallMs - accountedActiveMs - waitingMs);
 
         sb.AppendLine($"Started (UTC):                {earliest:yyyy-MM-dd HH:mm:ss.fff}Z");
         sb.AppendLine($"Ended (UTC):                  {latest:yyyy-MM-dd HH:mm:ss.fff}Z");
         sb.AppendLine($"Wall-clock duration:          {FormatDuration(totalWallMs)}");
-        sb.AppendLine($"Active agent working time:    {FormatDuration(activeAgentMs)}");
+        sb.AppendLine($"Accounted active time:        {FormatDuration(accountedActiveMs)}");
+        sb.AppendLine($"Unattributed runtime:         {FormatDuration(unattributedMs)}");
         sb.AppendLine($"Waiting / idle time:          {FormatDuration(waitingMs)}");
         sb.AppendLine();
         sb.AppendLine("Subsystem Breakdown:");

@@ -82,4 +82,37 @@ public static class PromptInvariantEngine
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Builds a minimal, clean, model-facing action contract without leaking internal state-machine jargon.
+    /// Used for reasoning models (12B) and constrained executors (14B MoE, Mistral).
+    /// </summary>
+    public static string BuildMinimalActionContract(
+        string objective,
+        IEnumerable<string> availableTools,
+        string? lastObservation = null,
+        bool requireAction = true)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("### CURRENT OBJECTIVE");
+        sb.AppendLine(objective);
+        sb.AppendLine();
+        sb.AppendLine("AVAILABLE ACTIONS:");
+        sb.AppendLine($"[{string.Join(", ", availableTools.OrderBy(t => t, StringComparer.Ordinal))}]");
+        sb.AppendLine();
+        sb.AppendLine("RULES:");
+        sb.AppendLine("1. Do not claim a measurement or factual value unless it appears in a tool result.");
+        sb.AppendLine("2. Call the appropriate registered tool directly. Do not invent tools or wrap tool names inside run_command.");
+        if (requireAction)
+        {
+            sb.AppendLine("3. Execute the required action now.");
+        }
+        if (!string.IsNullOrWhiteSpace(lastObservation))
+        {
+            sb.AppendLine();
+            sb.AppendLine("LAST TOOL OBSERVATION:");
+            sb.AppendLine(lastObservation);
+        }
+        return sb.ToString().TrimEnd();
+    }
 }

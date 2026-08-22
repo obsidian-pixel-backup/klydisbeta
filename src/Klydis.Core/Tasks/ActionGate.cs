@@ -112,31 +112,69 @@ public static class ActionGate
         if (registeredTools == null) throw new ArgumentNullException(nameof(registeredTools));
         var tools = registeredTools.ToList();
 
-        // 1. Existence: the tool must be in the ACTUAL registered surface. This is the hard
-        //    guard against hallucinated tools (design_website_designer, research_eyewitnessing,
-        //    check_review): the model may never execute something that does not exist.
+        // 1. Existence & Semantic Alias Resolution:
+        string reqName = request.Name;
         var toolDef = tools.FirstOrDefault(t =>
-            string.Equals(t.Name, request.Name, StringComparison.OrdinalIgnoreCase));
+            string.Equals(t.Name, reqName, StringComparison.OrdinalIgnoreCase));
+
+        if (toolDef == null)
+        {
+            string aliasKey = reqName.ToLowerInvariant();
+            string? mapped = aliasKey switch
+            {
+                "system_cpu" => "system_cpu_info",
+                "system_gpu" => "system_gpu_info",
+                "system_mem" or "system_ram" => "system_memory",
+                "system_disk" => "system_disks",
+                "system_proc" => "system_processes",
+                "top_processes" or "processes_top" => "system_top_processes",
+                "find_process" or "search_processes" => "process_find",
+                _ => null
+            };
+            if (mapped != null)
+            {
+                toolDef = tools.FirstOrDefault(t => string.Equals(t.Name, mapped, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
         if (toolDef == null)
         {
             var available = string.Join(", ", tools
                 .Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal));
+            var repairJson = JsonSerializer.Serialize(new
+            {
+                repair = new
+                {
+                    type = "unknown_tool",
+                    tool = request.Name,
+                    available_tools = tools.Select(t => t.Name).OrderBy(n => n).ToList(),
+                    allowed_retry = true
+                }
+            });
             return new ActionGateVerdict(false, ActionGateError.UnknownTool,
-                $"Tool '{request.Name}' does not exist in the registered tool surface. " +
-                $"Only registered tools may be called. Registered tools: [{available}].",
+                repairJson,
                 available, currentStep);
         }
 
         // 2. Step scoping: a NON-NULL allowed-tool set is authoritative — the action must be
         //    in it. NULL means the step declares NO restriction (existence-gated only).
-        if (stepAllowedTools != null && !stepAllowedTools.Contains(request.Name))
+        if (stepAllowedTools != null && !stepAllowedTools.Contains(toolDef.Name))
         {
             var allowed = string.Join(", ", stepAllowedTools
                 .OrderBy(n => n, StringComparer.Ordinal));
+            var repairJson = JsonSerializer.Serialize(new
+            {
+                repair = new
+                {
+                    type = "tool_not_allowed_for_step",
+                    tool = toolDef.Name,
+                    current_step = currentStep ?? "unknown",
+                    allowed_tools = stepAllowedTools.OrderBy(n => n).ToList(),
+                    allowed_retry = true
+                }
+            });
             return new ActionGateVerdict(false, ActionGateError.ToolNotAllowedForStep,
-                $"Tool '{request.Name}' is not permitted for the current step" +
-                (string.IsNullOrWhiteSpace(currentStep) ? "." : $" '{currentStep}'.") +
-                $" Allowed tools for this step: [{allowed}].",
+                repairJson,
                 allowed, currentStep);
         }
 
@@ -149,22 +187,34 @@ public static class ActionGate
             .ToList();
         if (missing.Count > 0)
         {
+            var repairJson = JsonSerializer.Serialize(new
+            {
+                repair = new
+                {
+                    type = "missing_required_argument",
+                    tool = toolDef.Name,
+                    missing = missing,
+                    must_change = true,
+                    allowed_retry = true
+                }
+            });
             return new ActionGateVerdict(false, ActionGateError.MissingRequiredArgument,
-                $"Tool '{request.Name}' is missing required argument(s): [{string.Join(", ", missing)}]. " +
-                "Provide every required argument and retry.",
+                repairJson,
                 null, currentStep);
         }
 
-        // 3b. Type + enum validation: a PRESENT argument must match the parameter's declared
-        // type and (when declared) its enum. A write_file path of 123, a plan action of
-        // "banana", or a max_results of -99999 is rejected before execution — invalid
-        // arguments must not reach the executor and create recovery loops.
+        // 3b. Type, enum, and template placeholder validation:
         var typeErrors = new List<string>();
         foreach (var p in toolDef.Parameters)
         {
             var val = FindArgumentValue(request.Arguments, p.Name);
             if (val == null) continue;
-            if (!IsTypeCompatible(val, p.Type))
+
+            if (val is string strVal && ((strVal.StartsWith("<") && strVal.EndsWith(">")) || (strVal.StartsWith("[") && strVal.EndsWith("]"))) && strVal.Length > 2)
+            {
+                typeErrors.Add($"{p.Name} (received placeholder template '{strVal}' — provide a real resolved value)");
+            }
+            else if (!IsTypeCompatible(val, p.Type))
             {
                 typeErrors.Add($"{p.Name} (expected type {p.Type})");
             }
@@ -175,9 +225,19 @@ public static class ActionGate
         }
         if (typeErrors.Count > 0)
         {
+            var repairJson = JsonSerializer.Serialize(new
+            {
+                repair = new
+                {
+                    type = "invalid_argument_values",
+                    tool = toolDef.Name,
+                    errors = typeErrors,
+                    must_change = true,
+                    allowed_retry = true
+                }
+            });
             return new ActionGateVerdict(false, ActionGateError.InvalidArgument,
-                $"Tool '{request.Name}' has invalid argument value(s): [{string.Join("; ", typeErrors)}]. " +
-                "Correct the argument types/values and retry.",
+                repairJson,
                 null, currentStep);
         }
 

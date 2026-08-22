@@ -68,6 +68,7 @@ public static class ToolScoper
         // 2. Add Core orchestration tools
         foreach (var coreName in AlwaysCoreTools)
         {
+            if (scoped.Count >= maxTools) break;
             var coreTool = allTools.FirstOrDefault(t => string.Equals(t.Name, coreName, StringComparison.OrdinalIgnoreCase));
             if (coreTool != null)
             {
@@ -75,19 +76,22 @@ public static class ToolScoper
             }
         }
 
-        // 3. If space remains, add standard execution / filesystem tools
-        foreach (var stdName in StandardFileOps)
+        // 3. If space remains and we have few tools, add standard execution / filesystem tools
+        if (scoped.Count < maxTools && (preferredSet.Count == 0 || maxTools > 8))
         {
-            if (scoped.Count >= maxTools) break;
-            var stdTool = allTools.FirstOrDefault(t => string.Equals(t.Name, stdName, StringComparison.OrdinalIgnoreCase));
-            if (stdTool != null)
+            foreach (var stdName in StandardFileOps)
             {
-                TryAdd(stdTool);
+                if (scoped.Count >= maxTools) break;
+                var stdTool = allTools.FirstOrDefault(t => string.Equals(t.Name, stdName, StringComparison.OrdinalIgnoreCase));
+                if (stdTool != null)
+                {
+                    TryAdd(stdTool);
+                }
             }
         }
 
-        // 4. If still under minimum, backfill from remaining tools
-        if (scoped.Count < 5)
+        // 4. If still under minimum (less than 3 tools) and no specific capabilities matched, backfill
+        if (scoped.Count < 3 && preferredSet.Count == 0 && relevantCapSet.Count == 0)
         {
             foreach (var tool in allTools)
             {

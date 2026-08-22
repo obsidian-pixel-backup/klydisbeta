@@ -63,11 +63,13 @@ public static class CapabilityBootstrapper
         registry.Register(new FilesystemSearchCapability());
         registry.Register(new FilesystemMetadataCapability());
 
-        // Process Lifecycle
+        // Process Lifecycle & Filtering
         registry.Register(new ProcessStartCapability());
         registry.Register(new ProcessKillCapability());
         registry.Register(new ProcessInspectCapability());
         registry.Register(new ProcessWaitCapability());
+        registry.Register(new SystemTopProcessesCapability());
+        registry.Register(new ProcessFindCapability());
 
         // Shell Escape Hatches
         registry.Register(new ShellPowershellCapability());

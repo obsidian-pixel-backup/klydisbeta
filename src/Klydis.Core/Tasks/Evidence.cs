@@ -47,7 +47,37 @@ public enum EvidenceKind
     WebSource,
 
     /// <summary>A specific factual claim verified against an authoritative primary web source document.</summary>
-    WebFact
+    WebFact,
+
+    /// <summary>An authoritative system metric directly observed via runtime API or telemetry.</summary>
+    SystemMetricObserved,
+
+    /// <summary>A verified hardware or OS specification observed via native hardware inspection.</summary>
+    HardwareSpecificationVerified,
+
+    /// <summary>An observed process or system runtime state verified via OS process APIs.</summary>
+    ProcessStateObserved
+}
+
+/// <summary>
+/// Origin provenance of an evidence item.
+/// </summary>
+public enum EpistemicProvenance
+{
+    /// <summary>Generated directly by native runtime profiler/code.</summary>
+    NativeRuntime = 0,
+
+    /// <summary>Directly observed by external tool / system CLI query.</summary>
+    RuntimeObserved = 1,
+
+    /// <summary>Derived deterministically by runtime state machines.</summary>
+    DerivedRuntime = 2,
+
+    /// <summary>Authored by the LLM model (e.g. echo, string literals).</summary>
+    ModelAuthored = 3,
+
+    /// <summary>Unverified external or untrusted data.</summary>
+    Untrusted = 4
 }
 
 /// <summary>
@@ -68,7 +98,8 @@ public sealed record Evidence(
     int? ExitCode = null,
     string? Payload = null,
     int WorkspaceVersion = 0,
-    EpistemicAuthority Authority = EpistemicAuthority.Verified)
+    EpistemicAuthority Authority = EpistemicAuthority.Verified,
+    EpistemicProvenance Provenance = EpistemicProvenance.RuntimeObserved)
 {
     /// <summary>
     /// True when this evidence kind actually VERIFIES something (a build/test/preview result,
@@ -87,7 +118,10 @@ public sealed record Evidence(
         EvidenceKind.RequirementSatisfied or
         EvidenceKind.ArtifactValidated or
         EvidenceKind.WebDocument or
-        EvidenceKind.WebFact;
+        EvidenceKind.WebFact or
+        EvidenceKind.SystemMetricObserved or
+        EvidenceKind.HardwareSpecificationVerified or
+        EvidenceKind.ProcessStateObserved;
 
     public static Evidence Requirement(string description, string? subject = null, string? toolName = null)
         => new(

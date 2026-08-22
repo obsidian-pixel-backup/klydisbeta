@@ -230,6 +230,11 @@ public sealed class EpistemicLedger
     }
 
     /// <summary>
+    /// Formats verified world state for clean model prompt injection.
+    /// </summary>
+    public string FormatWorldStateContext() => FormatAuthoritativeContext();
+
+    /// <summary>
     /// Resets the ledger for a fresh run.
     /// </summary>
     public void Reset()

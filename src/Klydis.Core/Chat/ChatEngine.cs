@@ -1387,8 +1387,10 @@ public class ChatEngine(
             : promptEngine.GetStopTokens(templateType);
         var stopTokensList = new List<string>(nativeStopTokens);
         var stopTokens = stopTokensList.ToArray();
+        var modelProfile = CurrentModelProfile;
+        var executionPolicy = Klydis.Core.Protocol.ModelExecutionPolicy.FromModelProfile(modelProfile);
         var allAvailableTools = toolsDisabled ? Array.Empty<ToolDefinition>() : await toolExecutor.GetToolDefinitionsAsync();
-        var tools = toolsDisabled ? (IReadOnlyList<ToolDefinition>)Array.Empty<ToolDefinition>() : ToolScoper.ScopeTools(allAvailableTools.ToList(), maxTools: 12);
+        var tools = toolsDisabled ? (IReadOnlyList<ToolDefinition>)Array.Empty<ToolDefinition>() : ToolScoper.ScopeTools(allAvailableTools.ToList(), maxTools: executionPolicy.MaxProjectedTools);
         // P1.8: the FULL schema is kept for the qwen-prelude/grammar gate below; the schema the
         // model actually sees is sliced per-iteration to the current step's allowed set.
         var fullToolsSchema = toolsDisabled ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
@@ -1399,7 +1401,6 @@ public class ChatEngine(
         // partially compatible models whose template contains <tool_call> but do NOT support native
         // thinking are not incorrectly activated. Falls back to the legacy heuristic only when no
         // profile is available (model not loaded or profile construction failed).
-        var modelProfile = CurrentModelProfile;
         bool isQwenThinkingModel = modelProfile != null
             ? modelProfile.Reasoning == Protocol.ReasoningProtocol.NativeThinkBlock
             : templateType == ChatTemplate.Qwen &&
@@ -2069,6 +2070,24 @@ public class ChatEngine(
         catch (Exception ex)
         {
             logger.LogDebug(ex, "Failed to load current task plan for prompt context.");
+        }
+
+        // P0 Epistemic Context: Inject authoritative verified facts so models know what is proven
+        if (!toolsDisabled && _runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+        {
+            try
+            {
+                var epistemic = _runtime.GetEpistemicLedger(CurrentTaskId);
+                string authoritativeWorldState = epistemic.FormatWorldStateContext();
+                if (!string.IsNullOrWhiteSpace(authoritativeWorldState))
+                {
+                    sysPrompt = sysPrompt.TrimEnd() + "\n\n" + authoritativeWorldState;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Failed to load epistemic ledger context for prompt.");
+            }
         }
 
         // AUTONOMOUS ACTION CONTRACT — highest-salience instruction, injected in the LAST
@@ -2797,6 +2816,17 @@ public class ChatEngine(
                 var storedResponse = isQwenThinkingModel && !string.IsNullOrWhiteSpace(fullResponse)
                     ? "<think>\n" + StripLeadingThinkOpener(fullResponse)
                     : OutputSanitizer.CleanHistoryResponse(fullResponse);
+
+                if (_runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+                {
+                    try
+                    {
+                        var epistemic = _runtime.GetEpistemicLedger(CurrentTaskId);
+                        storedResponse = Klydis.Core.Epistemic.ClaimValidator.ValidateAndSanitizeResponse(storedResponse, epistemic);
+                    }
+                    catch { }
+                }
+
                 await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, storedResponse, 0, null);
             }
 
@@ -2984,6 +3014,22 @@ public class ChatEngine(
 
             if (toolCallRequests.Count > 0)
             {
+                var execPolicy = Klydis.Core.Protocol.ModelExecutionPolicy.FromModelProfile(CurrentModelProfile);
+
+                // Multi-tool batch sanity: if task_complete is mixed with other actions, remove task_complete
+                if (!execPolicy.AllowTaskCompleteInToolBatch && toolCallRequests.Count > 1)
+                {
+                    toolCallRequests.RemoveAll(r => string.Equals(r.Name, "task_complete", StringComparison.OrdinalIgnoreCase));
+                }
+
+                // Throttle max actions per generation according to ModelExecutionPolicy
+                if (toolCallRequests.Count > execPolicy.MaxActionsPerGeneration)
+                {
+                    logger.LogInformation("Throttling tool calls from {OriginalCount} to {MaxAllowed} for policy {Policy}",
+                        toolCallRequests.Count, execPolicy.MaxActionsPerGeneration, execPolicy.FamilyName);
+                    toolCallRequests = toolCallRequests.Take(execPolicy.MaxActionsPerGeneration).ToList();
+                }
+
                 bool forceTurnTermination = false;
                 bool replayLedgerUnavailable = false;
                 bool validationEscalated = false;

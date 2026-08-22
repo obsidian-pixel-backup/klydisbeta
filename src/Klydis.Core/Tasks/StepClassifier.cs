@@ -226,8 +226,18 @@ public static class StepClassifier
         if (InspectionMarkers.Any(t.Contains))
         {
             return Make(StepActionKind.Inspect,
-                new[] { "list_directory", "read_file", "search_files", "get_system_info", "system_report", "system_cpu_metrics", "system_gpu_metrics", "system_memory_metrics", "system_disk_metrics", "system_os_info", "system_processes" },
-                skills: new[] { "workspace-navigation" },
+                new[]
+                {
+                    "list_directory", "read_file", "search_files", "get_system_info", "system_report",
+                    "system_cpu_info", "system_cpu_usage", "system_cpu_metrics",
+                    "system_gpu_info", "system_gpu_usage", "system_gpu_metrics",
+                    "system_memory", "system_memory_metrics",
+                    "system_disks", "system_disk_metrics",
+                    "system_os", "system_os_info",
+                    "system_temperatures", "system_processes", "system_gpu_processes",
+                    "system_uptime", "system_hardware_report", "system_top_processes", "process_find"
+                },
+                skills: new[] { "workspace-navigation", "system-inspection" },
                 artifacts: Array.Empty<string>(),
                 criteria: new[] { "Workspace inspected", "Findings factual (no invented contents)" },
                 condition: "workspace inspection evidence");
@@ -253,7 +263,18 @@ public static class StepClassifier
         if (SystemDiagnosticMarkers.Any(t.Contains))
         {
             return Make(StepActionKind.CommandExecution,
-                new[] { "run_command", "read_file", "list_directory", "search_files" },
+                new[]
+                {
+                    "run_command", "read_file", "list_directory", "search_files",
+                    "get_system_info", "system_report",
+                    "system_cpu_info", "system_cpu_usage", "system_cpu_metrics",
+                    "system_gpu_info", "system_gpu_usage", "system_gpu_metrics",
+                    "system_memory", "system_memory_metrics",
+                    "system_disks", "system_disk_metrics",
+                    "system_os", "system_os_info",
+                    "system_temperatures", "system_processes", "system_gpu_processes",
+                    "system_uptime", "system_hardware_report", "system_top_processes", "process_find"
+                },
                 skills: new[] { "system-diagnostics", "command-execution" },
                 artifacts: Array.Empty<string>(),
                 criteria: new[] { "System command executed", "Evidence recorded from tool output" },

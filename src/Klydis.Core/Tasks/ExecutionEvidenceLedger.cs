@@ -161,13 +161,28 @@ public sealed class ExecutionEvidenceLedger
             var epistemicSource = stamped.Kind switch
             {
                 EvidenceKind.BuildPassed or EvidenceKind.TestPassed or EvidenceKind.AssertionPassed or EvidenceKind.RequirementSatisfied => EpistemicSource.VerifiedEvidence,
+                EvidenceKind.SystemMetricObserved or EvidenceKind.HardwareSpecificationVerified or EvidenceKind.ProcessStateObserved => EpistemicSource.RuntimeTool,
                 _ => EpistemicSource.RuntimeTool
             };
+
+            var epistemicAuthority = stamped.Authority;
+
+            // P0: If this was a shell command, analyze its provenance with DiagnosticEvidenceGuard
+            if (stamped.Kind == EvidenceKind.CommandSucceeded && !string.IsNullOrWhiteSpace(stamped.Subject))
+            {
+                var analysis = Klydis.Core.Epistemic.DiagnosticEvidenceGuard.AnalyzeCommand(stamped.Subject);
+                if (analysis.IsPureModelClaim)
+                {
+                    epistemicSource = analysis.Source;
+                    epistemicAuthority = analysis.Authority;
+                }
+            }
+
             ledger.Epistemic.RecordFact(new EpistemicEntry(
                 Key: !string.IsNullOrWhiteSpace(stamped.Subject) ? stamped.Subject : stamped.Kind.ToString(),
                 Value: !string.IsNullOrWhiteSpace(stamped.Payload) ? stamped.Payload : stamped.Description,
                 Source: epistemicSource,
-                Authority: stamped.Authority,
+                Authority: epistemicAuthority,
                 Freshness: EpistemicFreshness.Current,
                 TimestampUtc: stamped.TimestampUtc,
                 WorkspaceVersion: stamped.WorkspaceVersion,
