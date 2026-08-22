@@ -3367,14 +3367,13 @@ public class ChatEngine(
                     toolExecutor.CapabilityRegistry);
 
                 if (!responseValidation.IsValid &&
-                    responseValidation.ViolationType == "CapabilityContradiction" &&
                     !toolsDisabled &&
                     noActionRepairsThisTurn < MaxNoActionRepairs)
                 {
                     noActionRepairsThisTurn++;
-                    logger.LogWarning("Capability contradiction detected in response ({Violation}): {Instruction}",
+                    logger.LogWarning("Response validation failed ({Violation}): {Instruction}",
                         responseValidation.ViolationType, responseValidation.CorrectiveInstruction);
-                    NoteLesson("capability_contradiction", responseValidation.CorrectiveInstruction ?? "Capability contradiction detected.");
+                    NoteLesson("response_validation_failure", responseValidation.CorrectiveInstruction ?? "Response validation failed.");
                     var correctiveMsg = new ChatMessage(ChatRole.Tool, responseValidation.CorrectiveInstruction!, "system");
                     AddToSessionHistory(activeHistory, correctiveMsg, generatingSessionId);
                     yield return new ChatStreamEvent(ChatStreamEventType.Error, $"⚠ {responseValidation.CorrectiveInstruction}");

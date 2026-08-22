@@ -314,8 +314,9 @@ public class SystemPromptManager
         sb.AppendLine("- NEVER repeat a tool call with identical arguments. If you already received a result, USE IT.");
         sb.AppendLine("- ALWAYS analyze tool results before making additional calls.");
         sb.AppendLine("- If a tool returns an error, try a DIFFERENT approach (different tool or different arguments).");
-        sb.AppendLine("- Do not invent custom tool names (e.g. video-downloader, start-app). Only use tools defined in the tool schema.");
+        sb.AppendLine("- Do not invent custom tool names or imaginary APIs (e.g. 'os.info()', 'sysinfo()', 'exec()', 'syslog()', 'nvmax', 'from os import sysinfo'). Only use tools defined in the tool schema.");
         sb.AppendLine("- Use tool names EXACTLY as listed in the schema — never invent names (e.g. 'list_categories' does not exist). If a name is not in the schema, it does not exist.");
+        sb.AppendLine("- NEVER write Python/shell pseudo-code in text pretending to execute. To execute system commands or diagnostics, emit a real <tool_call> for 'run_command' or the dedicated system tools ('system_cpu_metrics', 'system_gpu_metrics', 'get_system_info', etc.).");
         sb.AppendLine("- NEVER retry a failed tool call with identical arguments — the system blocks identical failed retries after 3 attempts. Change the arguments or use a different tool.");
         sb.AppendLine("- The 'path' argument of read_file/write_file/list_directory/search_files takes ONE plain filesystem path — never shell syntax like `&&`, `|`, `>`, or redirection. Use run_command for commands.");
         sb.AppendLine("- 'run_command' ALREADY executes PowerShell — write your PowerShell directly. Do NOT wrap your command in `powershell -Command \"...\"`: that double-wraps it and breaks variables (e.g. `$lines` becomes empty).");

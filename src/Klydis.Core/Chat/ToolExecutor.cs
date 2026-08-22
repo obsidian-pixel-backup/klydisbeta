@@ -49,7 +49,18 @@ public record ToolCallRequest(string Name, IDictionary<string, object> Arguments
 /// <summary>
 /// Represents the result of executing a tool.
 /// </summary>
-public record ToolResult(string ToolName, bool Success, string Output, string? Error, bool IsValidationError = false, int? ExitCode = null);
+public record ToolResult(
+    string ToolName,
+    bool Success,
+    string Output,
+    string? Error,
+    bool IsValidationError = false,
+    int? ExitCode = null,
+    string? Stdout = null,
+    string? Stderr = null,
+    long DurationMs = 0,
+    Klydis.Core.Tasks.CommandErrorClassification ErrorClassification = Klydis.Core.Tasks.CommandErrorClassification.None,
+    string? RecoveryGuidance = null);
 
 /// <summary>
 /// A single recorded tool invocation for a session. Kept per session so the UI's right-side
@@ -1540,6 +1551,7 @@ public class ToolExecutor(
                 CreateNoWindow = true
             };
 
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             using var process = Process.Start(psi);
             if (process == null) return new ToolResult(request.Name, false, "", "Failed to start process");
 
@@ -1556,13 +1568,18 @@ public class ToolExecutor(
             }
             catch (OperationCanceledException)
             {
+                sw.Stop();
                 try { process.Kill(entireProcessTree: true); } catch { }
                 if (timeoutCts.IsCancellationRequested)
                 {
-                    return new ToolResult(request.Name, false, "", $"Command timed out after {timeoutMs / 1000} seconds.");
+                    return new ToolResult(request.Name, false, "", $"Command timed out after {timeoutMs / 1000} seconds.",
+                        ExitCode: -1, DurationMs: sw.ElapsedMilliseconds,
+                        ErrorClassification: Klydis.Core.Tasks.CommandErrorClassification.Timeout,
+                        RecoveryGuidance: "TIMEOUT: Operation took too long. Split command into smaller chunks or reduce output size.");
                 }
                 throw;
             }
+            sw.Stop();
 
             var stdout = await stdoutTask;
             var stderr = await stderrTask;
@@ -1614,8 +1631,26 @@ public class ToolExecutor(
                     : "Command executed successfully with no output.";
             }
 
-            return new ToolResult(request.Name, process.ExitCode == 0, output, process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null,
-                ExitCode: process.ExitCode);
+            var classification = Klydis.Core.Tasks.CommandExecution.ClassifyError(stderr, stdout, process.ExitCode, false, false);
+            string? guidance = classification switch
+            {
+                Klydis.Core.Tasks.CommandErrorClassification.CommandNotFound => "USE_DIFFERENT_COMMAND: Cmdlet/command not found. Use real PowerShell cmdlets or registered tools.",
+                Klydis.Core.Tasks.CommandErrorClassification.PermissionDenied => "PERMISSION_DENIED: Access denied. Re-try with alternative command or approach.",
+                Klydis.Core.Tasks.CommandErrorClassification.InvalidArgument => "INVALID_ARGUMENT: Check command syntax and arguments.",
+                _ => null
+            };
+
+            return new ToolResult(
+                request.Name,
+                process.ExitCode == 0,
+                output,
+                process.ExitCode != 0 ? $"Command exited with code {process.ExitCode}" : null,
+                ExitCode: process.ExitCode,
+                Stdout: stdout,
+                Stderr: stderr,
+                DurationMs: sw.ElapsedMilliseconds,
+                ErrorClassification: classification,
+                RecoveryGuidance: guidance);
         }
         catch (Exception ex)
         {

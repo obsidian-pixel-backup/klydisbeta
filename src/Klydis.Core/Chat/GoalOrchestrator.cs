@@ -143,9 +143,10 @@ public class GoalOrchestrator(
             _planSnapshotBeforeTurn = _completionVerifier?.GetPlanProgress(_chatEngine.CurrentSessionId) ?? (0, 0);
 
             // 2. Build turn prompt (turn 1 uses the original user goal; turn 2+ uses autonomous continuation prompt)
+            var (contract, planEntries) = BuildContract(state);
             string turnPrompt = state.TurnCount == 1
                 ? userGoal
-                : BuildContinuationPrompt(state, BuildContract(state));
+                : BuildContinuationPrompt(state, contract, planEntries);
 
             int turnTokenCount = 0;
             int toolCallCountInTurn = 0;
@@ -307,11 +308,11 @@ public class GoalOrchestrator(
             // the harness checks durable state and issues the authoritative verdict. A model
             // that stops generating while plan items are open or messages are queued keeps the
             // task ACTIVE — model termination has zero authority over task completion.
-            var contract = BuildContract(state);
+            var (evalContract, _) = BuildContract(state);
             var supervisorVerdict = GoalSupervisor.EvaluateContinuation(
                 goalComplete,
-                (contract.CompletionCriteria.Count, contract.Completed.Count),
-                contract.PendingQueueItems);
+                (evalContract.CompletionCriteria.Count, evalContract.Completed.Count),
+                evalContract.PendingQueueItems);
             yield return GoalStreamEvent.SupervisorVerdict(supervisorVerdict);
 
             if (state.ConsecutiveStalledTurns >= state.Budget.MaxStalledTurns)
@@ -359,26 +360,25 @@ public class GoalOrchestrator(
     /// and the message queue. This is execution state, not a conversation summary — a compacted
     /// window can lose prose but never the contract.
     /// </summary>
-    private ExecutionStateContract BuildContract(GoalExecutionState state)
+    private (ExecutionStateContract Contract, IReadOnlyList<ToolExecutor.PlanEntry> PlanEntries) BuildContract(GoalExecutionState state)
     {
         var planEntries = _completionVerifier?.GetPlanEntries(_chatEngine.CurrentSessionId)
             ?? Array.Empty<ToolExecutor.PlanEntry>();
         // Task-scoped (P0.7): the contract counts only the current task's queued messages.
         int pendingQueue = _chatEngine.MessageQueue?.GetPending(_chatEngine.CurrentSessionId, _chatEngine.CurrentTaskId).Count ?? 0;
-        return ContinuationContractBuilder.Build(state.OriginalGoal, planEntries, pendingQueue);
+        return (ContinuationContractBuilder.Build(state.OriginalGoal, planEntries, pendingQueue), planEntries);
     }
 
-    private static string BuildContinuationPrompt(GoalExecutionState state, ExecutionStateContract contract)
+    private static string BuildContinuationPrompt(GoalExecutionState state, ExecutionStateContract contract, IReadOnlyList<ToolExecutor.PlanEntry>? planEntries)
     {
-        // C5: Inject the last 5 TurnSummaries so the model knows exactly what it has done.
-        // Without this, every continuation turn starts with no memory of prior tool calls.
-        var historySection = string.Empty;
-        if (state.TurnSummaries.Count > 0)
-        {
-            var recent = state.TurnSummaries.TakeLast(5);
-            historySection = $"\nExecution History (last {recent.Count()} turns):\n" +
-                             string.Join("\n", recent.Select(s => $"  {s}")) + "\n";
-        }
+        var pressureState = Klydis.Core.Tasks.AgenticPressureContext.Format(
+            state.OriginalGoal,
+            null,
+            planEntries,
+            state.TurnSummaries.TakeLast(3).ToList(),
+            state.TurnSummaries.LastOrDefault(),
+            isVerifiedComplete: false,
+            budget: null);
 
         var stagnationNote = string.Empty;
         if (!string.IsNullOrWhiteSpace(state.LastStagnationNotice))
@@ -397,12 +397,9 @@ public class GoalOrchestrator(
         }
 
         return $"[SYSTEM — AUTONOMOUS GOAL CONTINUATION]\n" +
-               $"Original Goal: \"{state.OriginalGoal}\"\n" +
-               $"Current Execution Status: Turn {state.TurnCount} complete. Estimated Progress: {state.ProgressPercent}%\n" +
-               $"Budget: {state.Budget.GetRemainingDescription(state)}\n" +
+               $"{pressureState}\n" +
                ContinuationContractBuilder.Format(contract) +
                "\n" +
-               historySection +
                stagnationNote +
                rejectionNote +
                $"\nInstructions:\n" +

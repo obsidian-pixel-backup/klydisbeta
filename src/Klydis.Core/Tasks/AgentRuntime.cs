@@ -70,6 +70,31 @@ public class AgentRuntime : IAgentRuntime
     }
 
     /// <summary>
+    /// The authoritative event-based budget ledger.
+    /// </summary>
+    public IBudgetLedger BudgetLedger { get; } = new BudgetLedger();
+
+    /// <summary>
+    /// The agent spine scheduler for work item and continuation selection.
+    /// </summary>
+    public IAgentScheduler Scheduler { get; } = new AgentScheduler();
+
+    /// <summary>
+    /// Two-stage evidence-backed goal completion evaluator.
+    /// </summary>
+    public IGoalCompletionEvaluator CompletionEvaluator { get; } = new GoalCompletionEvaluator();
+
+    /// <summary>
+    /// Output manager maintaining output provenance, artifacts, and timeline.
+    /// </summary>
+    public IAgentOutputManager OutputManager { get; } = new AgentOutputManager();
+
+    /// <summary>
+    /// Stuck-loop and semantic repetition detector.
+    /// </summary>
+    public SemanticRepetitionDetector RepetitionDetector { get; } = new SemanticRepetitionDetector();
+
+    /// <summary>
     /// Maps the inference engine's raw end-of-generation flags to a <see cref="GenerationOutcome"/>.
     /// The outcome is a fact about the generation; the supervisor turns it into a decision.
     /// </summary>

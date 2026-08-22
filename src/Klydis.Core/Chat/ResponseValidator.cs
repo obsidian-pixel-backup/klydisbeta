@@ -51,7 +51,24 @@ public static class ResponseValidator
                 DirectExecutionTool: contradiction.RecommendedToolName);
         }
 
-        // 2. Execution Claim Without Evidence
+        // 2. Hallucinated Execution or Pseudocode Inventions
+        var (isHallucinated, detectedPattern, suggestedTool) = Protocol.HallucinatedToolDetector.Detect(responseText);
+        if (isHallucinated)
+        {
+            string instruction = $"[TOOL_CALL_REJECTED]\n" +
+                                 $"Reason: UNKNOWN_TOOL / SIMULATION_DETECTED\n" +
+                                 $"You generated pseudo-code or an imaginary API invocation: '{detectedPattern}'.\n" +
+                                 $"The runtime does not permit simulating execution in text or writing code against nonexistent libraries.\n" +
+                                 $"Available alternatives: {suggestedTool ?? "execute real registered tools such as run_command, system_cpu_metrics, system_gpu_metrics, get_system_info"}.\n" +
+                                 $"Emit a valid structured <tool_call> block immediately.";
+            return new ResponseValidationResult(
+                IsValid: false,
+                ViolationType: "HallucinatedExecutionSimulation",
+                CorrectiveInstruction: instruction,
+                DirectExecutionTool: suggestedTool);
+        }
+
+        // 3. Execution Claim Without Evidence
         if (toolsExecutedThisTurn.Count == 0)
         {
             var match = ExecutionClaimRegex.Match(responseText);
