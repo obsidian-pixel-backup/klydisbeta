@@ -35,7 +35,19 @@ public enum EvidenceKind
     ArtifactCreated,
 
     /// <summary>An artifact was actually VALIDATED (rendered, checked, opened) — verification-capable.</summary>
-    ArtifactValidated
+    ArtifactValidated,
+
+    /// <summary>A verified web search result listing from an external search engine.</summary>
+    WebSearchResult,
+
+    /// <summary>A structured web document successfully fetched, verified by SSRF policy and extracted.</summary>
+    WebDocument,
+
+    /// <summary>An external web source citation or reference link.</summary>
+    WebSource,
+
+    /// <summary>A specific factual claim verified against an authoritative primary web source document.</summary>
+    WebFact
 }
 
 /// <summary>
@@ -73,5 +85,7 @@ public sealed record Evidence(
         EvidenceKind.PreviewLoaded or
         EvidenceKind.ScreenshotCaptured or
         EvidenceKind.RequirementSatisfied or
-        EvidenceKind.ArtifactValidated;
+        EvidenceKind.ArtifactValidated or
+        EvidenceKind.WebDocument or
+        EvidenceKind.WebFact;
 }

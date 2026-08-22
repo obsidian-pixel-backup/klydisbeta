@@ -16,8 +16,9 @@ namespace Klydis.Core.Web.Security;
 /// A blocked request returns a structured <see cref="WebFailure"/> (BlockedByPolicy) — never
 /// an exception the model has to decode.
 /// </summary>
-public sealed class SsrfGuard
+public sealed class SsrfGuard : IWebSecurityPolicy
 {
+    public const int DefaultMaxRedirects = 10;
     private readonly IDnsResolver _resolver;
     private readonly bool _allowLoopback;
     private readonly ILogger? _logger;
@@ -160,6 +161,49 @@ public sealed class SsrfGuard
             _logger?.LogDebug(ex, "DNS resolution failed for host '{Host}'", host);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Validates a redirect from <paramref name="sourceUrl"/> to <paramref name="targetUrl"/>.
+    /// Handles relative target URLs, enforces max redirects, and re-validates the target host.
+    /// </summary>
+    public async Task<WebFailure?> ValidateRedirectAsync(string sourceUrl, string targetUrl, int hopCount, CancellationToken ct)
+    {
+        if (hopCount > DefaultMaxRedirects)
+        {
+            return new WebFailure(WebFailureCode.RedirectLimit, false, false,
+                $"More than {DefaultMaxRedirects} redirects.", Stage: "redirect", Attempt: hopCount);
+        }
+
+        if (string.IsNullOrWhiteSpace(targetUrl))
+        {
+            return new WebFailure(WebFailureCode.InvalidUrl, false, false,
+                "Redirect target URL is empty.", Stage: "redirect", Attempt: hopCount);
+        }
+
+        string resolvedUrl;
+        if (Uri.TryCreate(targetUrl, UriKind.Absolute, out var absUri))
+        {
+            resolvedUrl = absUri.ToString();
+        }
+        else if (Uri.TryCreate(sourceUrl, UriKind.Absolute, out var baseUri) &&
+                 Uri.TryCreate(baseUri, targetUrl, out var combinedUri))
+        {
+            resolvedUrl = combinedUri.ToString();
+        }
+        else
+        {
+            return new WebFailure(WebFailureCode.InvalidUrl, false, false,
+                $"Invalid redirect target '{Shorten(targetUrl)}'.", Stage: "redirect", Attempt: hopCount);
+        }
+
+        var validation = await ValidateAsync(resolvedUrl, ct).ConfigureAwait(false);
+        if (validation != null)
+        {
+            return validation with { Stage = "redirect", Attempt = hopCount };
+        }
+
+        return null;
     }
 
     private WebFailure Blocked(string message) =>

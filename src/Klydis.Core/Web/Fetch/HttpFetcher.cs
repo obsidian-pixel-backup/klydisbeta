@@ -104,12 +104,15 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
                 if (IsRedirect(response.StatusCode))
                 {
                     var location = response.Headers.Location?.ToString();
-                    if (string.IsNullOrEmpty(location))
+                    var (nextUrl, redirectFailure) = await RedirectResolver.ValidateAndResolveNextHopAsync(
+                        currentUrl, location, hop + 1, _guard, ct).ConfigureAwait(false);
+
+                    if (redirectFailure != null)
                     {
-                        return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.Http4xx, false, false,
-                            "Redirect response without a Location header.", httpStatus, "redirect", attempt));
+                        return WebFetchOutcome.Fail(redirectFailure with { Attempt = attempt });
                     }
-                    currentUrl = new Uri(new Uri(currentUrl), location).ToString();
+
+                    currentUrl = nextUrl!;
                     finalUrl = currentUrl;
                     continue;
                 }
@@ -138,25 +141,35 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
                         $"Content type '{detected}' is not supported by the extractor.", httpStatus, "extract", attempt));
                 }
 
-                var extracted = _extractor.Extract(body, detected, request.MaxChars);
-                if (string.IsNullOrWhiteSpace(extracted.Markdown))
+                WebDocument doc;
+                if (_extractor is ContentExtractor ce)
+                {
+                    doc = ce.ExtractDocument(body, request.Url, finalUrl ?? currentUrl, detected, httpStatus,
+                        WebFetchMethod.Http, request.MaxChars, new WebDiagnostics(chain, stages, attempt, start.ElapsedMilliseconds));
+                }
+                else
+                {
+                    var extracted = _extractor.Extract(body, detected, request.MaxChars);
+                    doc = new WebDocument(
+                        request.Url,
+                        finalUrl ?? currentUrl,
+                        extracted.Title,
+                        extracted.Markdown,
+                        detected,
+                        httpStatus,
+                        WebFetchMethod.Http,
+                        extracted.Truncated,
+                        DateTimeOffset.UtcNow,
+                        ComputeHash(extracted.Markdown),
+                        new WebDiagnostics(chain, stages, attempt, start.ElapsedMilliseconds));
+                }
+
+                if (string.IsNullOrWhiteSpace(doc.ContentMarkdown))
                 {
                     return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.EmptyContent, false, true,
                         "The response contained no extractable content.", httpStatus, "extract", attempt));
                 }
 
-                var doc = new WebDocument(
-                    request.Url,
-                    finalUrl ?? currentUrl,
-                    extracted.Title,
-                    extracted.Markdown,
-                    detected,
-                    httpStatus,
-                    WebFetchMethod.Http,
-                    extracted.Truncated,
-                    DateTimeOffset.UtcNow,
-                    ComputeHash(extracted.Markdown),
-                    new WebDiagnostics(chain, stages, attempt, start.ElapsedMilliseconds));
                 return WebFetchOutcome.Ok(doc);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -193,8 +206,8 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
     /// </summary>
     private async ValueTask<Stream> PinnedConnectAsync(SocketsHttpConnectionContext context, CancellationToken ct)
     {
-        var host = context.DnsEndPoint!.Host;
-        var isHttps = string.Equals(context.InitialRequestMessage!.RequestUri.Scheme,
+        var host = context.DnsEndPoint?.Host ?? throw new HttpRequestException("Missing DnsEndPoint in connection context.");
+        var isHttps = string.Equals(context.InitialRequestMessage?.RequestUri?.Scheme,
             Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
 
         IReadOnlyList<IPAddress> addresses;

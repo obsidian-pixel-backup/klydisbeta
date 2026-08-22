@@ -102,8 +102,8 @@ public class CamoufoxManager
                 await response.Content.CopyToAsync(fs, ct);
             }
 
-            _logger.LogInformation("Camoufox archive downloaded successfully. Extracting...");
-            ZipFile.ExtractToDirectory(zipPath, _camoufoxDir, overwriteFiles: true);
+            _logger.LogInformation("Camoufox archive downloaded successfully. Extracting safely...");
+            ExtractZipSafely(zipPath, _camoufoxDir);
 
             if (File.Exists(zipPath))
             {
@@ -177,5 +177,38 @@ public class CamoufoxManager
         }
 
         return DefaultGitHubReleaseUrl;
+    }
+
+    private static void ExtractZipSafely(string zipPath, string destinationDirectory)
+    {
+        var fullDestDir = Path.GetFullPath(destinationDirectory);
+        if (!fullDestDir.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+        {
+            fullDestDir += Path.DirectorySeparatorChar;
+        }
+
+        using var archive = ZipFile.OpenRead(zipPath);
+        foreach (var entry in archive.Entries)
+        {
+            var destinationPath = Path.GetFullPath(Path.Combine(fullDestDir, entry.FullName));
+            if (!destinationPath.StartsWith(fullDestDir, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Malicious zip entry detected: '{entry.FullName}' targets outside destination directory.");
+            }
+
+            if (string.IsNullOrEmpty(entry.Name) && destinationPath.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+            {
+                Directory.CreateDirectory(destinationPath);
+                continue;
+            }
+
+            var entryDir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(entryDir))
+            {
+                Directory.CreateDirectory(entryDir);
+            }
+
+            entry.ExtractToFile(destinationPath, overwrite: true);
+        }
     }
 }

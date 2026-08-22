@@ -1,6 +1,7 @@
 using System.Text;
 using System.Security.Cryptography;
 using Klydis.Core.Chat;
+using Klydis.Core.Web.Extraction;
 using Klydis.Core.Web.Models;
 using Klydis.Core.Web.Security;
 using Microsoft.Extensions.Logging;
@@ -57,18 +58,37 @@ public sealed class BrowserFetcher : IWebFetcher
                     "The browser loaded the page but no content could be extracted.", Stage: "browser"));
             }
 
-            var doc = new WebDocument(
-                request.Url,
-                result.FinalUrl ?? request.Url,
-                result.Title,
-                result.Markdown,
-                "text/html",
-                result.HttpStatus,
-                WebFetchMethod.Browser,
-                result.ContentWasTruncated,
-                DateTimeOffset.UtcNow,
-                ComputeHash(result.Markdown),
-                new WebDiagnostics(new[] { request.Url }, new[] { "browser" }, 1, 0));
+            WebDocument doc;
+            var extractor = new ContentExtractor();
+            if (!string.IsNullOrEmpty(result.RawHtml))
+            {
+                var bodyBytes = Encoding.UTF8.GetBytes(result.RawHtml);
+                doc = extractor.ExtractDocument(
+                    bodyBytes,
+                    request.Url,
+                    result.FinalUrl ?? request.Url,
+                    "text/html",
+                    result.HttpStatus,
+                    WebFetchMethod.Browser,
+                    request.MaxChars,
+                    new WebDiagnostics(new[] { request.Url }, new[] { "browser" }, 1, 0));
+            }
+            else
+            {
+                doc = new WebDocument(
+                    request.Url,
+                    result.FinalUrl ?? request.Url,
+                    result.Title,
+                    result.Markdown,
+                    "text/html",
+                    result.HttpStatus,
+                    WebFetchMethod.Browser,
+                    result.ContentWasTruncated,
+                    DateTimeOffset.UtcNow,
+                    ComputeHash(result.Markdown),
+                    new WebDiagnostics(new[] { request.Url }, new[] { "browser" }, 1, 0));
+            }
+
             return WebFetchOutcome.Ok(doc);
         }
         catch (OperationCanceledException)

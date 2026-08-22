@@ -1,16 +1,26 @@
+using System.Security.Cryptography;
 using System.Text;
 using HtmlAgilityPack;
+using Klydis.Core.Web.Models;
 
 namespace Klydis.Core.Web.Extraction;
 
 /// <summary>
-/// Deterministic content extraction: HTML → clean Markdown via HtmlAgilityPack (noise
-/// elements removed, headings/list/code/table structure preserved), JSON/XML fenced for
-/// passthrough, plain text kept as-is. No LLM involvement — this is the fast, reproducible
-/// path; model summarization can layer on top later.
+/// Deterministic content extraction: HTML → structured <see cref="WebDocument"/> via classification
+/// and specialized extractors (headings, sections, links, tables, metadata), JSON/XML fenced for
+/// passthrough, plain text kept as-is.
 /// </summary>
 public sealed class ContentExtractor : IContentExtractor
 {
+    private readonly IPageClassifier _classifier;
+    private readonly ExtractorRegistry _registry;
+
+    public ContentExtractor(IPageClassifier? classifier = null, ExtractorRegistry? registry = null)
+    {
+        _classifier = classifier ?? new PageClassifier();
+        _registry = registry ?? ExtractorRegistry.Default;
+    }
+
     public ExtractResult Extract(byte[] body, string contentType, int maxChars)
     {
         if (body.Length == 0)
@@ -37,12 +47,12 @@ public sealed class ContentExtractor : IContentExtractor
                 break;
 
             case ContentTypeDetector.Html:
-                (markdown, title) = ExtractHtml(text);
-                break;
+                var classification = _classifier.Classify(string.Empty, text, contentType);
+                var extractor = _registry.Resolve(classification.PageType);
+                var extracted = extractor.Extract(string.Empty, text, maxChars);
+                return new ExtractResult(extracted.Markdown, extracted.Title, extracted.Truncated);
 
             default:
-                // Unknown/unsupported content (PDF, binary, ...): keep a tiny prefix so the
-                // caller can classify it, without leaking binary junk into context.
                 markdown = "[" + (contentType ?? "unknown") + " content — not extractable]";
                 break;
         }
@@ -56,161 +66,70 @@ public sealed class ContentExtractor : IContentExtractor
         return new ExtractResult(markdown, title, truncated);
     }
 
-    private static (string Markdown, string? Title) ExtractHtml(string html)
+    /// <summary>
+    /// Extracts a full structured <see cref="WebDocument"/> including sections, links, tables, metadata, and page classification.
+    /// </summary>
+    public WebDocument ExtractDocument(
+        byte[] body,
+        string requestedUrl,
+        string? finalUrl,
+        string contentType,
+        int? httpStatus,
+        WebFetchMethod method,
+        int maxChars,
+        WebDiagnostics diagnostics)
     {
-        var doc = new HtmlDocument();
-        doc.LoadHtml(html);
+        var rawText = Encoding.UTF8.GetString(body);
+        var targetUrl = finalUrl ?? requestedUrl;
 
-        var title = doc.DocumentNode.SelectSingleNode("//title")?.InnerText?.Trim();
-        if (string.IsNullOrWhiteSpace(title)) title = null;
-
-        // Remove noise nodes before walking the tree.
-        var noise = doc.DocumentNode.Descendants()
-            .Where(n => n.Name is "script" or "style" or "noscript" or "template"
-                or "nav" or "footer" or "header" or "aside" or "iframe"
-                or "form" or "svg" or "canvas" or "select" or "button" or "input")
-            .ToList();
-        foreach (var node in noise)
+        if (contentType == ContentTypeDetector.Html)
         {
-            node.Remove();
+            var classification = _classifier.Classify(targetUrl, rawText, contentType);
+            var extractor = _registry.Resolve(classification.PageType);
+            var extracted = extractor.Extract(targetUrl, rawText, maxChars);
+
+            return new WebDocument(
+                requestedUrl,
+                finalUrl ?? requestedUrl,
+                extracted.Title,
+                extracted.Markdown,
+                contentType,
+                httpStatus,
+                method,
+                extracted.Truncated,
+                DateTimeOffset.UtcNow,
+                ComputeHash(extracted.Markdown),
+                diagnostics,
+                PageType: classification.PageType,
+                Metadata: extracted.Metadata,
+                Sections: extracted.Sections,
+                Links: extracted.Links,
+                Tables: extracted.Tables,
+                RawHtml: rawText);
         }
 
-        var sb = new StringBuilder(html.Length / 4);
-        ConvertNode(doc.DocumentNode, sb, 0);
-        return (Normalize(sb.ToString()), title);
+        // Non-HTML Fallback
+        var simple = Extract(body, contentType, maxChars);
+        return new WebDocument(
+            requestedUrl,
+            finalUrl ?? requestedUrl,
+            simple.Title,
+            simple.Markdown,
+            contentType,
+            httpStatus,
+            method,
+            simple.Truncated,
+            DateTimeOffset.UtcNow,
+            ComputeHash(simple.Markdown),
+            diagnostics,
+            PageType: PageType.Generic,
+            Metadata: new WebMetadata(Title: simple.Title, ContentType: contentType),
+            RawHtml: rawText);
     }
 
-    private static void ConvertNode(HtmlNode node, StringBuilder sb, int depth)
+    private static string ComputeHash(string content)
     {
-        if (node.NodeType == HtmlNodeType.Text)
-        {
-            var text = HtmlEntity.DeEntitize(node.InnerText);
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                sb.Append(text.Trim());
-            }
-            return;
-        }
-
-        if (node.NodeType != HtmlNodeType.Element)
-        {
-            return;
-        }
-
-        var name = node.Name.ToLowerInvariant();
-        bool block = name is "p" or "div" or "section" or "article" or "main" or "ul" or "ol"
-            or "table" or "tr" or "blockquote" or "pre" or "br" or "hr" or "li" or "h1" or "h2"
-            or "h3" or "h4" or "h5" or "h6" or "dl" or "details" or "summary";
-
-        if (name == "br" || name == "hr")
-        {
-            sb.Append('\n');
-            return;
-        }
-
-        if (name is "h1" or "h2" or "h3" or "h4" or "h5" or "h6")
-        {
-            sb.Append('\n').Append('#', int.Parse(name[1..])).Append(' ');
-            foreach (var child in node.ChildNodes) ConvertNode(child, sb, depth);
-            sb.Append('\n');
-            return;
-        }
-
-        if (name == "li")
-        {
-            sb.Append("\n- ");
-            foreach (var child in node.ChildNodes) ConvertNode(child, sb, depth);
-            sb.Append('\n');
-            return;
-        }
-
-        if (name == "pre")
-        {
-            var code = node.InnerText.Trim();
-            if (code.Length > 0)
-            {
-                sb.Append("\n```\n").Append(code).Append("\n```\n");
-            }
-            return;
-        }
-
-        if (name == "code")
-        {
-            var code = node.InnerText.Trim();
-            if (code.Length > 0)
-            {
-                sb.Append('`').Append(code).Append('`');
-            }
-            return;
-        }
-
-        if (name == "tr")
-        {
-            var cells = node.Descendants("td").Concat(node.Descendants("th")).ToList();
-            if (cells.Count > 0)
-            {
-                sb.Append("\n| ");
-                foreach (var cell in cells)
-                {
-                    var cellText = cell.InnerText.Trim().Replace("|", "\\|");
-                    sb.Append(cellText).Append(" | ");
-                }
-                sb.Append('\n');
-            }
-            return;
-        }
-
-        if (name == "img")
-        {
-            var alt = node.GetAttributeValue("alt", "");
-            if (!string.IsNullOrWhiteSpace(alt))
-            {
-                sb.Append("[image: ").Append(alt.Trim()).Append(']');
-            }
-            return;
-        }
-
-        if (name == "a")
-        {
-            // Inline links: keep the anchor text only (compact; full link lists are P1).
-            foreach (var child in node.ChildNodes) ConvertNode(child, sb, depth);
-            return;
-        }
-
-        if (block)
-        {
-            sb.Append('\n');
-        }
-
-        foreach (var child in node.ChildNodes)
-        {
-            ConvertNode(child, sb, depth + 1);
-        }
-
-        if (block)
-        {
-            sb.Append('\n');
-        }
-    }
-
-    private static string Normalize(string input)
-    {
-        // Collapse runs of blank lines, trim each line, and strip leading/trailing whitespace.
-        var lines = input.Replace("\r\n", "\n").Split('\n');
-        var sb = new StringBuilder(input.Length);
-        bool previousBlank = true;
-        foreach (var rawLine in lines)
-        {
-            var line = rawLine.Trim();
-            if (line.Length == 0)
-            {
-                if (!previousBlank && sb.Length > 0) sb.Append('\n');
-                previousBlank = true;
-                continue;
-            }
-            sb.Append(line).Append('\n');
-            previousBlank = false;
-        }
-        return sb.ToString().Trim();
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(content));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 }

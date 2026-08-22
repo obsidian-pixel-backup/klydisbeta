@@ -2399,7 +2399,7 @@ public class ChatEngine(
             generatingSessionId,
             CurrentTaskId ?? "—",
             mode,
-            currentUserMessage.Length > 80 ? currentUserMessage.Substring(0, 80) + "…" : currentUserMessage,
+            (currentUserMessage?.Length > 80 ? currentUserMessage.Substring(0, 80) + "…" : currentUserMessage) ?? string.Empty,
             finalPromptTokens,
             ComputePromptHash(prompt),
             inferenceEngine.LastGenerationContextDecision,
@@ -4050,6 +4050,16 @@ public class ChatEngine(
             case "screenshot":
             case "capture_screenshot":
                 return (Klydis.Core.Tasks.EvidenceKind.ScreenshotCaptured, subject);
+            case "search_web":
+                return (Klydis.Core.Tasks.EvidenceKind.WebSearchResult, subject);
+            case "crawl_url":
+            case "open_url":
+            case "find_on_page":
+            case "get_section":
+            case "get_links":
+            case "get_table":
+            case "get_metadata":
+                return (Klydis.Core.Tasks.EvidenceKind.WebDocument, subject);
         }
 
         // Command tools: the COMMAND TEXT decides the evidence kind. If arguments were

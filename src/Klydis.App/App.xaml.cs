@@ -225,11 +225,39 @@ public partial class App : Application
         // fetcher, browser fetcher, fallback router, multi-provider search, and the
         // orchestrator that ToolExecutor exposes as search_web / crawl_url.
         services.AddSingleton<Klydis.Core.Web.Security.SsrfGuard>();
-        services.AddSingleton<Klydis.Core.Web.Fetch.HttpFetcher>();
-        services.AddSingleton<Klydis.Core.Web.Fetch.BrowserFetcher>();
-        services.AddSingleton<Klydis.Core.Web.Fetch.FetchRouter>();
-        services.AddSingleton<Klydis.Core.Web.Search.WebSearchService>();
-        services.AddSingleton<Klydis.Core.Web.WebOrchestrator>();
+        services.AddSingleton<Klydis.Core.Web.Fetch.HttpFetcher>(sp =>
+            new Klydis.Core.Web.Fetch.HttpFetcher(
+                sp.GetRequiredService<Klydis.Core.Web.Security.SsrfGuard>(),
+                sp.GetService<ILogger<Klydis.Core.Web.Fetch.HttpFetcher>>()));
+        services.AddSingleton<Klydis.Core.Web.Fetch.BrowserFetcher>(sp =>
+            new Klydis.Core.Web.Fetch.BrowserFetcher(
+                sp.GetService<Klydis.Core.Chat.StealthBrowserService>(),
+                sp.GetRequiredService<Klydis.Core.Web.Security.SsrfGuard>(),
+                sp.GetService<ILogger<Klydis.Core.Web.Fetch.BrowserFetcher>>()));
+        services.AddSingleton<Klydis.Core.Web.Fetch.FetchRouter>(sp =>
+            new Klydis.Core.Web.Fetch.FetchRouter(
+                sp.GetRequiredService<Klydis.Core.Web.Fetch.HttpFetcher>(),
+                sp.GetService<Klydis.Core.Web.Fetch.BrowserFetcher>(),
+                sp.GetService<ILogger<Klydis.Core.Web.Fetch.FetchRouter>>()));
+        services.AddSingleton<Klydis.Core.Web.Storage.WebCache>();
+        services.AddSingleton<Klydis.Core.Web.Storage.WebArtifactStore>();
+        services.AddSingleton<Klydis.Core.Web.Search.WebSearchService>(sp =>
+            new Klydis.Core.Web.Search.WebSearchService(
+                sp.GetRequiredService<Klydis.Core.Web.Security.SsrfGuard>(),
+                sp.GetService<Klydis.Core.Chat.StealthBrowserService>(),
+                sp.GetService<ILogger<Klydis.Core.Web.Search.WebSearchService>>()));
+        services.AddSingleton<Klydis.Core.Web.WebOrchestrator>(sp =>
+            new Klydis.Core.Web.WebOrchestrator(
+                sp.GetRequiredService<Klydis.Core.Web.Security.SsrfGuard>(),
+                sp.GetRequiredService<Klydis.Core.Web.Fetch.FetchRouter>(),
+                sp.GetRequiredService<Klydis.Core.Web.Search.WebSearchService>(),
+                sp.GetRequiredService<Klydis.Core.Web.Storage.WebCache>(),
+                sp.GetRequiredService<Klydis.Core.Web.Storage.WebArtifactStore>(),
+                sp.GetService<ILogger<Klydis.Core.Web.WebOrchestrator>>()));
+        services.AddSingleton<Klydis.Core.Web.Tools.WebToolService>(sp =>
+            new Klydis.Core.Web.Tools.WebToolService(
+                sp.GetRequiredService<Klydis.Core.Web.WebOrchestrator>(),
+                sp.GetService<ILogger<Klydis.Core.Web.Tools.WebToolService>>()));
         services.AddSingleton<ModelPool>();
         services.AddSingleton<GpuProfiler>();
         services.AddSingleton<SystemProfiler>();
