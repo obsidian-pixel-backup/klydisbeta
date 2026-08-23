@@ -63,9 +63,6 @@
             <DataTemplate DataType="{x:Type viewmodels:SkillLibraryViewModel}">
                 <views:SkillsView />
             </DataTemplate>
-            <DataTemplate DataType="{x:Type viewmodels:SystemMonitorViewModel}">
-                <views:SystemMonitorView />
-            </DataTemplate>
             <DataTemplate DataType="{x:Type viewmodels:RagViewModel}">
                 <views:RagView />
             </DataTemplate>

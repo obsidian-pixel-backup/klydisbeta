@@ -756,14 +756,22 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
         else if (AvailableModels.Count > 0 && !_userExplicitlyUnloaded)
         {
-            var mostRecentlyUsed = _registry.GetAllModels().OrderByDescending(m => m.LastUsedAt).FirstOrDefault();
-            if (mostRecentlyUsed != null)
+            var defaultModel = _registry.GetDefaultModel();
+            if (defaultModel != null && AvailableModels.Contains(defaultModel.DisplayName))
             {
-                SelectedModelId = mostRecentlyUsed.DisplayName;
+                SelectedModelId = defaultModel.DisplayName;
             }
             else
             {
-                SelectedModelId = AvailableModels[0];
+                var mostRecentlyUsed = _registry.GetAllModels().OrderByDescending(m => m.LastUsedAt).FirstOrDefault();
+                if (mostRecentlyUsed != null && AvailableModels.Contains(mostRecentlyUsed.DisplayName))
+                {
+                    SelectedModelId = mostRecentlyUsed.DisplayName;
+                }
+                else
+                {
+                    SelectedModelId = AvailableModels[0];
+                }
             }
         }
         else
@@ -1130,10 +1138,25 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             {
                 if (att.Type == AttachmentType.TextContext || (att.Type == AttachmentType.File && !string.IsNullOrEmpty(att.Content)))
                 {
-                    sb.AppendLine($"--- Attached Context: {att.FileName} ---");
-                    sb.AppendLine(att.Content);
-                    sb.AppendLine("----------------------------------------");
-                    sb.AppendLine();
+                    var decomTasks = Klydis.Core.Tasks.TaskDecomposer.Decompose(att.Content);
+                    if (decomTasks.Count >= 3 || (att.Content.Length > 2000 && decomTasks.Count >= 2))
+                    {
+                        sb.AppendLine($"[Attached Workload / Test Suite: {att.FileName} ({decomTasks.Count} decomposed work items loaded into Plan)]");
+                        sb.AppendLine("Instruction: Execute the active work items systematically according to the Plan.");
+                        sb.AppendLine();
+
+                        if (_chatEngine != null && !string.IsNullOrEmpty(SelectedSession?.Id))
+                        {
+                            _ = _chatEngine.ToolExecutor.SeedSessionPlanAsync(SelectedSession.Id, decomTasks);
+                        }
+                    }
+                    else
+                    {
+                        sb.AppendLine($"--- Attached Context: {att.FileName} ---");
+                        sb.AppendLine(att.Content);
+                        sb.AppendLine("----------------------------------------");
+                        sb.AppendLine();
+                    }
                 }
                 else if (att.Type == AttachmentType.Image || att.Type == AttachmentType.Screenshot)
                 {
@@ -1362,8 +1385,25 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 // brain + relevance-scored skill injection.
                 if (_skillSelector != null && InteractionClassifier.Classify(promptMessagePayload) != InteractionMode.Conversation)
                 {
+                    var skillSw = System.Diagnostics.Stopwatch.StartNew();
                     var brainIndex = _skillSelector.GenerateBrainIndex();
                     var skillReasoning = await _skillSelector.ReasonAndSelectSkillsAsync(promptMessagePayload, ct: localGenerationCts.Token);
+                    skillSw.Stop();
+
+                    try
+                    {
+                        _chatEngine.AgentTrace?.Record(Klydis.Core.Tracing.AgentTraceEvent.Create(
+                            Klydis.Core.Tracing.TraceEventType.SkillInvocationCompleted,
+                            sessionId: SelectedSession?.Id,
+                            category: Klydis.Core.Tracing.AgentTimingCategory.SkillExecution,
+                            durationMs: skillSw.ElapsedMilliseconds,
+                            data: new Dictionary<string, object?>
+                            {
+                                ["selected_count"] = skillReasoning.SelectedSkills.Count,
+                                ["skills"] = string.Join(", ", skillReasoning.SelectedSkills)
+                            }));
+                    }
+                    catch { /* best effort */ }
                     
                     var sb = new StringBuilder();
                     if (!string.IsNullOrWhiteSpace(brainIndex))
@@ -2443,13 +2483,31 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private static bool TryBuildPersistedToolCard(Klydis.Core.Memory.MessageRecord msg, out ChatMessageViewModel card)
     {
         card = null!;
-        if (string.IsNullOrWhiteSpace(msg.ToolCallsJson)) return false;
+        if (string.IsNullOrWhiteSpace(msg.ToolCallsJson))
+        {
+            var fallbackCall = new ToolCallViewModel
+            {
+                Name = "tool",
+                Status = "done",
+                Output = string.IsNullOrWhiteSpace(msg.Content) ? "Done (No output returned)" : msg.Content,
+                IsExpanded = false
+            };
+            card = new ChatMessageViewModel
+            {
+                Role = "toolcall",
+                HasToolCalls = true,
+                Timestamp = msg.Timestamp
+            };
+            card.ToolCalls.Add(fallbackCall);
+            return true;
+        }
+
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(msg.ToolCallsJson);
             var root = doc.RootElement;
-            string? name = root.TryGetProperty("name", out var nEl) ? nEl.GetString() : null;
-            if (string.IsNullOrWhiteSpace(name)) return false;
+            string? name = root.TryGetProperty("name", out var nEl) ? nEl.GetString() : "tool";
+            if (string.IsNullOrWhiteSpace(name)) name = "tool";
 
             var toolCall = new ToolCallViewModel
             {

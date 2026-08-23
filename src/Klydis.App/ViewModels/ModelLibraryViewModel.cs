@@ -610,10 +610,25 @@ public partial class ModelLibraryViewModel : ObservableObject
     {
         try
         {
-            // Populate Popular
+            // Populate Popular with Smeagle flagship model featured first
+            var smeagleResults = await _hfClient.SearchModelsAsync("smeagle", 5, "downloads");
             var popular = await _hfClient.SearchModelsAsync("", 10, "downloads");
             PopularModels.Clear();
-            foreach (var m in popular) PopularModels.Add(CreateHfCard(m));
+            foreach (var m in smeagleResults)
+            {
+                if (m.RepoId.Contains("smeagle", StringComparison.OrdinalIgnoreCase))
+                {
+                    PopularModels.Add(CreateHfCard(m));
+                    break;
+                }
+            }
+            foreach (var m in popular)
+            {
+                if (!PopularModels.Any(c => c.RepoId.Equals(m.RepoId, StringComparison.OrdinalIgnoreCase)))
+                {
+                    PopularModels.Add(CreateHfCard(m));
+                }
+            }
 
             // Populate Newest
             var newest = await _hfClient.SearchModelsAsync("", 10, "createdAt");

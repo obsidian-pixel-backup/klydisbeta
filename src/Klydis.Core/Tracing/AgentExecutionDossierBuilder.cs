@@ -128,10 +128,19 @@ public static class AgentExecutionDossierBuilder
         int generations = distinctGenerations > 0 ? distinctGenerations : events.Count(e => e.Type is TraceEventType.GenerationStarted or TraceEventType.InferenceStarted);
         if (generations == 0) generations = messages.Count(m => m.Role == ChatRole.Assistant);
 
+        int toolSuccesses = events.Count(e => e.Type == TraceEventType.ToolExecutionCompleted);
+        int toolFailures = events.Count(e => e.Type == TraceEventType.ToolExecutionFailed);
+        int toolRejections = events.Count(e => e.Type == TraceEventType.ToolCallRejected);
+
+        if (toolSuccesses == 0 && toolFailures == 0)
+        {
+            toolSuccesses = events.Count(e => e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s) == true && true.Equals(s)));
+            toolFailures = events.Count(e => e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s2) == true && false.Equals(s2)));
+        }
+
+        int totalPhysicalExecutions = toolSuccesses + toolFailures;
         var distinctTools = events.Where(e => !string.IsNullOrEmpty(e.ToolExecutionId)).Select(e => e.ToolExecutionId!).Distinct().Count();
-        int toolCallsProposed = distinctTools > 0 ? distinctTools : events.Count(e => e.Type is TraceEventType.ToolCallProposed or TraceEventType.ToolExecutionStarted);
-        int toolSuccesses = events.Count(e => e.Type == TraceEventType.ToolExecutionCompleted || (e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s) == true && true.Equals(s))));
-        int toolFailures = events.Count(e => e.Type == TraceEventType.ToolExecutionFailed || e.Type == TraceEventType.ToolCallRejected || (e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s2) == true && false.Equals(s2))));
+        int toolCallsProposed = distinctTools > 0 ? distinctTools : (totalPhysicalExecutions + toolRejections);
 
         if (toolCallsProposed == 0 && toolActivities.Count > 0)
         {
@@ -285,9 +294,9 @@ public static class AgentExecutionDossierBuilder
         sb.AppendLine("============================================================");
         sb.AppendLine("AGENT DIAGNOSTICS");
         sb.AppendLine("============================================================");
-        double toolSuccessRate = toolCallsProposed > 0 ? ((double)toolSuccesses / toolCallsProposed) * 100.0 : 100.0;
+        double toolSuccessRate = (toolSuccesses + toolFailures) > 0 ? ((double)toolSuccesses / (toolSuccesses + toolFailures)) * 100.0 : 100.0;
         int validActions = toolSuccesses + toolFailures;
-        int invalidActions = events.Count(e => e.Type == TraceEventType.ToolCallRejected || e.Type == TraceEventType.OutputParseFailed);
+        int invalidActions = toolRejections + events.Count(e => e.Type == TraceEventType.OutputParseFailed);
         int finalClaims = events.Count(e => e.Type == TraceEventType.VerificationCompleted || (e.Data?.ContainsKey("task_complete") == true));
         int noActionGenerations = events.Count(e => e.Type == TraceEventType.ModelOutput && (e.Data?.TryGetValue("action_count", out var ac) == true && Convert.ToInt32(ac) == 0));
         int continuedDecisions = events.Count(e => e.Type == TraceEventType.ContinuationDecision);
@@ -310,6 +319,7 @@ public static class AgentExecutionDossierBuilder
         sb.AppendLine("Execution:");
         sb.AppendLine($"    successful: {toolSuccesses}");
         sb.AppendLine($"    failed: {toolFailures}");
+        sb.AppendLine($"    rejected: {toolRejections}");
         sb.AppendLine($"    timed out: {timedOutTools}");
         sb.AppendLine();
         sb.AppendLine("Task:");

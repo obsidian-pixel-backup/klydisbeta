@@ -86,6 +86,24 @@ public static class TaskDecomposer
             }
         }
 
+        // If still fewer than 2 items, check for multi-line plain text files (e.g. prompt lists or command suites)
+        if (results.Count < 2)
+        {
+            var nonBlankLines = lines
+                .Select(l => l.Trim())
+                .Where(l => !string.IsNullOrWhiteSpace(l) && !l.StartsWith("#") && !l.StartsWith("//") && !l.StartsWith("---"))
+                .ToList();
+
+            if (nonBlankLines.Count >= 3)
+            {
+                results.Clear();
+                foreach (var line in nonBlankLines)
+                {
+                    results.Add(NormalizeTaskItem(line));
+                }
+            }
+        }
+
         return results;
     }
 

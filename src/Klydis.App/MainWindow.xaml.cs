@@ -13,57 +13,11 @@ namespace Klydis.App;
 /// </summary>
 public partial class MainWindow : Window
 {
-    // Hover-open / hover-close for the stats popup: the popup is a separate window, so
-    // moving the mouse from the icon into the popup fires MouseLeave on the icon. The
-    // delayed close gives the pointer time to cross that gap, and the popup's own
-    // MouseEnter cancels the pending close.
-    private readonly DispatcherTimer _statsPopupCloseTimer;
-
     public MainWindow(MainViewModel viewModel)
     {
         InitializeComponent();
         DataContext = viewModel;
-
-        _statsPopupCloseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
-        _statsPopupCloseTimer.Tick += (_, _) =>
-        {
-            _statsPopupCloseTimer.Stop();
-            StatsPopup.IsOpen = false;
-        };
     }
-
-    private void StatsIconButton_Click(object sender, RoutedEventArgs e)
-    {
-        // PlacementTarget is set in code rather than an ElementName binding in XAML: popup
-        // content lives outside the namescope's visual tree, where ElementName lookups are
-        // unreliable.
-        StatsPopup.PlacementTarget = StatsIconButton;
-        StatsPopup.IsOpen = !StatsPopup.IsOpen;
-    }
-
-    private void StatsIcon_MouseEnter(object sender, MouseEventArgs e)
-    {
-        CancelStatsPopupClose();
-        StatsPopup.PlacementTarget = StatsIconButton;
-        StatsPopup.IsOpen = true;
-    }
-
-    private void StatsIcon_MouseLeave(object sender, MouseEventArgs e) => ScheduleStatsPopupClose();
-
-    private void StatsPopup_MouseEnter(object sender, MouseEventArgs e) => CancelStatsPopupClose();
-
-    private void StatsPopup_MouseLeave(object sender, MouseEventArgs e) => ScheduleStatsPopupClose();
-
-    private void ScheduleStatsPopupClose()
-    {
-        if (!_statsPopupCloseTimer.IsEnabled)
-        {
-            _statsPopupCloseTimer.Stop();
-            _statsPopupCloseTimer.Start();
-        }
-    }
-
-    private void CancelStatsPopupClose() => _statsPopupCloseTimer.Stop();
 
     protected override void OnSourceInitialized(EventArgs e)
     {

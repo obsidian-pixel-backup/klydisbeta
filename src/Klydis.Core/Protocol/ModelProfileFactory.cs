@@ -59,10 +59,27 @@ public static class ModelProfileFactory
                 ? Array.Empty<ToolProtocol>()
                 : new[] { toolProtocol != ToolProtocol.Unknown ? toolProtocol : ToolProtocol.GenericJson };
 
+        double confidence = CalculateProtocolConfidence(architecture, template, toolProtocol, reasoning, stopTokens, rawChatTemplate);
+        AgentModelTier tier = ResolveModelTier(modelId, modelPath);
+
+        CapabilityLevel toolCallingLevel = unknownFamily ? CapabilityLevel.Unsupported
+            : confidence >= 0.80 ? CapabilityLevel.Reliable
+            : nativeTools ? CapabilityLevel.Usable
+            : CapabilityLevel.Experimental;
+
+        CapabilityLevel continuationLevel = unknownFamily ? CapabilityLevel.Unsupported
+            : confidence >= 0.70 ? CapabilityLevel.Usable
+            : CapabilityLevel.Experimental;
+
+        CapabilityLevel repairLevel = unknownFamily ? CapabilityLevel.Unsupported
+            : confidence >= 0.75 ? CapabilityLevel.Usable
+            : CapabilityLevel.Experimental;
+
         return new ModelProfile
         {
             ModelId = modelId,
             ModelPath = modelPath,
+            Tier = tier,
             Architecture = architecture,
             Template = template,
             Reasoning = reasoning,
@@ -80,11 +97,104 @@ public static class ModelProfileFactory
             RequiresVisibleOutput = isThinking,
             MaxStepThinkingTokens = isThinking ? 4096 : 0,
             StopTokens = stopTokens ?? Array.Empty<string>(),
-            ToolCalling = nativeTools ? CapabilityLevel.Usable
-                : unknownFamily ? CapabilityLevel.Unsupported : CapabilityLevel.Experimental,
-            Continuation = CapabilityLevel.Experimental,
-            Repair = CapabilityLevel.Experimental
+            ProtocolConfidence = confidence,
+            ToolCalling = toolCallingLevel,
+            Continuation = continuationLevel,
+            Repair = repairLevel
         };
+    }
+
+    /// <summary>
+    /// Calculates empirical protocol confidence based on additive, independent evidence signals.
+    /// qwen35 + Qwen template + Native tools + Native thinking + stop tokens yields >= 0.85 (Reliable/Supported).
+    /// </summary>
+    public static double CalculateProtocolConfidence(
+        string architecture,
+        ChatTemplate template,
+        ToolProtocol toolProtocol,
+        ReasoningProtocol reasoning,
+        IReadOnlyList<string>? stopTokens,
+        string? rawChatTemplate = null,
+        bool probeSucceeded = false)
+    {
+        if (template == ChatTemplate.Generic || toolProtocol == ToolProtocol.Unknown)
+            return 0.15;
+
+        double score = 0.0;
+
+        // 1. Architecture match: +0.35
+        if (!string.IsNullOrWhiteSpace(architecture) && ResolveFamilyFromArchitecture(architecture).HasValue)
+        {
+            score += 0.35;
+        }
+
+        // 2. Chat template match: +0.20
+        if (!string.IsNullOrWhiteSpace(rawChatTemplate) && DetectFromEmbeddedTemplate(rawChatTemplate).HasValue)
+        {
+            score += 0.20;
+        }
+        else if (template != ChatTemplate.Generic)
+        {
+            score += 0.15;
+        }
+
+        // 3. Native tool protocol match: +0.15
+        if (toolProtocol is ToolProtocol.QwenNative or ToolProtocol.Llama3Native or ToolProtocol.DeepSeekNative
+            or ToolProtocol.MistralNative or ToolProtocol.GemmaNative or ToolProtocol.PhiNative or ToolProtocol.CommandRNative)
+        {
+            score += 0.15;
+        }
+        else if (toolProtocol == ToolProtocol.GenericJson)
+        {
+            score += 0.10;
+        }
+
+        // 4. Native think block / reasoning match: +0.10
+        if (reasoning == ReasoningProtocol.NativeThinkBlock)
+        {
+            score += 0.10;
+        }
+        else if (reasoning == ReasoningProtocol.None)
+        {
+            score += 0.05;
+        }
+
+        // 5. Tokenizer stop tokens known: +0.05
+        if (stopTokens != null && stopTokens.Count > 0)
+        {
+            score += 0.05;
+        }
+
+        // 6. Capability probe verified: +0.15
+        if (probeSucceeded)
+        {
+            score += 0.15;
+        }
+
+        return Math.Clamp(score, 0.0, 1.0);
+    }
+
+    /// <summary>
+    /// Derives the operational tier from model identifier/path naming.
+    /// </summary>
+    public static AgentModelTier ResolveModelTier(string modelId, string modelPath)
+    {
+        string combined = (modelId + " " + modelPath).ToLowerInvariant();
+        if (combined.Contains("0.5b") || combined.Contains("1b") || combined.Contains("1.5b") ||
+            combined.Contains("2b") || combined.Contains("3b") || combined.Contains("4b") ||
+            combined.Contains("smeagle") || combined.Contains("mini") || combined.Contains("small"))
+        {
+            return AgentModelTier.TierC_CompactAgent;
+        }
+
+        if (combined.Contains("30b") || combined.Contains("32b") || combined.Contains("70b") ||
+            combined.Contains("moe") || combined.Contains("r1") || combined.Contains("v3") ||
+            combined.Contains("large") || combined.Contains("deepseek-r1"))
+        {
+            return AgentModelTier.TierA_Reasoning;
+        }
+
+        return AgentModelTier.TierB_Standard;
     }
 
     /// <summary>

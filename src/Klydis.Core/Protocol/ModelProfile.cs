@@ -75,6 +75,19 @@ public enum CapabilityLevel
 }
 
 /// <summary>
+/// Operational tier derived from model size and reasoning capacity.
+/// Tier A: High reasoning capacity (large frontier/local models, deep CoT)
+/// Tier B: Standard reasoning capacity (medium models)
+/// Tier C: Compact agent mode (small/local models <= 4B parameters, structured single-item progression)
+/// </summary>
+public enum AgentModelTier
+{
+    TierA_Reasoning = 0,
+    TierB_Standard = 1,
+    TierC_CompactAgent = 2
+}
+
+/// <summary>
 /// The immutable per-model runtime profile — the authoritative description of how THIS model
 /// communicates with the agent runtime. Built once when the model loads (see
 /// <see cref="ModelProfileFactory"/>), consumed by protocol adapters, execution policy, and
@@ -85,6 +98,9 @@ public sealed record ModelProfile
 {
     /// <summary>Model identifier / file path as shown in the library.</summary>
     public required string ModelId { get; init; }
+
+    /// <summary>Operational tier of the model.</summary>
+    public AgentModelTier Tier { get; init; } = AgentModelTier.TierB_Standard;
 
     /// <summary>Path of the loaded GGUF file.</summary>
     public required string ModelPath { get; init; }

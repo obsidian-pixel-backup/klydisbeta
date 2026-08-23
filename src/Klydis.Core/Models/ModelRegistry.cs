@@ -298,11 +298,12 @@ public class ModelRegistry
             foreach (var group in duplicates)
             {
                 // Keep the best model in the group:
-                // 1. Prefer HuggingFace source, then Local, then Discovered
+                // 1. Prefer Bundled source, then HuggingFace, then Local, then Discovered
                 // 2. Prefer the one with a defined Role
                 // 3. Prefer the one with the newest InstalledAt
                 var bestModel = group
-                    .OrderByDescending(m => m.Source == ModelSource.HuggingFace)
+                    .OrderByDescending(m => m.Source == ModelSource.Bundled)
+                    .ThenByDescending(m => m.Source == ModelSource.HuggingFace)
                     .ThenByDescending(m => m.Source == ModelSource.Local)
                     .ThenByDescending(m => !string.IsNullOrEmpty(m.Role))
                     .ThenByDescending(m => m.InstalledAt)
@@ -322,25 +323,50 @@ public class ModelRegistry
             }
 
             var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            
+            var scanDirs = new List<(string Path, ModelSource Source)>();
+
             if (Directory.Exists(_modelsDirectory))
             {
-                // Recursive scan: downloads are scoped to per-repo subdirectories (see
-                // HuggingFaceClient.SanitizeRepoIdForPath) to avoid filename collisions, so the
-                // registry must find .gguf files at any depth. The flat top-level files from
-                // older layouts are still picked up.
-                var ggufFiles = Directory.EnumerateFiles(_modelsDirectory, "*.gguf", SearchOption.AllDirectories);
-                
+                scanDirs.Add((_modelsDirectory, ModelSource.Discovered));
+            }
+
+            // Bundled model directories (App output assets/models, root models, or dev root)
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string bundledAssetsModels = Path.Combine(baseDir, "assets", "models");
+            if (Directory.Exists(bundledAssetsModels))
+            {
+                scanDirs.Add((bundledAssetsModels, ModelSource.Bundled));
+            }
+
+            string bundledModels = Path.Combine(baseDir, "models");
+            if (Directory.Exists(bundledModels))
+            {
+                scanDirs.Add((bundledModels, ModelSource.Bundled));
+            }
+
+            string? devRoot = FindDevRoot(baseDir);
+            if (devRoot != null)
+            {
+                string devAssetsModels = Path.Combine(devRoot, "assets", "models");
+                if (Directory.Exists(devAssetsModels) && !devAssetsModels.Equals(bundledAssetsModels, StringComparison.OrdinalIgnoreCase))
+                {
+                    scanDirs.Add((devAssetsModels, ModelSource.Bundled));
+                }
+            }
+
+            foreach (var (dir, source) in scanDirs)
+            {
+                var ggufFiles = Directory.EnumerateFiles(dir, "*.gguf", SearchOption.AllDirectories);
                 foreach (var file in ggufFiles)
                 {
                     existingFiles.Add(file);
-                    
+
                     // Check if file is already registered
                     var existingModel = _models.Values.FirstOrDefault(m => m.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
                     if (existingModel == null)
                     {
-                        _logger?.LogInformation("Found new GGUF file: {File}", file);
-                        await RegisterDiscoveredModelAsync(file);
+                        _logger?.LogInformation("Found new GGUF file ({Source}): {File}", source, file);
+                        await RegisterDiscoveredModelAsync(file, source);
                         changed = true;
                     }
                 }
@@ -348,7 +374,7 @@ public class ModelRegistry
 
             // Remove models that no longer exist on disk
             var modelsToRemove = _models.Values
-                .Where(m => (m.Source == ModelSource.Local || m.Source == ModelSource.Discovered) && !File.Exists(m.FilePath))
+                .Where(m => (m.Source == ModelSource.Local || m.Source == ModelSource.Discovered || m.Source == ModelSource.Bundled) && !File.Exists(m.FilePath))
                 .ToList();
 
             foreach (var missingModel in modelsToRemove)
@@ -374,7 +400,49 @@ public class ModelRegistry
         }
     }
 
-    private async Task RegisterDiscoveredModelAsync(string filePath)
+    /// <summary>
+    /// Finds the default flagship model (Smeagle by priority, then bundled models, then most recently used).
+    /// </summary>
+    public ModelInfo? GetDefaultModel()
+    {
+        var allModels = GetAllModels().ToList();
+        if (allModels.Count == 0) return null;
+
+        // 1. Smeagle model (case-insensitive identifier match)
+        var smeagle = allModels.FirstOrDefault(m =>
+            m.DisplayName.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ||
+            m.FileName.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ||
+            m.FilePath.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ||
+            m.Id.Contains("smeagle", StringComparison.OrdinalIgnoreCase));
+        if (smeagle != null) return smeagle;
+
+        // 2. Bundled model
+        var bundled = allModels.FirstOrDefault(m => m.Source == ModelSource.Bundled);
+        if (bundled != null) return bundled;
+
+        // 3. Most recently used model
+        var mostRecent = allModels.OrderByDescending(m => m.LastUsedAt).FirstOrDefault();
+        if (mostRecent != null) return mostRecent;
+
+        // 4. First registered model
+        return allModels[0];
+    }
+
+    private static string? FindDevRoot(string startPath)
+    {
+        var dir = new DirectoryInfo(startPath);
+        while (dir != null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "KlydisBeta.sln")))
+            {
+                return dir.FullName;
+            }
+            dir = dir.Parent;
+        }
+        return null;
+    }
+
+    private async Task RegisterDiscoveredModelAsync(string filePath, ModelSource source = ModelSource.Discovered)
     {
         try
         {
@@ -388,7 +456,6 @@ public class ModelRegistry
             {
                 _logger?.LogWarning(ex, "Failed to parse GGUF metadata for {File}. Model will be loaded without metadata.", filePath);
             }
-            
             
             string id = Guid.NewGuid().ToString();
             string fileName = fileInfo.Name;
@@ -405,7 +472,7 @@ public class ModelRegistry
                 BlockCount: metadata?.BlockCount,
                 ContextLength: metadata?.ContextLength,
                 EstimatedVramMb: CalculateEstimatedVram(fileInfo.Length),
-                Source: ModelSource.Discovered,
+                Source: source,
                 InstalledAt: DateTime.UtcNow,
                 LastUsedAt: DateTime.UtcNow,
                 ChecksumSha256: null,

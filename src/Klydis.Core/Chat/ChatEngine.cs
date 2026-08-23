@@ -253,6 +253,7 @@ public class ChatEngine(
 {
     private readonly Klydis.Core.Tracing.IAgentTrace _agentTrace = agentTrace ?? new Klydis.Core.Tracing.AgentTraceService(messageStore);
     public Klydis.Core.Tracing.IAgentTrace AgentTrace => _agentTrace;
+    public ToolExecutor ToolExecutor => toolExecutor;
 
     private readonly List<ChatMessage> _history = new();
     private readonly Klydis.Core.Learning.AdaptiveLearningService? _adaptiveLearning = adaptiveLearning;
@@ -2193,10 +2194,34 @@ public class ChatEngine(
 
                 if (planIsCurrentTask)
                 {
-                    var planHeader = "\n\nCURRENT TASK PLAN (your todo list for the task in your LATEST user message — shown live to the user in the PLAN tab; keep it updated as you work and check off completed items with the 'plan' tool):\n" +
-                        string.Join("\n", currentPlan.Select(l => $"  {l}")) +
-                        (planProgress >= 0 ? $"\nOverall progress: {planProgress}%" : string.Empty) +
-                        "\nNOTE: This plan belongs ONLY to the task in your latest user message. If your latest message is a NEW task, this plan is OBSOLETE — do NOT execute its items. Replace it with a fresh 'plan' (action=create) or clear it, then work the new task.";
+                    string planHeader;
+                    if (currentPlan.Count > 10 || CurrentModelProfile?.Tier == Klydis.Core.Protocol.AgentModelTier.TierC_CompactAgent)
+                    {
+                        var planEntries = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                        int doneCount = planEntries.Count(e => e.Done);
+                        var currentItem = planEntries.FirstOrDefault(e => !e.Done);
+                        var upcoming = planEntries.Where(e => !e.Done).Skip(1).Take(3).Select(e => $"  [ ] {e.Text}").ToList();
+
+                        var sbPlan = new StringBuilder();
+                        sbPlan.AppendLine($"\n\nPLAN SUMMARY: {currentPlan.Count} total steps ({doneCount} done, {currentPlan.Count - doneCount} remaining) — Overall progress: {planProgress}%");
+                        if (currentItem != null)
+                        {
+                            sbPlan.AppendLine($"CURRENT ACTIVE STEP: [ACTIVE] {currentItem.Text}");
+                        }
+                        if (upcoming.Count > 0)
+                        {
+                            sbPlan.AppendLine("UPCOMING STEPS:");
+                            foreach (var u in upcoming) sbPlan.AppendLine(u);
+                        }
+                        planHeader = sbPlan.ToString();
+                    }
+                    else
+                    {
+                        planHeader = "\n\nCURRENT TASK PLAN (your todo list for the task in your LATEST user message — shown live to the user in the PLAN tab; keep it updated as you work and check off completed items with the 'plan' tool):\n" +
+                            string.Join("\n", currentPlan.Select(l => $"  {l}")) +
+                            (planProgress >= 0 ? $"\nOverall progress: {planProgress}%" : string.Empty) +
+                            "\nNOTE: This plan belongs ONLY to the task in your latest user message. If your latest message is a NEW task, this plan is OBSOLETE — do NOT execute its items. Replace it with a fresh 'plan' (action=create) or clear it, then work the new task.";
+                    }
 
                     // EXECUTION STATE continuation contract — deterministic from durable sources
                     // (plan checklist + queue), so rolling compaction can never erase the
@@ -2223,15 +2248,27 @@ public class ChatEngine(
                         var stepAllowedForPrompt = currentStepForTurn?.AllowedTools;
                         if (stepAllowedForPrompt != null)
                         {
-                            // A non-null current step means open plan items exist → completion
-                            // is not eligible yet → task_complete is not exposed (the gate still
-                            // backstops it).
                             var exposedForStep = stepAllowedForPrompt
                                 .Where(n => !n.Equals("task_complete", StringComparison.OrdinalIgnoreCase))
-                                .OrderBy(n => n, StringComparer.Ordinal);
-                            planHeader += "\nCURRENT STEP ALLOWED TOOLS (this step may ONLY call these tools):\n" +
-                                string.Join(", ", exposedForStep) +
-                                "\nAny tool not listed above is REJECTED by the runtime before execution — do not call it.\n";
+                                .OrderByDescending(Klydis.Core.Tasks.CapabilityResolver.GetToolPriority)
+                                .ThenBy(n => n, StringComparer.Ordinal)
+                                .ToList();
+
+                            var recommendedTool = exposedForStep.FirstOrDefault(t => Klydis.Core.Tasks.CapabilityResolver.GetToolPriority(t) >= 80);
+                            var fallbackTools = exposedForStep.Where(t => t != recommendedTool && !Klydis.Core.Tasks.StepClassifier.ControlTools.Contains(t)).ToList();
+
+                            if (recommendedTool != null && fallbackTools.Count > 0)
+                            {
+                                planHeader += $"\nRECOMMENDED ACTION (preferred specialized tool for this step):\n  {recommendedTool}\n" +
+                                    $"FALLBACK ACTIONS (use only if specialized tool fails):\n  {string.Join(", ", fallbackTools)}\n" +
+                                    "Any tool not in the allowed set is REJECTED by the runtime before execution — do not call it.\n";
+                            }
+                            else
+                            {
+                                planHeader += "\nCURRENT STEP ALLOWED TOOLS (this step may ONLY call these tools):\n" +
+                                    string.Join(", ", exposedForStep) +
+                                    "\nAny tool not listed above is REJECTED by the runtime before execution — do not call it.\n";
+                            }
                         }
                     }
                     catch (Exception ex)
@@ -3665,6 +3702,25 @@ public class ChatEngine(
                                 catch (Exception ex)
                                 {
                                     logger.LogDebug(ex, "Failed to record diagnostic claim for {Tool}.", req.Name);
+                                }
+                            }
+                        }
+
+                        // Automatic Step Progression for Diagnostic/Inspection actions:
+                        // When a specialized or diagnostic tool executes successfully on an inspection/command step,
+                        // immediately advance the plan item so the supervisor and Right Panel update deterministically.
+                        if (result.Success && currentStepForTurn != null && !req.Name.Equals("plan", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (currentStepForTurn.ExpectedActionKind is Klydis.Core.Tasks.StepActionKind.Inspect or Klydis.Core.Tasks.StepActionKind.CommandExecution ||
+                                Klydis.Core.Tasks.CapabilityResolver.IsSpecializedDiagnosticTool(req.Name))
+                            {
+                                try
+                                {
+                                    await toolExecutor.AdvancePlanItemDoneAsync(generatingSessionId, currentStepForTurn.Title);
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogDebug(ex, "Failed to auto-advance plan item for completed diagnostic tool {Tool}.", req.Name);
                                 }
                             }
                         }

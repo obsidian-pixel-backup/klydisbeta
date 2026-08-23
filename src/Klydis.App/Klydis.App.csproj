@@ -83,6 +83,14 @@
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- Bundled models: ships default/flagship models (e.g. Smeagle) directly with the
+       application distribution so Klydis works completely self-contained out-of-the-box. -->
+  <ItemGroup>
+    <Content Include="..\..\assets\models\**\*"
+             Link="assets\models\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Update="runtimes\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

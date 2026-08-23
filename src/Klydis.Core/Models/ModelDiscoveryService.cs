@@ -47,6 +47,30 @@ public class ModelDiscoveryService : IDisposable
         ScanPaths.Add(_defaultModelsPath);
         ScanPaths.Add(userHome); // Implicitly covers Documents, Downloads, Desktop when scanned recursively
 
+        // Bundled model paths next to application binary or in dev repository
+        string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+        string bundledAssetsModels = Path.Combine(baseDir, "assets", "models");
+        if (Directory.Exists(bundledAssetsModels) && !ScanPaths.Contains(bundledAssetsModels, StringComparer.OrdinalIgnoreCase))
+        {
+            ScanPaths.Add(bundledAssetsModels);
+        }
+
+        string bundledModels = Path.Combine(baseDir, "models");
+        if (Directory.Exists(bundledModels) && !ScanPaths.Contains(bundledModels, StringComparer.OrdinalIgnoreCase))
+        {
+            ScanPaths.Add(bundledModels);
+        }
+
+        string? devRoot = FindDevRoot(baseDir);
+        if (devRoot != null)
+        {
+            string devAssetsModels = Path.Combine(devRoot, "assets", "models");
+            if (Directory.Exists(devAssetsModels) && !ScanPaths.Contains(devAssetsModels, StringComparer.OrdinalIgnoreCase))
+            {
+                ScanPaths.Add(devAssetsModels);
+            }
+        }
+
         Directory.CreateDirectory(_defaultModelsPath);
 
         // Setup file watcher for hot-reload on the default models directory
@@ -155,6 +179,23 @@ public class ModelDiscoveryService : IDisposable
             _logger.LogInformation("Model file renamed/moved into directory: {Path}", e.FullPath);
             ModelDiscovered?.Invoke(e.FullPath);
         }
+    }
+
+    /// <summary>
+    /// Walks up from <paramref name="startPath"/> looking for KlydisBeta.sln — the definitive repo marker.
+    /// </summary>
+    private static string? FindDevRoot(string startPath)
+    {
+        var dir = new DirectoryInfo(startPath);
+        while (dir != null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "KlydisBeta.sln")))
+            {
+                return dir.FullName;
+            }
+            dir = dir.Parent;
+        }
+        return null;
     }
 
     /// <summary>

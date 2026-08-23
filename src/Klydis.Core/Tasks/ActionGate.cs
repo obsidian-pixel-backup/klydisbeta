@@ -123,6 +123,10 @@ public static class ActionGate
             if (mapped != null)
             {
                 toolDef = tools.FirstOrDefault(t => string.Equals(t.Name, mapped, StringComparison.OrdinalIgnoreCase));
+                if (toolDef != null)
+                {
+                    request = new ToolCallRequest(toolDef.Name, request.Arguments);
+                }
             }
         }
 
@@ -159,11 +163,31 @@ public static class ActionGate
         }
 
         // 2. Step scoping: a NON-NULL allowed-tool set is authoritative — the action must be
-        //    in it. NULL means the step declares NO restriction (existence-gated only).
-        if (stepAllowedTools != null && !stepAllowedTools.Contains(toolDef.Name))
+        //    in it or satisfy equivalent capability compatibility. NULL means the step declares NO restriction.
+        bool isAllowed = stepAllowedTools == null || stepAllowedTools.Contains(toolDef.Name);
+
+        // Capability compatibility fallback:
+        // If step allows run_command and model requested a specialized read-only diagnostic or inspection tool, permit it!
+        if (!isAllowed && stepAllowedTools != null)
         {
-            var allowed = string.Join(", ", stepAllowedTools
-                .OrderBy(n => n, StringComparer.Ordinal));
+            if (stepAllowedTools.Contains("run_command") && CapabilityResolver.IsSpecializedDiagnosticTool(toolDef.Name))
+            {
+                isAllowed = true;
+            }
+            else if ((stepAllowedTools.Contains("write_file") || stepAllowedTools.Contains("edit_file") || stepAllowedTools.Contains("run_command")) &&
+                     (toolDef.Name is "read_file" or "list_directory" or "search_files" or "file_exists"))
+            {
+                isAllowed = true;
+            }
+        }
+
+        if (!isAllowed)
+        {
+            var candidateAlternatives = stepAllowedTools!
+                .OrderByDescending(CapabilityResolver.GetToolPriority)
+                .ToList();
+            string recommended = candidateAlternatives.FirstOrDefault() ?? "plan";
+
             var repairJson = JsonSerializer.Serialize(new
             {
                 repair = new
@@ -171,13 +195,14 @@ public static class ActionGate
                     type = "tool_not_allowed_for_step",
                     tool = toolDef.Name,
                     current_step = currentStep ?? "unknown",
-                    allowed_tools = stepAllowedTools.OrderBy(n => n).ToList(),
+                    allowed_tools = candidateAlternatives,
+                    recommended_alternative = recommended,
                     allowed_retry = true
                 }
             });
             return new ActionGateVerdict(false, ActionGateError.ToolNotAllowedForStep,
                 repairJson,
-                allowed, currentStep);
+                string.Join(", ", candidateAlternatives), currentStep);
         }
 
         // 3. Schema: every required parameter must be present with a non-empty value. A call
@@ -315,16 +340,22 @@ public static class ActionGate
         string aliasKey = name.ToLowerInvariant();
         return aliasKey switch
         {
-            "system_cpu" => "system_cpu_info",
-            "system_gpu" => "system_gpu_info",
-            "system_mem" or "system_ram" => "system_memory",
-            "system_disk" => "system_disks",
-            "system_proc" => "system_processes",
-            "top_processes" or "processes_top" => "system_top_processes",
-            // smeagle-4b (qwen35): invented "system_cpu_processes" for the top-CPU-processes
-            // probe — map it to the canonical tool instead of burning a rejection cycle.
-            "system_cpu_processes" or "cpu_processes" or "system_cpu_procs" => "system_top_processes",
-            "find_process" or "search_processes" => "process_find",
+            "system_cpu" or "system_cpu_usage" or "system_cpu_metrics" or "cpu_info" or "cpu_usage" => "system_cpu_info",
+            "system_gpu" or "system_gpu_usage" or "system_gpu_metrics" or "gpu_info" or "gpu_usage" => "system_gpu_info",
+            "system_mem" or "system_ram" or "system_memory_metrics" or "ram_info" or "memory_info" => "system_memory",
+            "system_disk" or "system_disk_metrics" or "disk_info" or "disk_space" => "system_disks",
+            "system_os_info" or "os_info" or "windows_info" => "system_os",
+            "system_proc" or "process_list" => "system_processes",
+            "top_processes" or "processes_top" or "system_cpu_processes" or "cpu_processes" or "system_cpu_procs" or "system_top_processes" => "system_top_processes",
+            "find_process" or "search_processes" or "get_process" => "process_find",
+            "system_temp" or "system_temperature" => "system_temperatures",
+            "system_time" or "system_uptime" => "system_uptime",
+            "hardware_report" or "system_hardware" => "system_hardware_report",
+            "software_report" or "system_software" => "system_software_report",
+            "system_info" or "get_system_info" => "system_report",
+            "list_dir" => "list_directory",
+            "search_dir" or "find_files" => "search_files",
+            "str_replace" or "replace_text" => "replace_lines",
             _ => null
         };
     }

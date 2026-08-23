@@ -20,7 +20,12 @@ public enum ModelSource
     /// <summary>
     /// Discovered automatically by the discovery service.
     /// </summary>
-    Discovered
+    Discovered,
+
+    /// <summary>
+    /// Bundled directly with the application distribution.
+    /// </summary>
+    Bundled
 }
 
 /// <summary>

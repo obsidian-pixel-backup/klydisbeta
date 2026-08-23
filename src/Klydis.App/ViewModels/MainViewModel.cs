@@ -9,7 +9,6 @@ public enum ActivePanel
     Chat,
     Models,
     Skills,
-    Monitor,
     Rag,
     Settings
 }
@@ -169,7 +168,6 @@ public partial class MainViewModel : ObservableObject
                 ActivePanel.Chat => ChatViewModel,
                 ActivePanel.Models => ModelLibraryViewModel,
                 ActivePanel.Skills => SkillLibraryViewModel,
-                ActivePanel.Monitor => SystemMonitorViewModel,
                 ActivePanel.Rag => RagViewModel,
                 ActivePanel.Settings => SettingsViewModel,
                 _ => ChatViewModel

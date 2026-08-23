@@ -159,7 +159,7 @@ Or open `KlydisBeta.sln` in Visual Studio 2022+ / Rider and run `Klydis.App`.
 3. Open the **Models** tab → **Refresh** → **Load Model** (or pick it from the status-bar
    model selector in the Chat tab).
 4. Tune GPU offloading and context in **Settings** (auto-offload and auto context are
-   available) and monitor live VRAM in the stats popup.
+   available) and monitor live VRAM in the bottom-right status bar.
 
 ### Publish a release build
 
@@ -797,9 +797,9 @@ activity.
   the offload planner.
 - **CPU affinity** — `CpuAffinityHelper` pins inference to performance cores on hybrid
   (P/E-core) CPUs.
-- **Telemetry UI** — live tokens/sec, VRAM, model memory, token usage, and context-usage
-  gauges in the status-bar stats popup, with severity coloring (warning/critical) and a
-  context-occupancy bar.
+- **Telemetry UI** — live tokens/sec, VRAM, model memory, token usage, CPU, GPU, RAM,
+  and context-usage in the bottom-right status bar, with per-metric severity coloring
+  (warning/critical) and rich hover tooltips.
 
 ---
 
@@ -966,7 +966,7 @@ The inline menu in the chat header shows a live summary — e.g. `Standard · St
 
 ## The UI surface
 
-- **Activity bar (left)** — Chat, Models, Skills, Monitor, RAG, Settings. The Models icon
+- **Activity bar (left)** — Chat, Models, Skills, RAG, Settings. The Models icon
   shows an inline download progress bar when Hugging Face downloads are active.
 - **Chat tab** — session list (pin / rename / delete, per-session working indicator),
   streaming transcript with thinking blocks (collapsible `<think>` bubbles), tool-call
@@ -978,12 +978,11 @@ The inline menu in the chat header shows a live summary — e.g. `Standard · St
   highest rated), model cards, resumable downloads, in-place 4-bit quantization.
 - **Skills tab** — browse/search the skill library, view details, activate, create custom
   skills.
-- **Monitor tab** — live CPU/GPU/RAM/VRAM/disk gauges with severity coloring.
 - **RAG tab** — collections, folder indexing, hybrid search.
 - **Settings tab** — see [Settings reference](#settings-reference).
 - **Status bar** — model selector, Unload, loading/ready indicator, dependency-update
-  notification, and the stats popup (CPU, GPU, RAM, VRAM, model memory, tokens/s, token
-  usage, context-free %, context occupancy bar).
+  notification, and real-time stats formation (CPU, GPU, RAM, VRAM, model memory, tokens/s,
+  token usage, context-free %).
 - **Workbench (right panel)** — see [The workbench](#the-workbench).
 - **Model-aware guardrails** — a "working elsewhere" banner explains when the model is busy
   in another chat instead of silently queueing input.
@@ -1035,7 +1034,7 @@ KlydisBeta/
 │       ├── ViewModels/          # Chat, SidePanel, ModelLibrary, RAG, Skills, Settings,
 │       │                        # SystemMonitor, downloads…
 │       ├── Views/               # ChatView, ChatSidePanelView, ModelLibraryView,
-│       │                        # RagView, SkillsView, SettingsView, SystemMonitorView,
+│       │                        # RagView, SkillsView, SettingsView,
 │       │                        # SplashWindow, DependencyUpdateWindow, TextContextWindow
 │       ├── Themes/              # backgrounds, accents, typography, markdown styles
 │       ├── Controls/            # ColorPickerControl
