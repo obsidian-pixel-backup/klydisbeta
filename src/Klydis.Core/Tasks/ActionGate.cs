@@ -187,6 +187,8 @@ public static class ActionGate
                 .OrderByDescending(CapabilityResolver.GetToolPriority)
                 .ToList();
             string recommended = candidateAlternatives.FirstOrDefault() ?? "plan";
+            string validToolsSummary = string.Join(", ", candidateAlternatives);
+            string guidance = $"The requested action '{toolDef.Name}' is blocked by the current step. Valid tools: [{validToolsSummary}]. Recommended: '{recommended}'. Do not repeat the blocked call. Choose one valid tool.";
 
             var repairJson = JsonSerializer.Serialize(new
             {
@@ -197,12 +199,13 @@ public static class ActionGate
                     current_step = currentStep ?? "unknown",
                     allowed_tools = candidateAlternatives,
                     recommended_alternative = recommended,
+                    guidance = guidance,
                     allowed_retry = true
                 }
             });
             return new ActionGateVerdict(false, ActionGateError.ToolNotAllowedForStep,
                 repairJson,
-                string.Join(", ", candidateAlternatives), currentStep);
+                validToolsSummary, currentStep);
         }
 
         // 3. Schema: every required parameter must be present with a non-empty value. A call

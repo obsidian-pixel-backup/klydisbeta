@@ -78,7 +78,13 @@ public class ModelRegistry
                 {
                     if (m != null && !string.IsNullOrEmpty(m.Id))
                     {
-                        dict[m.Id] = m;
+                        var entry = m;
+                        if (entry.FileName.Contains("smeagle", StringComparison.OrdinalIgnoreCase) &&
+                            (string.IsNullOrEmpty(entry.DisplayName) || entry.DisplayName == entry.FileName))
+                        {
+                            entry = entry with { DisplayName = "Smeagle 4B", Role = entry.Role ?? "Agent" };
+                        }
+                        dict[entry.Id] = entry;
                     }
                 }
                 _models = dict;
@@ -116,7 +122,7 @@ public class ModelRegistry
         try
         {
             var options = new JsonSerializerOptions { WriteIndented = true };
-            string json = JsonSerializer.Serialize(_models.Values, options);
+            string json = JsonSerializer.Serialize(_models.Values.ToList(), options);
             await File.WriteAllTextAsync(_registryFilePath, json);
         }
         catch (Exception ex)
@@ -179,6 +185,25 @@ public class ModelRegistry
         try
         {
             return await GetActiveDownloadsInternalAsync();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task SaveActiveDownloadsAsync(List<ActiveDownloadRecord> activeDownloads)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            string path = Path.Combine(_modelsDirectory, "active_downloads.json");
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(activeDownloads, options));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Failed to save active downloads.");
         }
         finally
         {
@@ -289,23 +314,26 @@ public class ModelRegistry
 
             bool changed = false;
 
-            // Deduplicate existing entries by FilePath (case-insensitive)
+            // Deduplicate existing entries by FileName + FileSizeBytes, or FilePath
             var duplicates = _models.Values
-                .GroupBy(m => m.FilePath, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(m => $"{m.FileName.ToLowerInvariant()}::{m.FileSizeBytes}")
                 .Where(g => g.Count() > 1)
                 .ToList();
 
             foreach (var group in duplicates)
             {
-                // Keep the best model in the group:
-                // 1. Prefer Bundled source, then HuggingFace, then Local, then Discovered
-                // 2. Prefer the one with a defined Role
-                // 3. Prefer the one with the newest InstalledAt
+                // Keep the single best model in the group:
+                // 1. Prefer existing file on disk
+                // 2. Prefer Bundled source, then HuggingFace, then Local, then Discovered
+                // 3. Prefer the one with a defined Role or DisplayName != FileName
+                // 4. Prefer the one with the newest InstalledAt
                 var bestModel = group
-                    .OrderByDescending(m => m.Source == ModelSource.Bundled)
+                    .OrderByDescending(m => File.Exists(m.FilePath))
+                    .ThenByDescending(m => m.Source == ModelSource.Bundled)
                     .ThenByDescending(m => m.Source == ModelSource.HuggingFace)
                     .ThenByDescending(m => m.Source == ModelSource.Local)
                     .ThenByDescending(m => !string.IsNullOrEmpty(m.Role))
+                    .ThenByDescending(m => !string.Equals(m.DisplayName, m.FileName, StringComparison.OrdinalIgnoreCase))
                     .ThenByDescending(m => m.InstalledAt)
                     .First();
 
@@ -313,7 +341,7 @@ public class ModelRegistry
                 {
                     if (duplicateModel.Id != bestModel.Id)
                     {
-                        _logger?.LogInformation("Removing duplicate model registration for path {Path} (ID: {Id})", duplicateModel.FilePath, duplicateModel.Id);
+                        _logger?.LogInformation("Removing duplicate model registration for {FileName} (Path: {Path}, ID: {Id})", duplicateModel.FileName, duplicateModel.FilePath, duplicateModel.Id);
                         if (_models.TryRemove(duplicateModel.Id, out _))
                         {
                             changed = true;
@@ -360,9 +388,13 @@ public class ModelRegistry
                 foreach (var file in ggufFiles)
                 {
                     existingFiles.Add(file);
+                    var fi = new FileInfo(file);
 
-                    // Check if file is already registered
-                    var existingModel = _models.Values.FirstOrDefault(m => m.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
+                    // Check if file is already registered (by exact FilePath OR by matching FileName + FileSizeBytes)
+                    var existingModel = _models.Values.FirstOrDefault(m =>
+                        m.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase) ||
+                        (m.FileName.Equals(fi.Name, StringComparison.OrdinalIgnoreCase) && m.FileSizeBytes == fi.Length));
+
                     if (existingModel == null)
                     {
                         _logger?.LogInformation("Found new GGUF file ({Source}): {File}", source, file);
@@ -379,7 +411,7 @@ public class ModelRegistry
 
             foreach (var missingModel in modelsToRemove)
             {
-                _logger?.LogInformation("Removing missing model from registry: {Id}", missingModel.Id);
+                _logger?.LogInformation("Removing missing model from registry: {Path}", missingModel.FilePath);
                 if (_models.TryRemove(missingModel.Id, out _))
                 {
                     changed = true;
@@ -459,24 +491,58 @@ public class ModelRegistry
             
             string id = Guid.NewGuid().ToString();
             string fileName = fileInfo.Name;
+            string displayName = fileName;
+            string? role = null;
+
+            // Check for manifest.json in the same directory or parent directory
+            string? manifestPath = Path.Combine(fileInfo.DirectoryName ?? "", "manifest.json");
+            if (File.Exists(manifestPath))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("id", out var idProp) && !string.IsNullOrWhiteSpace(idProp.GetString()))
+                    {
+                        id = idProp.GetString()!;
+                    }
+                    if (root.TryGetProperty("displayName", out var dispProp) && !string.IsNullOrWhiteSpace(dispProp.GetString()))
+                    {
+                        displayName = dispProp.GetString()!;
+                    }
+                    if (root.TryGetProperty("role", out var roleProp))
+                    {
+                        role = roleProp.GetString();
+                    }
+                }
+                catch (Exception mex)
+                {
+                    _logger?.LogDebug(mex, "Could not parse manifest.json for {File}", filePath);
+                }
+            }
+            else if (fileName.Contains("smeagle", StringComparison.OrdinalIgnoreCase))
+            {
+                displayName = "Smeagle 4B";
+                role = "Agent";
+            }
             
             var model = new ModelInfo(
                 Id: id,
-                DisplayName: fileName,
+                DisplayName: displayName,
                 FilePath: filePath,
                 FileName: fileName,
                 FileSizeBytes: fileInfo.Length,
-                Architecture: metadata?.Architecture,
+                Architecture: metadata?.Architecture ?? (fileName.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ? "qwen35" : null),
                 ParameterCount: null,
-                QuantizationType: metadata?.QuantizationType,
+                QuantizationType: metadata?.QuantizationType ?? (fileName.Contains("Q8_0", StringComparison.OrdinalIgnoreCase) ? "Q8_0" : null),
                 BlockCount: metadata?.BlockCount,
-                ContextLength: metadata?.ContextLength,
+                ContextLength: metadata?.ContextLength ?? (fileName.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ? 131072 : null),
                 EstimatedVramMb: CalculateEstimatedVram(fileInfo.Length),
                 Source: source,
                 InstalledAt: DateTime.UtcNow,
                 LastUsedAt: DateTime.UtcNow,
                 ChecksumSha256: null,
-                Role: null,
+                Role: role,
                 RawChatTemplate: metadata?.RawChatTemplate
             );
 

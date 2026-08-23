@@ -60,22 +60,18 @@ namespace Klydis.Core.Memory
     private const int MaxWorldStateChars = 8000;
 
     /// <summary>
-    /// Effective WorldState character cap for the CURRENT model context. Long-horizon tasks on
-    /// small context windows previously grew WorldState (every rolling compression appends a
-    /// summary) toward the fixed 8000-char cap, which then consumed a large share of the
-    /// system-prompt budget on every turn — the model's working memory shrank until the
-    /// budget pass evicted history, and WorldState fought the conversation for the window.
-    /// Scaling the cap with the loaded context (up to the 8000-char ceiling) keeps small
-    /// windows at ~1.5K-3.5K chars (~400-900 tokens) of world state so the rest stays
-    /// available for conversation history on long-horizon runs.
+    /// Effective WorldState character cap for the CURRENT model context. Capped at <= 5% of
+    /// working context (~400-800 tokens / 1400-2800 chars) so WorldState never acts as an unbudgeted second transcript.
     /// </summary>
     private int GetWorldStateCapChars()
     {
         if (_inferenceEngine != null && _inferenceEngine.IsModelLoaded && _inferenceEngine.ContextSize > 0)
         {
-            return Math.Clamp((int)(_inferenceEngine.ContextSize * 0.35), 1500, MaxWorldStateChars);
+            // 5% of context window in tokens * 3.5 chars/token (capped at 2800 chars ~ 800 tokens)
+            int fivePercentChars = (int)(_inferenceEngine.ContextSize * 0.05 * 3.5);
+            return Math.Clamp(fivePercentChars, 800, 2800);
         }
-        return MaxWorldStateChars;
+        return 2800;
     }
 
     /// <summary>

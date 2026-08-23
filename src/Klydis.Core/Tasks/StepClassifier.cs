@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Klydis.Core.Capabilities;
 
 namespace Klydis.Core.Tasks;
 
@@ -181,8 +182,8 @@ public static class StepClassifier
 
         if (VerificationMarkers.Any(t.Contains))
         {
-            return Make(StepActionKind.Verification,
-                new[] { "run_command", "read_file", "list_directory", "search_files" },
+            return MakeWithCapabilities(StepActionKind.Verification,
+                new[] { CapabilityIdentifiers.BuildVerify, CapabilityIdentifiers.TestVerify, CapabilityIdentifiers.FileRead, CapabilityIdentifiers.FileSearch },
                 skills: new[] { "verification", "evidence" },
                 artifacts: Array.Empty<string>(),
                 criteria: new[] { "Build/tests/commands succeed", "Evidence recorded", "Result reported factually" },
@@ -190,8 +191,8 @@ public static class StepClassifier
         }
         if (SummaryMarkers.Any(t.Contains))
         {
-            return Make(StepActionKind.Summary,
-                new[] { "write_file", "read_file" },
+            return MakeWithCapabilities(StepActionKind.Summary,
+                new[] { CapabilityIdentifiers.FileWrite, CapabilityIdentifiers.FileRead },
                 skills: new[] { "delivery" },
                 artifacts: new[] { "Deliverable" },
                 criteria: new[] { "Deliverable produced", "Result presented" },
@@ -211,9 +212,7 @@ public static class StepClassifier
         }
         // PLANNING comes BEFORE inspection/mutation (semantic precedence, P1.8-Fix-1): a
         // design/architecture step is a Plan (its deliverable is a design direction), never
-        // a FileMutation. "Design the landing-page architecture and visual direction" must
-        // yield AllowedTools = { plan } + control tools — NOT write_file/edit_file — or the
-        // model is handed the mutation surface for a step whose output is a decision.
+        // a FileMutation.
         if (PlanningMarkers.Any(t.Contains))
         {
             return Make(StepActionKind.Plan,
@@ -245,8 +244,8 @@ public static class StepClassifier
         }
         if (ResearchMarkers.Any(t.Contains))
         {
-            return Make(StepActionKind.Research,
-                new[] { "search_web", "crawl_url", "read_file", "list_directory" },
+            return MakeWithCapabilities(StepActionKind.Research,
+                new[] { CapabilityIdentifiers.WebSearch, CapabilityIdentifiers.WebCrawl, CapabilityIdentifiers.FileRead, CapabilityIdentifiers.FileList },
                 skills: new[] { "research" },
                 artifacts: new[] { "Research notes" },
                 criteria: new[] { "Findings from real tool results only" },
@@ -254,8 +253,8 @@ public static class StepClassifier
         }
         if (MutationMarkers.Any(t.Contains))
         {
-            return Make(StepActionKind.FileMutation,
-                new[] { "read_file", "write_file", "edit_file", "replace_lines", "apply_patch", "structural_replace", "list_directory", "search_files" },
+            return MakeWithCapabilities(StepActionKind.FileMutation,
+                new[] { CapabilityIdentifiers.FileWrite, CapabilityIdentifiers.FileEdit, CapabilityIdentifiers.FileRead, CapabilityIdentifiers.FileList, CapabilityIdentifiers.FileSearch },
                 skills: new[] { "file-mutation" },
                 artifacts: new[] { "Code/Document changed" },
                 criteria: new[] { "Files actually changed", "No syntax errors" },
@@ -263,20 +262,19 @@ public static class StepClassifier
         }
         if (SystemDiagnosticMarkers.Any(t.Contains))
         {
-            return Make(StepActionKind.CommandExecution,
-                new[]
-                {
-                    "run_command", "read_file", "list_directory", "search_files",
-                    "get_system_info", "system_report",
-                    "system_cpu_info", "system_cpu_usage", "system_cpu_metrics",
-                    "system_gpu_info", "system_gpu_usage", "system_gpu_metrics",
-                    "system_memory", "system_memory_metrics",
-                    "system_disks", "system_disk_metrics",
-                    "system_os", "system_os_info",
-                    "system_temperatures", "system_processes", "system_gpu_processes",
-                    "system_uptime", "system_hardware_report", "system_software_report",
-                    "system_top_processes", "process_find"
-                },
+            var matchedCaps = new List<string>();
+            if (t.Contains("gpu")) matchedCaps.Add(CapabilityIdentifiers.GpuTelemetry);
+            if (t.Contains("cpu")) matchedCaps.Add(CapabilityIdentifiers.CpuTelemetry);
+            if (t.Contains("ram") || t.Contains("memory")) matchedCaps.Add(CapabilityIdentifiers.MemoryTelemetry);
+            if (t.Contains("disk")) matchedCaps.Add(CapabilityIdentifiers.DiskTelemetry);
+            if (t.Contains("temperature")) matchedCaps.Add(CapabilityIdentifiers.ThermalTelemetry);
+            if (t.Contains("process")) matchedCaps.Add(CapabilityIdentifiers.ProcessInspection);
+            if (t.Contains("os") || t.Contains("operating system")) matchedCaps.Add(CapabilityIdentifiers.OsInfo);
+            if (t.Contains("uptime") || t.Contains("boot")) matchedCaps.Add(CapabilityIdentifiers.OsUptime);
+            if (matchedCaps.Count == 0) matchedCaps.Add(CapabilityIdentifiers.SystemDiagnostics);
+
+            return MakeWithCapabilities(StepActionKind.CommandExecution,
+                matchedCaps.ToArray(),
                 skills: new[] { "system-diagnostics", "command-execution" },
                 artifacts: Array.Empty<string>(),
                 criteria: new[] { "System command executed", "Evidence recorded from tool output" },
@@ -285,6 +283,30 @@ public static class StepClassifier
 
         // No marker matched: no restriction (existence-gated only), no specific action kind.
         return StepClassification.Default;
+    }
+
+    private static StepClassification MakeWithCapabilities(
+        StepActionKind kind,
+        string[] capabilities,
+        string[]? skills = null,
+        string[]? artifacts = null,
+        string[]? criteria = null,
+        string? condition = null)
+    {
+        var tools = ToolRouter.GetRankedAllowedToolNames(capabilities);
+        var allowed = new HashSet<string>(tools, StringComparer.OrdinalIgnoreCase);
+        allowed.UnionWith(ControlTools);
+        string? preferred = capabilities.Length > 0 ? ToolRouter.GetPreferredTool(capabilities[0]) : null;
+
+        return new StepClassification(
+            kind,
+            allowed,
+            skills ?? Array.Empty<string>(),
+            artifacts ?? Array.Empty<string>(),
+            criteria ?? Array.Empty<string>(),
+            condition,
+            capabilities,
+            preferred);
     }
 
     private static StepClassification Make(
@@ -304,7 +326,9 @@ public static class StepClassifier
             skills ?? Array.Empty<string>(),
             artifacts ?? Array.Empty<string>(),
             criteria ?? Array.Empty<string>(),
-            condition);
+            condition,
+            Array.Empty<string>(),
+            workspaceTools.Length > 0 ? workspaceTools[0] : null);
     }
 }
 
@@ -318,9 +342,12 @@ public sealed record StepClassification(
     IReadOnlyList<string> RequiredSkills,
     IReadOnlyList<string> ExpectedArtifacts,
     IReadOnlyList<string> VerificationCriteria,
-    string? CompletionCondition)
+    string? CompletionCondition,
+    IReadOnlyList<string>? RequiredCapabilities = null,
+    string? PreferredTool = null)
 {
     public static readonly StepClassification Default = new(
         StepActionKind.None, null,
-        Array.Empty<string>(), Array.Empty<string>(), Array.Empty<string>(), null);
+        Array.Empty<string>(), Array.Empty<string>(), Array.Empty<string>(), null,
+        Array.Empty<string>(), null);
 }

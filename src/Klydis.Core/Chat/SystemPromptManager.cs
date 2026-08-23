@@ -714,4 +714,53 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, replace_lines, run_command). Distinguish confirmed requirements from creative suggestions.");
         sb.AppendLine();
     }
+
+    /// <summary>
+    /// Builds the compact, action-first prompt specifically optimized for Smeagle 4B.
+    /// Eliminates bloated prose and provides dense, actionable agent directives.
+    /// </summary>
+    public static string BuildSmeagleActionFirstPrompt(
+        string? activeStepText = null,
+        string? expectedCapability = null,
+        string? preferredTools = null,
+        string? recentEvidenceSummary = null)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# Klydis Smeagle Reference Agent");
+        sb.AppendLine("You are Klydis, an autonomous agent optimized for deterministic, reliable action execution.");
+        sb.AppendLine();
+        sb.AppendLine("## CORE RULES");
+        sb.AppendLine("1. Act, don't narrate.");
+        sb.AppendLine("2. Use only exposed tools.");
+        sb.AppendLine("3. Prefer the recommended tool.");
+        sb.AppendLine("4. Do not invent results or simulate execution.");
+        sb.AppendLine("5. Continue from the current step.");
+        sb.AppendLine("6. Recover from errors by switching tools or arguments.");
+        sb.AppendLine("7. Stop when verified.");
+        sb.AppendLine();
+        sb.AppendLine("## WORKBENCH CONTRACT");
+        sb.AppendLine("- PLAN: Use plan tool for model-created planning state.");
+        sb.AppendLine("- FILES: File operations are automatically tracked.");
+        sb.AppendLine("- CHANGES: File mutations generate real diffs automatically.");
+        sb.AppendLine("- ARTIFACTS: Files written by you become artifacts automatically.");
+        sb.AppendLine("- PREVIEW: Previewable artifacts (HTML, MD) are shown automatically.");
+        sb.AppendLine("- TERMINAL: run_command executions are recorded in the terminal automatically.");
+        sb.AppendLine("- DO NOT narrate or simulate these states in text. Use the actual tools.");
+        sb.AppendLine();
+
+        if (!string.IsNullOrWhiteSpace(activeStepText))
+        {
+            sb.AppendLine("## ACTIVE EXECUTION CONTRACT");
+            sb.AppendLine($"CURRENT STEP: {activeStepText}");
+            if (!string.IsNullOrWhiteSpace(expectedCapability))
+                sb.AppendLine($"REQUIRED CAPABILITY: {expectedCapability}");
+            if (!string.IsNullOrWhiteSpace(preferredTools))
+                sb.AppendLine($"PREFERRED TOOLS: {preferredTools}");
+            if (!string.IsNullOrWhiteSpace(recentEvidenceSummary))
+                sb.AppendLine($"RECENT EVIDENCE: {recentEvidenceSummary}");
+            sb.AppendLine();
+        }
+
+        return sb.ToString().Trim();
+    }
 }

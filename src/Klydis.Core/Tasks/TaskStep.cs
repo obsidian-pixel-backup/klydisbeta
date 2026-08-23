@@ -123,19 +123,19 @@ public static class TaskStepBuilder
         int order,
         string? taskId)
     {
-        var (kind, allowed, skills, artifacts, criteria, condition) = StepClassifier.Classify(entry.Text);
+        var c = StepClassifier.Classify(entry.Text);
         return new TaskStep(
             StepId: TaskStep.BuildStepId(taskId, order),
             TaskId: taskId,
             Order: order,
             Title: entry.Text,
             Status: entry.Done ? TaskStepStatus.Completed : TaskStepStatus.Pending,
-            ExpectedActionKind: kind,
-            AllowedTools: allowed,
-            RequiredSkills: skills,
-            ExpectedArtifacts: artifacts,
-            VerificationCriteria: criteria,
-            CompletionCondition: condition,
+            ExpectedActionKind: c.ExpectedActionKind,
+            AllowedTools: c.AllowedTools,
+            RequiredSkills: c.RequiredSkills,
+            ExpectedArtifacts: c.ExpectedArtifacts,
+            VerificationCriteria: c.VerificationCriteria,
+            CompletionCondition: c.CompletionCondition,
             AttemptCount: 0,
             LastActionId: null,
             StartedAt: null,

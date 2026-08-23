@@ -242,15 +242,52 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         _refreshTimer.Start();
 
         // Event-driven plan sync: every durable plan mutation raises PlanChanged, so the Plan
-        // tab refreshes immediately instead of waiting for the next 2s poll. The poll stays
-        // as a fallback (e.g. plans mutated before this panel subscribed).
+        // tab refreshes immediately instead of waiting for the next 2s poll.
         _toolExecutor.PlanChanged += OnPlanChanged;
+
+        // Real-time terminal and artifact stream: whenever run_command or file tools execute,
+        // project immediately into the Terminal, Files, and Preview tabs without waiting for timer poll.
+        _toolExecutor.ToolActivityAppended += OnToolActivityAppended;
     }
 
     public void Dispose()
     {
         _toolExecutor.PlanChanged -= OnPlanChanged;
+        _toolExecutor.ToolActivityAppended -= OnToolActivityAppended;
         _refreshTimer.Stop();
+    }
+
+    private void OnToolActivityAppended(string sessionId, ToolActivityRecord record)
+    {
+        if (!string.Equals(sessionId, _currentSessionId, StringComparison.OrdinalIgnoreCase)) return;
+
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        Action update = () =>
+        {
+            if (record.ToolName == "run_command")
+            {
+                TerminalEntries.Add(new TerminalEntryItem(
+                    ExtractCommand(record.ArgsJson),
+                    string.IsNullOrWhiteSpace(record.OutputPreview) ? "(no output)" : record.OutputPreview,
+                    record.Success,
+                    record.Timestamp));
+                TerminalStatusText = $"{TerminalEntries.Count} shell command(s) run by the model in this chat · inputs and outputs below";
+            }
+            else if (record.ToolName is "write_file" or "edit_file" or "replace_lines" or "apply_patch")
+            {
+                FireAndForget.Observe(RefreshSessionFilesAsync(), operation: nameof(RefreshSessionFilesAsync));
+                FireAndForget.Observe(RefreshSessionArtifactsAsync(), operation: nameof(RefreshSessionArtifactsAsync));
+            }
+        };
+
+        if (dispatcher != null && !dispatcher.CheckAccess())
+        {
+            dispatcher.InvokeAsync(update);
+        }
+        else
+        {
+            update();
+        }
     }
 
     private void OnPlanChanged(object? sender, EventArgs e)

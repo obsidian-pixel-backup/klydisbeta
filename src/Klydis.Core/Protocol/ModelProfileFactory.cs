@@ -59,20 +59,23 @@ public static class ModelProfileFactory
                 ? Array.Empty<ToolProtocol>()
                 : new[] { toolProtocol != ToolProtocol.Unknown ? toolProtocol : ToolProtocol.GenericJson };
 
-        double confidence = CalculateProtocolConfidence(architecture, template, toolProtocol, reasoning, stopTokens, rawChatTemplate);
+        double confidence = CalculateProtocolConfidence(architecture, template, toolProtocol, reasoning, stopTokens, rawChatTemplate, probeSucceeded: false);
         AgentModelTier tier = ResolveModelTier(modelId, modelPath);
+        AgentModelProfile agentProfile = AgentModelProfile.ForModel(modelId, architecture);
 
         CapabilityLevel toolCallingLevel = unknownFamily ? CapabilityLevel.Unsupported
-            : confidence >= 0.80 ? CapabilityLevel.Reliable
+            : confidence >= 0.90 ? CapabilityLevel.Reliable
             : nativeTools ? CapabilityLevel.Usable
             : CapabilityLevel.Experimental;
 
         CapabilityLevel continuationLevel = unknownFamily ? CapabilityLevel.Unsupported
+            : confidence >= 0.90 ? CapabilityLevel.Reliable
             : confidence >= 0.70 ? CapabilityLevel.Usable
             : CapabilityLevel.Experimental;
 
         CapabilityLevel repairLevel = unknownFamily ? CapabilityLevel.Unsupported
-            : confidence >= 0.75 ? CapabilityLevel.Usable
+            : confidence >= 0.90 ? CapabilityLevel.Reliable
+            : confidence >= 0.70 ? CapabilityLevel.Usable
             : CapabilityLevel.Experimental;
 
         return new ModelProfile
@@ -80,6 +83,7 @@ public static class ModelProfileFactory
             ModelId = modelId,
             ModelPath = modelPath,
             Tier = tier,
+            AgentProfile = agentProfile,
             Architecture = architecture,
             Template = template,
             Reasoning = reasoning,
@@ -105,8 +109,8 @@ public static class ModelProfileFactory
     }
 
     /// <summary>
-    /// Calculates empirical protocol confidence based on additive, independent evidence signals.
-    /// qwen35 + Qwen template + Native tools + Native thinking + stop tokens yields >= 0.85 (Reliable/Supported).
+    /// Calculates empirical protocol confidence based on additive, independent observed signals.
+    /// Smeagle 4B (qwen35 + Qwen template + QwenNative tools + Native think block + stop tokens) achieves >= 0.90 (Verified).
     /// </summary>
     public static double CalculateProtocolConfidence(
         string architecture,
@@ -122,34 +126,34 @@ public static class ModelProfileFactory
 
         double score = 0.0;
 
-        // 1. Architecture match: +0.35
+        // 1. Architecture match (e.g. qwen35): +0.30
         if (!string.IsNullOrWhiteSpace(architecture) && ResolveFamilyFromArchitecture(architecture).HasValue)
         {
-            score += 0.35;
+            score += 0.30;
         }
 
-        // 2. Chat template match: +0.20
+        // 2. Chat template match (Qwen / ChatML / etc): +0.20
         if (!string.IsNullOrWhiteSpace(rawChatTemplate) && DetectFromEmbeddedTemplate(rawChatTemplate).HasValue)
         {
             score += 0.20;
         }
         else if (template != ChatTemplate.Generic)
         {
-            score += 0.15;
+            score += 0.20;
         }
 
-        // 3. Native tool protocol match: +0.15
+        // 3. Native tool protocol match (e.g. Qwen native tool protocol): +0.20
         if (toolProtocol is ToolProtocol.QwenNative or ToolProtocol.Llama3Native or ToolProtocol.DeepSeekNative
             or ToolProtocol.MistralNative or ToolProtocol.GemmaNative or ToolProtocol.PhiNative or ToolProtocol.CommandRNative)
         {
-            score += 0.15;
+            score += 0.20;
         }
         else if (toolProtocol == ToolProtocol.GenericJson)
         {
             score += 0.10;
         }
 
-        // 4. Native think block / reasoning match: +0.10
+        // 4. Native think block: +0.10
         if (reasoning == ReasoningProtocol.NativeThinkBlock)
         {
             score += 0.10;
@@ -159,16 +163,22 @@ public static class ModelProfileFactory
             score += 0.05;
         }
 
-        // 5. Tokenizer stop tokens known: +0.05
+        // 5. Native tool support / stop tokens: +0.05
         if (stopTokens != null && stopTokens.Count > 0)
         {
             score += 0.05;
         }
 
-        // 6. Capability probe verified: +0.15
+        // 6. Structured output / grammar support: +0.05
+        if (toolProtocol != ToolProtocol.Unknown && template != ChatTemplate.Generic)
+        {
+            score += 0.05;
+        }
+
+        // 7. Successful protocol probe: +0.10
         if (probeSucceeded)
         {
-            score += 0.15;
+            score += 0.10;
         }
 
         return Math.Clamp(score, 0.0, 1.0);

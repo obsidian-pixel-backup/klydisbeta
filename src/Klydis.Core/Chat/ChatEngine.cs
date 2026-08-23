@@ -2195,7 +2195,7 @@ public class ChatEngine(
                 if (planIsCurrentTask)
                 {
                     string planHeader;
-                    if (currentPlan.Count > 10 || CurrentModelProfile?.Tier == Klydis.Core.Protocol.AgentModelTier.TierC_CompactAgent)
+                    if (currentPlan.Count > 8 || CurrentModelProfile?.Tier == Klydis.Core.Protocol.AgentModelTier.TierC_CompactAgent || CurrentModelProfile?.IsReferenceModel == true)
                     {
                         var planEntries = toolExecutor.GetSessionPlanEntries(generatingSessionId);
                         int doneCount = planEntries.Count(e => e.Done);
@@ -5279,8 +5279,12 @@ public class ChatEngine(
                             results.Add(new ToolCallRequest("plan", planArgs));
                             break;
                         default:
-                            break; // Message / Blocked — plain text, never a tool call
+                            break;
                     }
+                }
+                if (CurrentModelProfile?.AgentProfile != null && results.Count > CurrentModelProfile.AgentProfile.MaxToolCallsPerGeneration)
+                {
+                    results = results.Take(CurrentModelProfile.AgentProfile.MaxToolCallsPerGeneration).ToList();
                 }
                 return results;
             }
@@ -5288,9 +5292,13 @@ public class ChatEngine(
 
         // Legacy fallback (no registered adapter): the shared tolerant multi-dialect
         // parser. This is the exact pipeline the adapters use, moved into the protocol
-        // layer so the two paths can never drift. Deleted entirely once every model
-        // family has an adapter (migration completion criterion — CurrentProtocolAdapter).
-        return Klydis.Core.Protocol.ActionDialectParser.ParseAll(response, logger);
+        // layer so the two paths can never drift.
+        var fallbackResults = Klydis.Core.Protocol.ActionDialectParser.ParseAll(response, logger);
+        if (CurrentModelProfile?.AgentProfile != null && fallbackResults.Count > CurrentModelProfile.AgentProfile.MaxToolCallsPerGeneration)
+        {
+            fallbackResults = fallbackResults.Take(CurrentModelProfile.AgentProfile.MaxToolCallsPerGeneration).ToList();
+        }
+        return fallbackResults;
     }
 
     /// <summary>

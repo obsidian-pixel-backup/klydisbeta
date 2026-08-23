@@ -743,7 +743,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var currentSelected = SelectedModelId;
         AvailableModels.Clear();
         
-        var models = _registry.GetAllModels().OrderBy(m => m.DisplayName).ToList();
+        var models = _registry.GetAllModels()
+            .GroupBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(m => m.DisplayName)
+            .ToList();
         
         foreach (var model in models)
         {

@@ -965,15 +965,22 @@ public class ToolExecutor(
             var activityList = _sessionToolActivity.GetOrAdd(sessionId ?? string.Empty, _ => new List<ToolActivityRecord>());
             // P1: the per-session activity list is mutated from tool-completion threads while
             // the UI polls it every 2s — guard the mutation so a torn read can never surface.
+            ToolActivityRecord? record = null;
             lock (_toolActivityLock)
             {
-                activityList.Add(new ToolActivityRecord(canonicalName, argsJson, result.Success, outputPreview, DateTime.Now));
+                record = new ToolActivityRecord(canonicalName, argsJson, result.Success, outputPreview, DateTime.Now);
+                activityList.Add(record);
                 // Bound the per-session activity history so long autonomous runs cannot grow it
                 // without limit (the panel only renders the most recent commands anyway).
                 if (activityList.Count > 500)
                 {
                     activityList.RemoveRange(0, activityList.Count - 500);
                 }
+            }
+
+            if (record != null)
+            {
+                try { ToolActivityAppended?.Invoke(sessionId ?? string.Empty, record); } catch { }
             }
         }
         catch { /* recording must never break tool execution */ }
@@ -4085,6 +4092,9 @@ public class ToolExecutor(
     // artifacts it produced — instead of workspace-global git state. The list is hydrated
     // from the durable tool_activity table on first access and appended on every call, so it
     // is a CACHE of SQLite, not the source of truth — activity survives restarts/switches.
+    /// <summary>Fired whenever a tool invocation is executed and recorded for a session.</summary>
+    public event Action<string, ToolActivityRecord>? ToolActivityAppended;
+
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ToolActivityRecord>> _sessionToolActivity = new();
     // P1: the per-session activity list is appended from tool-completion threads while the
     // UI polls it every 2s — one lock guards every mutation and every snapshot read.

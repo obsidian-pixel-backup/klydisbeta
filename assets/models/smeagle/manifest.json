@@ -1,0 +1,15 @@
+{
+  "id": "smeagle-4b",
+  "displayName": "Smeagle 4B",
+  "architecture": "qwen35",
+  "protocol": "qwen-native",
+  "adapter": "qwen-native",
+  "quantization": "Q8_0",
+  "context": 131072,
+  "default": true,
+  "bundled": true,
+  "fileName": "smeagle-4b-v0.1-Q8_0.gguf",
+  "role": "Agent",
+  "parameterSize": "4B",
+  "description": "Klydis Reference Agent Model with Qwen-native tool calling, native thinking, and high action fidelity."
+}

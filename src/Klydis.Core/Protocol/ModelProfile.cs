@@ -187,6 +187,12 @@ public sealed record ModelProfile
     /// <summary>Measured (or probed, or defaulted) reliability of recovering from malformed calls.</summary>
     public CapabilityLevel Repair { get; init; } = CapabilityLevel.Experimental;
 
+    /// <summary>High-level agent profile specifying context budgets, execution mode, and policy.</summary>
+    public AgentModelProfile? AgentProfile { get; init; }
+
+    /// <summary>True when this model acts as the reference agent profile for Klydis (e.g. Smeagle 4B).</summary>
+    public bool IsReferenceModel => AgentProfile?.IsReferenceModel ?? (ModelId.Contains("smeagle", StringComparison.OrdinalIgnoreCase));
+
     /// <summary>Version of the profile schema.</summary>
     public string ProfileVersion { get; init; } = "1";
 
