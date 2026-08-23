@@ -187,6 +187,31 @@ internal static class ActionDialectParser
                     args[key] = TryParseQwenNativeJsonValue(rawVal) ?? rawVal;
                 }
 
+                // Tolerant fallback for MISMATCHED bare-tag closures (observed with the
+                // smeagle-4b qwen35 fine-tune): the model opens a bare <path> tag and closes
+                // it with the WRONG tag — <path>E:\...\file.txt</parameter> — and the strict
+                // <...>...</same-name> pass above drops the argument entirely, so the action
+                // gate then rejects the call as missing its required argument even though the
+                // value is present. Accept an opening bare tag closed by ANY closing tag (or
+                // the end of the block, which the block regex already tolerates for
+                // </tool_call>), provided the captured value contains no further markup (a
+                // nested structure is NOT a misclosed argument). Runs only when no arguments
+                // were captured, so a well-formed <parameter> call is never re-parsed.
+                if (args.Count == 0)
+                {
+                    foreach (Match tm in Regex.Matches(body,
+                        @"<(?!\bfunction\b|\bparameter\b|\btool_call\b|\btool_calls\b|\bthink\b|\bthought\b|/)([a-zA-Z_][a-zA-Z0-9_.\-]*)\s*>([\s\S]*?)(?:</[a-zA-Z_][a-zA-Z0-9_.\-]*>|$)",
+                        RegexOptions.Singleline | RegexOptions.IgnoreCase))
+                    {
+                        var key = tm.Groups[1].Value;
+                        if (string.IsNullOrEmpty(key) || args.ContainsKey(key)) continue;
+                        var rawVal = WebUtility.HtmlDecode(tm.Groups[2].Value.Trim());
+                        if (string.IsNullOrEmpty(rawVal)) continue;
+                        if (Regex.IsMatch(rawVal, @"<[a-zA-Z_/]")) continue; // nested markup — skip
+                        args[key] = TryParseQwenNativeJsonValue(rawVal) ?? rawVal;
+                    }
+                }
+
                 // Zero-parameter tools (get_system_info, list_rag_collections, ...) emit
                 // <function=NAME> with no <parameter> block. Requiring args.Count > 0 dropped
                 // those calls, which then triggered the "INCOMPLETE tool call" feedback loop
@@ -382,9 +407,24 @@ internal static class ActionDialectParser
         }
 
         // 4. Fallback: Raw un-tagged JSON objects containing name/tool/action/function
+        //
+        //    MASKED RESPONSE (loop fix, 2026-08): layer 4 runs on a copy with every NON-json
+        //    fenced code block (```bash, ```powershell, ```python, bare ```...) blanked out.
+        //    Without this, models that write *illustrative* snippets —
+        //    ```bash
+        //    tool call{"name":"system_processes","arguments":{"sort":"-memory"}} | jq ...
+        //    ```
+        //    — had those "here is how you would call it" examples laundered into REAL tool
+        //    executions, which executed the same probe every round (mistral-7b export:
+        //    system_processes fired 4x while re-listing the 110-prompt plan; each execution
+        //    reset the stall clock). Explicit dialect forms (<tool_call>, [TOOL_CALLS],
+        //    ```json blocks, antml, envelopes) still parse from the ORIGINAL response above,
+        //    so legitimate calls are unaffected — only untagged JSON inside illustrative
+        //    fences is no longer treated as an executable action.
         if (blocksToParse.Count == 0)
         {
-            var rawJsonMatches = Regex.Matches(response, @"(\{[\s\S]*?""(?:name|tool|action|function)""\s*:\s*""[^""]+""[\s\S]*?\})", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            string fencedAware = MaskNonJsonFences(response);
+            var rawJsonMatches = Regex.Matches(fencedAware, @"(\{[\s\S]*?""(?:name|tool|action|function)""\s*:\s*""[^""]+""[\s\S]*?\})", RegexOptions.Singleline | RegexOptions.IgnoreCase);
             foreach (Match match in rawJsonMatches)
             {
                 var block = match.Groups[1].Value.Trim();
@@ -790,6 +830,46 @@ internal static class ActionDialectParser
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Returns a copy of <paramref name="text"/> with the CONTENTS of every fenced code block
+    /// whose language label is not "json" replaced by spaces (content lengths preserved, so
+    /// line structure is intact). Blocks labeled json — or unlabeled bare ``` fences, which
+    /// some fine-tunes use for their tool JSON — are kept verbatim. Used ONLY by the layer-4
+    /// raw-JSON fallback; every explicit dialect above it still parses the original response.
+    /// </summary>
+    private static string MaskNonJsonFences(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        int i = 0;
+        while (true)
+        {
+            int open = text.IndexOf("```", i, StringComparison.Ordinal);
+            if (open < 0)
+            {
+                sb.Append(text, i, text.Length - i);
+                break;
+            }
+            sb.Append(text, i, open - i);
+
+            int close = text.IndexOf("```", open + 3, StringComparison.Ordinal);
+            if (close < 0)
+            {
+                sb.Append(text, open, text.Length - open);
+                break;
+            }
+
+            string fence = text.Substring(open + 3, close - open - 3);
+            int langEnd = 0;
+            while (langEnd < fence.Length && !char.IsWhiteSpace(fence[langEnd])) langEnd++;
+            string lang = fence.Substring(0, langEnd);
+
+            bool isJson = lang.Length == 0 || lang.Equals("json", StringComparison.OrdinalIgnoreCase);
+            sb.Append(isJson ? fence : new string(' ', fence.Length));
+            i = close + 3;
+        }
+        return sb.ToString();
     }
 
     /// <summary>

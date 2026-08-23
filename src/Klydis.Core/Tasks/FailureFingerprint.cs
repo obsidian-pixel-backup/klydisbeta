@@ -23,9 +23,23 @@ public sealed record FailureFingerprint(
     DateTime LastSeenUtc)
 {
     /// <summary>
-    /// A strategy is blocked when an identical failure fingerprint has been repeated 2 or more times.
+    /// How many identical attempts of a failure class are tolerated before the strategy is
+    /// blocked. Schema rejections (missing/wrong arguments) are COMPREHENSION failures — the
+    /// call never executed, nothing touched the world — and small models need a few rounds to
+    /// land the correct parameter shape, so they get one extra attempt. Real execution
+    /// failures and semantic violations (unknown tools, step violations, replays) block at 2:
+    /// repeating them wastes iterations and risks duplicating side effects.
     /// </summary>
-    public bool IsStrategyBlocked => AttemptCount >= 2;
+    public static int BlockThreshold(string errorCode)
+        => errorCode is ActionGate.MissingRequiredArgumentCode or ActionGate.InvalidArgumentCode
+            ? 3
+            : 2;
+
+    /// <summary>
+    /// A strategy is blocked when an identical failure fingerprint has been repeated
+    /// <see cref="BlockThreshold"/> or more times.
+    /// </summary>
+    public bool IsStrategyBlocked => AttemptCount >= BlockThreshold(ErrorCode);
 }
 
 /// <summary>
@@ -102,13 +116,13 @@ public sealed class FailureFingerprintTracker
     /// <summary>
     /// Generates compact feedback for the model when a strategy is blocked.
     /// </summary>
-    public string FormatBlockedFeedback(string toolName, string errorCode)
+    public string FormatBlockedFeedback(string toolName, string errorCode, int attemptCount)
     {
         return $@"[SYSTEM — STRATEGY BLOCKED]
 The following invocation has failed repeatedly and is now BLOCKED from further retries:
   Tool: {toolName}
   Error: {errorCode}
-  Attempts: 2
+  Attempts: {attemptCount}
 Do NOT repeat this identical tool call or arguments. Choose a materially different tool, inspect existing evidence, or declare the step blocked.";
     }
 

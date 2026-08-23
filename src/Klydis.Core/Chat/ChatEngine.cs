@@ -289,6 +289,104 @@ public class ChatEngine(
     // decision (a fresh turn), and on a supervisor Replan.
     private readonly Dictionary<string, int> _stalledTurnsByTask = new();
 
+    // Loop watchdog for small / MoE / instruction-tuned models (2026-08: mistral-7b &
+    // llama-38b exports): probes executed this turn, canonicalized to "tool|sortedArgs".
+    // A read-only probe that has ALREADY been fired this turn is a repeat, not progress;
+    // firing a NEW probe (novel exploration) is meaningful. Persists for the whole turn so
+    // the "same two diagnostics alternating forever" loop is caught even when plan items
+    // occasionally tick (the pre-fix stall clock reset every time ANY tool executed).
+    private readonly HashSet<string> _probesExecutedThisTurn = new(StringComparer.Ordinal);
+    private int _probeCountAtLastCheckpoint;
+    private int _lastCheckpointEntryCount;
+
+    /// <summary>
+    /// Loop-watchdog classification of the state delta SINCE the last supervisor checkpoint:
+    /// meaningful progress is (1) a plan/file/evidence/queue/artifact change, (2) a successful
+    /// SIDE-EFFECT tool (write_file, run_command, ...), or (3) a NEW read-only probe that has
+    /// not been fired earlier in this turn. Re-running the same read-only probe — the
+    /// mistral/llama "same two diagnostics ad infinitum" loop — and/or merely generating text
+    /// is NOT progress and keeps the stall clock running.
+    /// </summary>
+    private bool ClassifyMeaningfulProgress(Klydis.Core.Tasks.StateDelta newEntries)
+    {
+        foreach (var entry in newEntries.Entries)
+        {
+            switch (entry.Kind)
+            {
+                case Klydis.Core.Tasks.StateDeltaKind.PlanChanged:
+                case Klydis.Core.Tasks.StateDeltaKind.StepCompleted:
+                case Klydis.Core.Tasks.StateDeltaKind.FileChanged:
+                case Klydis.Core.Tasks.StateDeltaKind.FileCreated:
+                case Klydis.Core.Tasks.StateDeltaKind.FileModified:
+                case Klydis.Core.Tasks.StateDeltaKind.FileDeleted:
+                case Klydis.Core.Tasks.StateDeltaKind.EvidenceAdded:
+                case Klydis.Core.Tasks.StateDeltaKind.QueueConsumed:
+                case Klydis.Core.Tasks.StateDeltaKind.ArtifactCreated:
+                case Klydis.Core.Tasks.StateDeltaKind.ArtifactValidated:
+                case Klydis.Core.Tasks.StateDeltaKind.VerificationPassed:
+                case Klydis.Core.Tasks.StateDeltaKind.DiffCreated:
+                case Klydis.Core.Tasks.StateDeltaKind.TaskSteered:
+                case Klydis.Core.Tasks.StateDeltaKind.PlanVersionChanged:
+                    return true;
+
+                case Klydis.Core.Tasks.StateDeltaKind.ToolExecuted:
+                case Klydis.Core.Tasks.StateDeltaKind.ToolSucceeded:
+                    // A side-effect tool always counts; a read-only probe only counts the
+                    // first time it is explored this turn (tracked via _probesExecutedThisTurn).
+                    if (!IsReadOnlyProbe(entry.Detail)) return true;
+                    break;
+            }
+        }
+
+        // No hard state change — but did a NOVEL probe get explored since the last
+        // checkpoint? Genuine exploration of a new diagnostic is progress.
+        if (_probesExecutedThisTurn.Count > _probeCountAtLastCheckpoint)
+        {
+            _probeCountAtLastCheckpoint = _probesExecutedThisTurn.Count;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True for tools that only OBSERVE (system_* diagnostics, file reads, searches, rag
+    /// queries, plan reads). Repeatedly firing one of these while nothing else changes is the
+    /// signature of a small-model loop — the stall watchdog must not credit it as progress.
+    /// Side-effect tools (run_command, write_file, edit_file, delete, desktop control, ...)
+    /// always return false so their executions DO count as meaningful.
+    /// </summary>
+    private static bool IsReadOnlyProbe(string toolName)
+    {
+        if (toolName.StartsWith("system_", StringComparison.OrdinalIgnoreCase)) return true;
+        return toolName switch
+        {
+            "read_file" or "list_directory" or "search_files" or "search_text"
+                or "search_rag" or "query_rag" or "get_session_plan" or "get_plan"
+                or "list_rag_collections" or "memory_search" or "get_system_info"
+                or "read" or "get_capabilities" or "get_skills" or "list_skills"
+                or "vector_search" => true,
+            _ => false
+        };
+    }
+
+    /// <summary>
+    /// Canonical fingerprint of a probe execution: tool name + sorted argument key=value
+    /// pairs. Two calls to the same diagnostic with the same arguments collapse to one
+    /// signature so the repeat detector sees them as one exploration, not two.
+    /// </summary>
+    private static string CanonicalProbeSignature(string toolName, IDictionary<string, object>? args)
+    {
+        if (args == null || args.Count == 0) return toolName;
+        var keys = args.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+        var parts = new List<string>(keys.Count);
+        foreach (var key in keys)
+        {
+            var val = ToolExecutor.UnwrapJsonElement(args[key]);
+            parts.Add($"{key.ToLowerInvariant()}={val?.ToString() ?? string.Empty}");
+        }
+        return toolName + "|" + string.Join(",", parts);
+    }
+
     // P1.12: run-scoped action replay ledger. Side-effect-bearing actions that SUCCESSFULLY
     // executed are recorded by replay key (tool + canonicalized args) and the gate rejects a
     // re-execution — a recovery loop must never duplicate a command or destructive call. The
@@ -1431,6 +1529,9 @@ public class ChatEngine(
         // P0: a new user turn is a user decision — the stall clock restarts (see
         // _stalledTurnsByTask). A stale count from an earlier task/turn must not carry over.
         _stalledTurnsByTask.Clear();
+        _probesExecutedThisTurn.Clear();
+        _probeCountAtLastCheckpoint = 0;
+        _lastCheckpointEntryCount = 0;
         IReadOnlyList<ToolExecutor.PlanEntry>? planAtTurnStart = null;
         try
         {
@@ -3336,8 +3437,8 @@ public class ChatEngine(
                         string gateErrorCode = Klydis.Core.Tasks.ActionGate.ErrorCode(gateVerdict.Error!.Value);
                         var fp = _fingerprintTracker.RecordFailure(req.Name, gateErrorCode, req.Arguments, currentStepText);
                         string rejection = fp.IsStrategyBlocked
-                            ? _fingerprintTracker.FormatBlockedFeedback(req.Name, gateErrorCode)
-                            : BuildActionGateRejection(actionId, req, gateVerdict);
+                            ? _fingerprintTracker.FormatBlockedFeedback(req.Name, gateErrorCode, fp.AttemptCount)
+                            : BuildActionGateRejection(actionId, req, gateVerdict, registeredToolDefs);
                         logger.LogWarning(
                             "ACTION_GATE_REJECTED actionId={ActionId} task={TaskId} run={RunId} step={Step} " +
                             "tool={Tool} code={Code} reason={Reason} allowed={Allowed}",
@@ -3474,6 +3575,14 @@ public class ChatEngine(
                         actionError = result.Error;
                         // P1.8: record the factual tool execution for the state delta.
                         turnState.RecordTool(req.Name, result.Success);
+                        // Loop watchdog: track read-only probes (system_* diagnostics, reads,
+                        // searches) as canonical signatures. ANOTHER execution of the same
+                        // probe later in this turn is a repeat, not progress — the supervisor
+                        // measures "did anything NEW happen since the last checkpoint".
+                        if (IsReadOnlyProbe(req.Name))
+                        {
+                            _probesExecutedThisTurn.Add(CanonicalProbeSignature(req.Name, req.Arguments));
+                        }
                         // P1.8: a successful file write/edit is a factual FILE change — the
                         // delta records it so file mutation is observable progress, not just a
                         // tool that ran.
@@ -3780,7 +3889,14 @@ public class ChatEngine(
 
                     var toolOutputObj = new ChatMessage(ChatRole.Tool, toolOutput, req.Name);
                     AddToSessionHistory(activeHistory, toolOutputObj, generatingSessionId);
-                    await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Tool, toolOutput, 0, null);
+                    // Persist the tool's structured identity (name + arguments + status) in
+                    // tool_calls_json so a reloaded session can rebuild the SAME rich tool
+                    // card the live stream showed — otherwise history renders every tool
+                    // result as a generic soulless "Tool output" block while live sessions
+                    // show name/status/arguments/output cards (session-state inconsistency).
+                    await messageStore.AddMessageAsync(
+                        generatingSessionId, ChatRole.Tool, toolOutput, 0,
+                        BuildToolCallMetadataJson(req, result.Success));
                     
                     yield return new ChatStreamEvent(ChatStreamEventType.ToolResult, toolOutput, new Dictionary<string, object> { ["Success"] = result.Success });
                 }
@@ -4017,12 +4133,24 @@ public class ChatEngine(
                         var currentStep = Klydis.Core.Tasks.TaskStepBuilder.CurrentStep(
                             Klydis.Core.Tasks.TaskStepBuilder.Build(planNow, CurrentTaskId));
                         // P0: feed the supervisor a REAL consecutive-stalled count instead of a
-                        // hardcoded 0. Progress is the factual state delta only (tool executed,
-                        // file/plan/evidence changed) — the model generating more text never
-                        // resets the clock. See _stalledTurnsByTask.
+                        // hardcoded 0. Progress is the factual state delta SINCE THE LAST
+                        // CHECKPOINT only (plan/file/evidence/queue changes, a side-effect tool
+                        // succeeding, or a NEWLY EXPLORED read-only probe). Two fixes over the
+                        // pre-2026-08 behavior:
+                        //   1. INCREMENTAL: stateDeltaNow previously accumulated ACROSS
+                        //      iterations, so one executed tool pinned IsEmpty=false for the
+                        //      whole turn and the stall clock stayed at 0 forever (the
+                        //      observed 23-iteration mistral/llama loop that re-ran the same
+                        //      read-only probe while re-listing plan text).
+                        //   2. REPEAT-AWARE: re-executing the same read-only probe is not
+                        //      progress; executing a NEW probe (genuine exploration) is.
+                        // The model generating more text never resets the clock. See
+                        // _stalledTurnsByTask and _probesExecutedThisTurn.
                         var stateDeltaNow = turnState.Build();
                         string stallKey = CurrentTaskId ?? generatingSessionId;
-                        bool madeProgressNow = !stateDeltaNow.IsEmpty;
+                        bool madeProgressNow = ClassifyMeaningfulProgress(
+                            turnState.EntriesSince(_lastCheckpointEntryCount));
+                        _lastCheckpointEntryCount = stateDeltaNow.Entries.Count;
                         int stalledNow = madeProgressNow
                             ? 0
                             : (_stalledTurnsByTask.TryGetValue(stallKey, out var priorStalled) ? priorStalled : 0) + 1;
@@ -4961,7 +5089,34 @@ public class ChatEngine(
     /// allowed, and the reason — so the model's next action is a corrected call, not another
     /// guess.
     /// </summary>
-    private static string BuildActionGateRejection(string actionId, ToolCallRequest req, Klydis.Core.Tasks.ActionGateVerdict verdict)
+    /// <summary>
+    /// Serializes the structured identity of an executed tool call for the messages table's
+    /// tool_calls_json column: tool name, the exact arguments the executor received, and the
+    /// outcome. Best-effort — a serialization failure degrades to the historical generic
+    /// display rather than breaking execution.
+    /// </summary>
+    private static string? BuildToolCallMetadataJson(ToolCallRequest req, bool success)
+    {
+        try
+        {
+            return System.Text.Json.JsonSerializer.Serialize(new
+            {
+                name = req.Name,
+                arguments = req.Arguments,
+                status = success ? "done" : "failed"
+            });
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? BuildActionGateRejection(
+        string actionId,
+        ToolCallRequest req,
+        Klydis.Core.Tasks.ActionGateVerdict verdict,
+        System.Collections.Generic.IList<ToolDefinition> registeredTools)
     {
         var code = Klydis.Core.Tasks.ActionGate.ErrorCode(verdict.Error!.Value);
         var sb = new StringBuilder();
@@ -4979,8 +5134,47 @@ public class ChatEngine(
             sb.AppendLine($"  Allowed tools: [{verdict.AllowedToolsSummary}]");
         }
         sb.AppendLine($"  Reason: {verdict.Reason}");
-        sb.AppendLine("Emit ONE corrected action: a tool that exists, is permitted for the current step, has all required arguments, and advances the step. Tool results exist only when a tool actually executes.");
+
+        // Schema guidance: a missing-argument rejection must TEACH the model the tool's
+        // actual contract, not just say "pattern is missing". Small models (qwen3.5, mistral)
+        // repeatedly fail schema checks when the feedback does not name the expected
+        // parameters and the call shape. Resolve the registered definition (including via
+        // the gate's own tool-name aliases, e.g. system_cpu -> system_cpu_info) and render
+        // the exact parameter names, types, and a minimal well-formed example.
+        var toolDef = FindRegisteredTool(registeredTools, req.Name);
+        if (toolDef != null)
+        {
+            var reqParams = toolDef.Parameters.Where(p => p.Required).ToList();
+            var optParams = toolDef.Parameters.Where(p => !p.Required).ToList();
+            var schemaParts = new List<string>();
+            foreach (var p in reqParams)
+            {
+                schemaParts.Add($"{p.Name} ({p.Type}, REQUIRED)");
+            }
+            schemaParts.AddRange(optParams.Select(p => $"{p.Name} ({p.Type}, optional)"));
+            sb.AppendLine($"  Schema: {toolDef.Name} expects arguments: {string.Join(", ", schemaParts)}");
+
+            if (reqParams.Count > 0)
+            {
+                var requiredOnly = reqParams.Select(p => $"\"{p.Name}\": \"<{p.Name}>\"");
+                var slots = reqParams.Select(p => $"<{p.Name}>");
+                sb.AppendLine($"  Call shape: {{\"name\": \"{toolDef.Name}\", \"arguments\": {{{string.Join(", ", requiredOnly)}}}}} — replace {string.Join(", ", slots)} with your real value(s).");
+            }
+        }
+
+        sb.AppendLine("Emit ONE corrected action: use the tool's exact parameter names from the Schema line, fill every REQUIRED argument with a real value, and advance the step. Tool results exist only when a tool actually executes.");
         return sb.ToString();
+    }
+
+    private static ToolDefinition? FindRegisteredTool(System.Collections.Generic.IList<ToolDefinition> registeredTools, string name)
+    {
+        var direct = registeredTools.FirstOrDefault(t =>
+            string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (direct != null) return direct;
+        string? mapped = Klydis.Core.Tasks.ActionGate.ResolveToolAlias(name);
+        if (mapped == null) return null;
+        return registeredTools.FirstOrDefault(t =>
+            string.Equals(t.Name, mapped, StringComparison.OrdinalIgnoreCase));
     }
 
     private List<ToolCallRequest> ParseToolCalls(string response)

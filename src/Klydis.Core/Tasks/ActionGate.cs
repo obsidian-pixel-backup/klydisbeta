@@ -119,22 +119,24 @@ public static class ActionGate
 
         if (toolDef == null)
         {
-            string aliasKey = reqName.ToLowerInvariant();
-            string? mapped = aliasKey switch
-            {
-                "system_cpu" => "system_cpu_info",
-                "system_gpu" => "system_gpu_info",
-                "system_mem" or "system_ram" => "system_memory",
-                "system_disk" => "system_disks",
-                "system_proc" => "system_processes",
-                "top_processes" or "processes_top" => "system_top_processes",
-                "find_process" or "search_processes" => "process_find",
-                _ => null
-            };
+            string? mapped = ResolveToolAlias(reqName);
             if (mapped != null)
             {
                 toolDef = tools.FirstOrDefault(t => string.Equals(t.Name, mapped, StringComparison.OrdinalIgnoreCase));
             }
+        }
+
+        // 1b. ARGUMENT ALIASES — fold model-variant parameter names onto the canonical ones
+        // BEFORE every downstream check (required-ness, types, replay identity). This mirrors
+        // exactly the fallbacks ToolExecutor already applies at execution time (e.g.
+        // GetStringArg(..., "pattern") ?? GetStringArg(..., "query")): a call that WOULD have
+        // executed must not be rejected by the gate for the very key spelling the executor
+        // tolerates. Small models (qwen3.5, mistral) routinely pass 'query' for 'pattern',
+        // 'section' for 'heading', 'url' for 'document' — previously a perfectly good call
+        // died as ACTION_SCHEMA_INVALID and the tool got blocked after 2 tries.
+        if (toolDef != null)
+        {
+            request = CanonicalizeArguments(request, toolDef.Name);
         }
 
         if (toolDef == null)
@@ -301,6 +303,119 @@ public static class ActionGate
         }
 
         return new ActionGateVerdict(true, null, null, null, currentStep);
+    }
+
+    /// <summary>
+    /// Maps a model-invented tool-name variant to its registered canonical name, or null
+    /// when no alias exists. Kept public so rejection feedback can resolve the schema of an
+    /// aliased tool exactly as the gate did.
+    /// </summary>
+    public static string? ResolveToolAlias(string name)
+    {
+        string aliasKey = name.ToLowerInvariant();
+        return aliasKey switch
+        {
+            "system_cpu" => "system_cpu_info",
+            "system_gpu" => "system_gpu_info",
+            "system_mem" or "system_ram" => "system_memory",
+            "system_disk" => "system_disks",
+            "system_proc" => "system_processes",
+            "top_processes" or "processes_top" => "system_top_processes",
+            // smeagle-4b (qwen35): invented "system_cpu_processes" for the top-CPU-processes
+            // probe — map it to the canonical tool instead of burning a rejection cycle.
+            "system_cpu_processes" or "cpu_processes" or "system_cpu_procs" => "system_top_processes",
+            "find_process" or "search_processes" => "process_find",
+            _ => null
+        };
+    }
+
+    /// <summary>
+    /// Parameter-name aliases per tool, sourced from the SAME fallbacks the ToolExecutor's
+    /// GetStringArg chains apply at execution time. The gate and the executor must agree on
+    /// which key spellings are acceptable — otherwise a call the executor would have happily
+    /// executed dies at the gate as ACTION_SCHEMA_INVALID.
+    /// </summary>
+    private static readonly Dictionary<string, Dictionary<string, string[]>> ArgumentAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["search_files"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["pattern"] = new[] { "query", "text", "term" }
+        },
+        ["find_on_page"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["pattern"] = new[] { "query", "text" },
+            ["document"] = new[] { "url", "document_id" }
+        },
+        ["get_section"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["heading"] = new[] { "section" },
+            ["document"] = new[] { "url", "document_id" }
+        },
+        ["get_links"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["document"] = new[] { "url", "document_id" }
+        },
+        ["get_table"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["document"] = new[] { "url", "document_id" }
+        },
+        ["get_metadata"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["document"] = new[] { "url", "document_id" }
+        },
+        ["process_find"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["name"] = new[] { "query", "process_name" }
+        }
+    };
+
+    /// <summary>
+    /// Folds alias-spelled arguments onto their canonical parameter names. Only applied when
+    /// the canonical key is ABSENT (a real value under the canonical name always wins). The
+    /// executor's GetStringArg fallbacks tolerate both spellings, so the aliased key is
+    /// dropped after folding to keep replay hashes canonical.
+    /// </summary>
+    private static ToolCallRequest CanonicalizeArguments(ToolCallRequest request, string toolName)
+    {
+        if (request.Arguments == null || request.Arguments.Count == 0)
+        {
+            return request;
+        }
+        if (!ArgumentAliases.TryGetValue(toolName, out var aliases))
+        {
+            return request;
+        }
+
+        bool changed = false;
+        var canonical = new Dictionary<string, object>(
+            request.Arguments, StringComparer.OrdinalIgnoreCase);
+        foreach (var (canonicalName, aliasList) in aliases)
+        {
+            bool hasCanonical = canonical.Keys.Any(k =>
+                string.Equals(k, canonicalName, StringComparison.OrdinalIgnoreCase));
+            if (hasCanonical) continue;
+
+            string? matchedAlias = null;
+            foreach (var alias in aliasList)
+            {
+                var hit = canonical.Keys.FirstOrDefault(k =>
+                    string.Equals(k, alias, StringComparison.OrdinalIgnoreCase));
+                if (hit != null)
+                {
+                    matchedAlias = hit;
+                    break;
+                }
+            }
+            if (matchedAlias == null) continue;
+
+            canonical[canonicalName] = canonical[matchedAlias];
+            canonical.Remove(matchedAlias);
+            changed = true;
+        }
+
+        return changed
+            ? new ToolCallRequest(request.Name, canonical)
+            : request;
     }
 
     /// <summary>

@@ -227,9 +227,18 @@ public static class AgentSupervisor
         }
 
         // 4. Repeated tool turns with no plan progress = silent failure; reassess the approach.
-        if (snapshot.ConsecutiveStalledTurns >= maxStalledTurns && openWork)
+        //    A run with NO plan at all is also open work for the stall gate: the observed
+        //    mistral/llama prose loops ran with an empty checklist, so openWork was false and
+        //    every stall rule silently skipped — the model re-listed "what to do" forever
+        //    with zero state change. Planless tasks pause (nothing to replan against) so the
+        //    user regains control instead of the loop burning generations; planful ones
+        //    trigger the existing Replan.
+        bool noPlan = snapshot.Plan == null || snapshot.Plan.Count == 0;
+        if (snapshot.ConsecutiveStalledTurns >= maxStalledTurns && (openWork || noPlan))
         {
-            return new SupervisorDecision(ExecutionDecision.Replan, ContinuationReason.StagnationDetected, nextStepId);
+            return noPlan
+                ? new SupervisorDecision(ExecutionDecision.Pause, ContinuationReason.StagnationDetected, nextStepId)
+                : new SupervisorDecision(ExecutionDecision.Replan, ContinuationReason.StagnationDetected, nextStepId);
         }
 
         // 5. Autonomous-mode protocol failure: the model produced text but NO action (no tool
@@ -308,7 +317,7 @@ public static class AgentSupervisor
         }
 
         // 11. All items are checked off but the model didn't seal completion — direct it to.
-        if (snapshot.Plan.Count > 0)
+        if (snapshot.Plan is { Count: > 0 })
         {
             return new SupervisorDecision(ExecutionDecision.Verify, ContinuationReason.StepIncomplete, nextStepId);
         }

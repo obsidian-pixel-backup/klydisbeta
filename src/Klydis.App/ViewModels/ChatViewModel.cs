@@ -2358,12 +2358,37 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 }
                 else
                 {
-                    uiMessages.Add(new ChatMessageViewModel
+                    // SESSION-STATE CONSISTENCY for tool results: a live run renders every tool
+                    // call as a rich card (name + status + arguments + output via Role="toolcall")
+                    // but a reloaded session used to render every persisted tool row as a generic
+                    // "Tool output" block (Role="tool") because the DB only stored the output
+                    // text. The engine now persists the tool's structured identity in
+                    // tool_calls_json — rebuild the IDENTICAL card here when present. Legacy rows
+                    // without metadata fall back to the generic block, and engine-injected
+                    // [SYSTEM — …] rejections replay as errors (live they are red error boxes,
+                    // not tool output — history must not flip their style).
+                    if (roleStr == "tool" && TryBuildPersistedToolCard(msg, out var card))
                     {
-                        Role = roleStr,
-                        Content = msg.Content,
-                        Timestamp = msg.Timestamp
-                    });
+                        uiMessages.Add(card);
+                    }
+                    else if (roleStr == "tool" && msg.Content.StartsWith("[SYSTEM —", StringComparison.Ordinal))
+                    {
+                        uiMessages.Add(new ChatMessageViewModel
+                        {
+                            Role = "error",
+                            Content = msg.Content,
+                            Timestamp = msg.Timestamp
+                        });
+                    }
+                    else
+                    {
+                        uiMessages.Add(new ChatMessageViewModel
+                        {
+                            Role = roleStr,
+                            Content = msg.Content,
+                            Timestamp = msg.Timestamp
+                        });
+                    }
                 }
                 if (!msg.IsConsolidated)
                 {
@@ -2405,6 +2430,79 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         RefreshQueueUI();
         UpdateWorkingElsewhereText();
         FireAndForget.Observe(SidePanel.OnSessionChangedAsync(session.Id), operation: nameof(SidePanel.OnSessionChangedAsync));
+    }
+
+    /// <summary>
+    /// Rebuilds the same rich tool-call card the live streaming path shows, from the
+    /// structured metadata the engine now persists in tool_calls_json. Mirrors the live
+    /// formatting exactly (name, status pill, "key: value" argument lines, command/path/query
+    /// preview, full output) so an inactive session's history is visually IDENTICAL to the
+    /// active session's live view. Returns false when a row carries no metadata (legacy rows)
+    /// or the JSON is malformed, leaving the caller to fall back to the generic tool block.
+    /// </summary>
+    private static bool TryBuildPersistedToolCard(Klydis.Core.Memory.MessageRecord msg, out ChatMessageViewModel card)
+    {
+        card = null!;
+        if (string.IsNullOrWhiteSpace(msg.ToolCallsJson)) return false;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(msg.ToolCallsJson);
+            var root = doc.RootElement;
+            string? name = root.TryGetProperty("name", out var nEl) ? nEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name)) return false;
+
+            var toolCall = new ToolCallViewModel
+            {
+                Name = name,
+                Status = root.TryGetProperty("status", out var sEl) && sEl.GetString() == "failed"
+                    ? "failed"
+                    : "done",
+                Output = string.IsNullOrWhiteSpace(msg.Content)
+                    ? "Done (No output returned)"
+                    : msg.Content,
+                IsExpanded = true
+            };
+
+            if (root.TryGetProperty("arguments", out var argsEl) &&
+                argsEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                var lines = new List<string>();
+                string commandPreview = string.Empty;
+                foreach (var prop in argsEl.EnumerateObject())
+                {
+                    string val = prop.Value.ValueKind == System.Text.Json.JsonValueKind.String
+                        ? prop.Value.GetString() ?? string.Empty
+                        : prop.Value.ToString();
+                    lines.Add($"{prop.Name}: {val}");
+                    if (string.IsNullOrEmpty(commandPreview) &&
+                        (prop.Name.Equals("command", StringComparison.OrdinalIgnoreCase) ||
+                         prop.Name.Equals("path", StringComparison.OrdinalIgnoreCase) ||
+                         prop.Name.Equals("query", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        commandPreview = val;
+                    }
+                }
+                if (string.IsNullOrEmpty(commandPreview) && lines.Count > 0)
+                {
+                    commandPreview = lines[0];
+                }
+                toolCall.Arguments = string.Join("\n", lines);
+                toolCall.CommandText = commandPreview;
+            }
+
+            card = new ChatMessageViewModel
+            {
+                Role = "toolcall",
+                HasToolCalls = true,
+                Timestamp = msg.Timestamp
+            };
+            card.ToolCalls.Add(toolCall);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>

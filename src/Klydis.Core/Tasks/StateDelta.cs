@@ -237,4 +237,34 @@ public sealed class TurnStateCollector
             return _entries.Count == 0 ? StateDelta.Empty : new StateDelta(_entries.ToArray());
         }
     }
+
+    /// <summary>Total count of recorded entries so far (monotonic within a turn).</summary>
+    public int EntryCount
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _entries.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The entries recorded AFTER <paramref name="startIndex"/> (index into the collector's
+    /// monotonic entry list) — the delta since the last supervisor checkpoint. The stall
+    /// detectors MUST consume this per-checkpoint slice: "did anything happen SINCE the last
+    /// decision", never "did ANYTHING EVER happen this turn" (the latter pins the stall count
+    /// at zero once a single tool ran — the observed 23-iteration prose loop that kept firing
+    /// the same read-only probe and resetting its own stall clock every time).
+    /// </summary>
+    public StateDelta EntriesSince(int startIndex)
+    {
+        lock (_lock)
+        {
+            if (startIndex <= 0) return Build();
+            if (startIndex >= _entries.Count) return StateDelta.Empty;
+            return new StateDelta(_entries.Skip(startIndex).ToArray());
+        }
+    }
 }
