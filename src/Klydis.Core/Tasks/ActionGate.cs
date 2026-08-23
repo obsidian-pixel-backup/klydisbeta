@@ -106,7 +106,8 @@ public static class ActionGate
         IReadOnlySet<string>? stepAllowedTools = null,
         string? currentStep = null,
         string? workspaceRoot = null,
-        IReadOnlySet<string>? alreadyExecuted = null)
+        IReadOnlySet<string>? alreadyExecuted = null,
+        Klydis.Core.Workspace.AgentWorkspaceContext? workspaceContext = null)
     {
         if (request == null) throw new ArgumentNullException(nameof(request));
         if (registeredTools == null) throw new ArgumentNullException(nameof(registeredTools));
@@ -294,9 +295,19 @@ public static class ActionGate
                 null, currentStep);
         }
 
-        // 3d. Workspace boundary: when a workspace root is supplied, file-tool paths must stay
-        // inside it. Absolute escapes and ../ traversal are rejected before execution.
-        if (!string.IsNullOrWhiteSpace(workspaceRoot))
+        // 3d. Workspace boundary: when workspace context or root is supplied, file-tool paths must stay
+        // inside it. Absolute escapes, ../ traversal, and restricted paths are rejected before execution.
+        if (workspaceContext != null)
+        {
+            string? boundary = Klydis.Core.Tasks.WorkspaceBoundaryValidator.Validate(
+                request.Name, request.Arguments, workspaceContext);
+            if (boundary != null)
+            {
+                return new ActionGateVerdict(false, ActionGateError.WorkspaceBoundaryViolation,
+                    boundary, null, currentStep);
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(workspaceRoot))
         {
             string? boundary = Klydis.Core.Tasks.WorkspaceBoundaryValidator.Validate(
                 request.Name, request.Arguments, workspaceRoot);

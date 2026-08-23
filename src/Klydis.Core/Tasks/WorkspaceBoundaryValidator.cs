@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Klydis.Core.Chat;
+using Klydis.Core.Workspace;
 
 namespace Klydis.Core.Tasks;
 
@@ -12,11 +13,8 @@ namespace Klydis.Core.Tasks;
 /// deliberately exempt — the shell is the escape hatch for legitimate system work; the file
 /// surface is not.
 ///
-/// The gate accepts an optional workspace root: null = boundary enforcement off (permissive,
-/// today's default — the desktop agent has no task workspace concept yet). When a task
-/// workspace root exists (the TaskStep workspace milestone), callers supply it and every
-/// file-tool path is contained. This validator is the deterministic rule; the caller decides
-/// when to enable it.
+/// The gate accepts an optional workspace root or <see cref="AgentWorkspaceContext"/>: null = boundary enforcement off (permissive).
+/// When a task workspace exists, callers supply it and every file-tool path is contained.
 /// </summary>
 public static class WorkspaceBoundaryValidator
 {
@@ -48,6 +46,42 @@ public static class WorkspaceBoundaryValidator
     /// <summary>True when the tool is a shell tool with a working directory.</summary>
     public static bool IsShellTool(string? toolName)
         => !string.IsNullOrWhiteSpace(toolName) && ShellTools.Contains(toolName);
+
+    /// <summary>
+    /// Validates the tool's path argument against the workspace context or workspace root.
+    /// Returns null when within bounds; returns a concrete reason when out of bounds or targeting restricted paths.
+    /// </summary>
+    public static string? Validate(string? toolName, IDictionary<string, object>? args, AgentWorkspaceContext? workspaceContext)
+    {
+        if (workspaceContext == null) return null;
+        if (args == null) return null;
+
+        if (IsPathTool(toolName))
+        {
+            string? path = FindPathArg(args);
+            if (string.IsNullOrWhiteSpace(path)) return null;
+
+            var resolution = FilesystemPolicy.ResolveAndValidate(path, workspaceContext);
+            if (!resolution.IsAllowed)
+            {
+                return resolution.FailureReason ?? $"Path '{path}' is not permitted under the workspace policy.";
+            }
+        }
+        else if (IsShellTool(toolName))
+        {
+            string? workingDir = FindWorkingDirArg(args);
+            if (!string.IsNullOrWhiteSpace(workingDir))
+            {
+                var resolution = FilesystemPolicy.ResolveAndValidate(workingDir, workspaceContext);
+                if (!resolution.IsAllowed)
+                {
+                    return resolution.FailureReason ?? $"Working directory '{workingDir}' is not permitted under the workspace policy.";
+                }
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// Validates the tool's path argument against the workspace root. Returns null when the
@@ -133,6 +167,7 @@ public static class WorkspaceBoundaryValidator
                 requestedPath.StartsWith(@"//", StringComparison.Ordinal) ||
                 requestedPath.StartsWith(@"\??\", StringComparison.Ordinal) ||
                 requestedPath.StartsWith(@"/??/", StringComparison.Ordinal) ||
+                requestedPath.StartsWith(@"\\.\", StringComparison.Ordinal) ||
                 requestedPath.Contains("::") ||
                 (requestedPath.Length > 2 && requestedPath.IndexOf(':', 2) >= 0))
             {
@@ -170,7 +205,7 @@ public static class WorkspaceBoundaryValidator
         }
     }
 
-    private static string? FindPathArg(IDictionary<string, object> args)
+    public static string? FindPathArg(IDictionary<string, object> args)
     {
         foreach (var kvp in args)
         {
@@ -186,7 +221,7 @@ public static class WorkspaceBoundaryValidator
         return null;
     }
 
-    private static string? FindWorkingDirArg(IDictionary<string, object> args)
+    public static string? FindWorkingDirArg(IDictionary<string, object> args)
     {
         foreach (var kvp in args)
         {

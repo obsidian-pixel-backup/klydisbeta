@@ -14,7 +14,8 @@ public sealed record ActionValidationContext(
     bool CompletionIsEligible = true,
     string? CompletionIneligibilityReason = null,
     IReadOnlySet<string>? RunAlreadyExecuted = null,
-    string? WorkspaceRoot = null);
+    string? WorkspaceRoot = null,
+    Klydis.Core.Workspace.AgentWorkspaceContext? WorkspaceContext = null);
 
 /// <summary>
 /// The second validation layer (P1.8): <see cref="ActionGate"/> answers "is this tool call
@@ -69,7 +70,8 @@ public static class ActionValidator
             // WorkspaceBoundaryValidator is active for EVERY filesystem action in the live
             // gate path — not just the call sites that remember to pass it.
             workspaceRoot: context.WorkspaceRoot,
-            alreadyExecuted: context.RunAlreadyExecuted);
+            alreadyExecuted: context.RunAlreadyExecuted,
+            workspaceContext: context.WorkspaceContext);
         if (!verdict.Allowed) return verdict;
 
         // Completion claims are SEMANTIC, not just schema: the runtime's eligibility is the

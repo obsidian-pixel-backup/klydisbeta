@@ -8,10 +8,12 @@ namespace Klydis.Core.Tracing;
 public enum ExecutionEventCategory
 {
     TaskStarted,
+    ModelTurnStarted,
+    ModelActionProduced,
+    ModelThinking,
     PlanCreated,
     PlanUpdated,
     StepStarted,
-    ModelThinking,
     ToolProposed,
     ToolBlocked,
     ToolStarted,
@@ -20,7 +22,13 @@ public enum ExecutionEventCategory
     FileRead,
     FileWritten,
     FileEdited,
+    FileCreated,
+    FileModified,
+    FileDeleted,
     DiffCreated,
+    TerminalStarted,
+    TerminalOutput,
+    TerminalCompleted,
     ArtifactCreated,
     PreviewUpdated,
     VerificationStarted,
@@ -29,6 +37,10 @@ public enum ExecutionEventCategory
     RecoveryStarted,
     RecoveryCompleted,
     StepCompleted,
+    ModelTurnEnded,
+    RunContinued,
+    RunCompleted,
+    Stalled,
     TaskCompleted
 }
 
@@ -50,10 +62,13 @@ public sealed record ExecutionEvent
     /// <summary>Task identifier if part of an autonomous task.</summary>
     public string? TaskId { get; init; }
 
+    /// <summary>Run identifier if part of a task run.</summary>
+    public string? RunId { get; init; }
+
     /// <summary>Step identifier if part of a task step.</summary>
     public string? StepId { get; init; }
 
-    /// <summary>Action identifier if correlated with a specific tool invocation.</summary>
+    /// <summary>Action identifier if correlated with a specific tool or terminal invocation.</summary>
     public string? ActionId { get; init; }
 
     /// <summary>Loop iteration count.</summary>
@@ -82,6 +97,24 @@ public sealed record ExecutionEvent
 
     /// <summary>Associated filesystem path if applicable.</summary>
     public string? FilePath { get; init; }
+
+    /// <summary>Diff text if applicable.</summary>
+    public string? DiffText { get; init; }
+
+    /// <summary>Added lines count if applicable.</summary>
+    public int AddedLines { get; init; }
+
+    /// <summary>Deleted lines count if applicable.</summary>
+    public int DeletedLines { get; init; }
+
+    /// <summary>Command string if applicable.</summary>
+    public string? Command { get; init; }
+
+    /// <summary>Working directory for command execution if applicable.</summary>
+    public string? WorkingDirectory { get; init; }
+
+    /// <summary>Exit code for command execution if applicable.</summary>
+    public int? ExitCode { get; init; }
 
     /// <summary>Duration of action execution in milliseconds.</summary>
     public long DurationMs { get; init; }

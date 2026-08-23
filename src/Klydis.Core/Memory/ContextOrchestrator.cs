@@ -310,7 +310,8 @@ namespace Klydis.Core.Memory
             string archivePath = string.Empty;
             try
             {
-                var transcriptDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), ".klydis", "transcripts");
+                string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                var transcriptDir = System.IO.Path.Combine(userProfile, ".klydis", "transcripts");
                 System.IO.Directory.CreateDirectory(transcriptDir);
                 archivePath = System.IO.Path.Combine(transcriptDir, $"archive_{sessionId}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.txt");
                 var transcriptLines = overflow.Select(m => $"[{m.Role.ToString().ToUpper()}]\n{m.Content}\n---");

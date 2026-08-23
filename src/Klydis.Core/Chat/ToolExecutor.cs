@@ -100,7 +100,8 @@ public class ToolExecutor(
     Klydis.Core.RAG.DocumentIngestionEngine? ingestionEngine = null,
     Klydis.Core.Learning.AdaptiveLearningService? adaptiveLearning = null,
     Klydis.Core.Tasks.TaskManager? taskManager = null,
-    Klydis.Core.Web.WebOrchestrator? webOrchestrator = null)
+    Klydis.Core.Web.WebOrchestrator? webOrchestrator = null,
+    Klydis.Core.Workspace.IWorkspaceManager? workspaceManager = null)
 {
     private readonly StealthBrowserService? _stealthBrowserService = stealthBrowserService;
 
@@ -116,6 +117,42 @@ public class ToolExecutor(
         new(webOrchestrator ?? Klydis.Core.Web.WebOrchestrator.CreateDefault(logger, stealthBrowserService), logger);
 
     private readonly Klydis.Core.Hardware.ISystemDiagnostics _systemDiagnostics = new Klydis.Core.Hardware.WindowsSystemDiagnostics();
+
+    /// <summary>
+    /// Workspace manager governing session workspace directories and filesystem boundaries.
+    /// </summary>
+    public Klydis.Core.Workspace.IWorkspaceManager? WorkspaceManager { get; set; } = workspaceManager;
+
+    /// <summary>
+    /// Resolves and validates a path requested by the model against the session's workspace policy.
+    /// </summary>
+    public Klydis.Core.Workspace.WorkspacePathResolution ResolveToolPath(string? sessionId, string requestedPath)
+    {
+        if (WorkspaceManager != null && !string.IsNullOrWhiteSpace(sessionId))
+        {
+            return WorkspaceManager.ResolvePath(sessionId, requestedPath);
+        }
+
+        string fallbackRoot = WorkspaceRoot ?? Directory.GetCurrentDirectory();
+        var authorized = new List<string>();
+        try { authorized.Add(Path.GetTempPath()); } catch { }
+        if (WorkspaceRoot == null)
+        {
+            try { authorized.Add(Directory.GetCurrentDirectory()); } catch { }
+        }
+        var fallbackContext = new Klydis.Core.Workspace.AgentWorkspaceContext(
+            SessionId: sessionId ?? "default",
+            Root: fallbackRoot,
+            Scratch: Path.Combine(fallbackRoot, "scratch"),
+            Artifacts: Path.Combine(fallbackRoot, "artifacts"),
+            Changes: Path.Combine(fallbackRoot, "changes"),
+            Exports: Path.Combine(fallbackRoot, "exports"),
+            Terminal: Path.Combine(fallbackRoot, "terminal"),
+            AuthorizedExternalRoots: authorized,
+            Mode: Klydis.Core.Workspace.WorkspaceMode.Scratch);
+
+        return Klydis.Core.Workspace.FilesystemPolicy.ResolveAndValidate(requestedPath, fallbackContext);
+    }
 
     /// <summary>
     /// The task currently executing, when the turn resolved one. Set by ChatEngine after
@@ -151,12 +188,51 @@ public class ToolExecutor(
             try
             {
                 _workspaceRoot = string.IsNullOrWhiteSpace(value) ? null : System.IO.Path.GetFullPath(value);
+                if (!string.IsNullOrEmpty(_workspaceRoot))
+                {
+                    ChangeObserver.StartObserving(_workspaceRoot, "global", CurrentTaskId, CurrentRunId);
+                }
             }
             catch
             {
                 _workspaceRoot = null;
             }
         }
+    }
+
+    private IExecutionEventStore? _eventStore;
+    public IExecutionEventStore EventStore
+    {
+        get => _eventStore ??= new InMemoryExecutionEventStore();
+        set => _eventStore = value;
+    }
+
+    private ArtifactDetector? _artifactDetector;
+    public ArtifactDetector ArtifactDetector
+    {
+        get => _artifactDetector ??= new ArtifactDetector(messageStore, EventStore, logger as ILogger<ArtifactDetector>);
+        set => _artifactDetector = value;
+    }
+
+    private WorkspaceMutationService? _mutationService;
+    public WorkspaceMutationService MutationService
+    {
+        get => _mutationService ??= new WorkspaceMutationService(messageStore, ArtifactDetector, EventStore, logger as ILogger<WorkspaceMutationService>);
+        set => _mutationService = value;
+    }
+
+    private WorkspaceChangeObserver? _changeObserver;
+    public WorkspaceChangeObserver ChangeObserver
+    {
+        get => _changeObserver ??= new WorkspaceChangeObserver(MutationService, messageStore, ArtifactDetector, EventStore, logger as ILogger<WorkspaceChangeObserver>);
+        set => _changeObserver = value;
+    }
+
+    private Klydis.Core.Processes.TerminalExecutionService? _terminalService;
+    public Klydis.Core.Processes.TerminalExecutionService TerminalService
+    {
+        get => _terminalService ??= new Klydis.Core.Processes.TerminalExecutionService(EventStore, logger as ILogger<Klydis.Core.Processes.TerminalExecutionService>);
+        set => _terminalService = value;
     }
 
     public Klydis.Core.Tasks.TaskManager? TaskManager { get; set; } = taskManager;
@@ -824,12 +900,12 @@ public class ToolExecutor(
         {
             result = canonicalName switch
             {
-                "read_file" => await ReadFileAsync(request, toolCt),
+                "read_file" => await ReadFileAsync(request, sessionId, toolCt),
                 "write_file" => await WriteFileAsync(request, sessionId, toolCt),
                 "edit_file" => await EditFileAsync(request, sessionId, toolCt),
                 "apply_patch" => await ApplyPatchAsync(request, sessionId, toolCt),
-                "list_directory" => await ListDirectoryAsync(request, toolCt),
-                "run_command" => await RunCommandAsync(request, toolCt),
+                "list_directory" => await ListDirectoryAsync(request, sessionId, toolCt),
+                "run_command" => await RunCommandAsync(request, sessionId, toolCt),
                 "get_system_info" => await GetSystemInfoAsync(toolCt),
                 "search_web" => await SearchWebAsync(request, toolCt),
                 "crawl_url" => await CrawlUrlAsync(request, toolCt),
@@ -838,7 +914,7 @@ public class ToolExecutor(
                 "get_links" => await GetLinksAsync(request, toolCt),
                 "get_table" => await GetTableAsync(request, toolCt),
                 "get_metadata" => await GetMetadataAsync(request, toolCt),
-                "search_files" => await SearchFilesAsync(request, toolCt),
+                "search_files" => await SearchFilesAsync(request, sessionId, toolCt),
                 "store_memory" => await StoreMemoryAsync(request, sessionId, toolCt),
                 "retrieve_memory" => await RetrieveMemoryAsync(request, sessionId, toolCt),
                 "summarize_context" => await SummarizeContextAsync(request, sessionId, toolCt),
@@ -1042,12 +1118,12 @@ public class ToolExecutor(
         }
         catch { /* best-effort trace */ }
 
-        result = ProcessToolOutputOffload(result);
+        result = ProcessToolOutputOffload(result, sessionId);
         ToolExecuted?.Invoke(this, result);
         return result;
     }
 
-    private ToolResult ProcessToolOutputOffload(ToolResult result)
+    private ToolResult ProcessToolOutputOffload(ToolResult result, string? sessionId = null)
     {
         // Paths that never reach the offload branch (failed tools with giant error blobs,
         // empty output, or offloading disabled): hard-truncate in place so a runaway command's
@@ -1073,11 +1149,19 @@ public class ToolExecutor(
 
         try
         {
-            // P0: offload output under the task workspace root when one is established, so
+            // P0: offload output under the task/session workspace artifacts folder, so
             // internal tool output never escapes the project boundary and the model can reach
-            // it with workspace-scoped file tools. Falls back to the process cwd (legacy).
-            var offloadRoot = WorkspaceRoot ?? Directory.GetCurrentDirectory();
-            var offloadDir = Path.Combine(offloadRoot, ".klydis", "artifacts", "tool_outputs");
+            // it with workspace-scoped file tools.
+            string offloadDir;
+            if (WorkspaceManager != null && !string.IsNullOrWhiteSpace(sessionId))
+            {
+                offloadDir = Path.Combine(WorkspaceManager.GetArtifactsDirectory(sessionId), "tool_outputs");
+            }
+            else
+            {
+                var offloadRoot = WorkspaceRoot ?? Directory.GetCurrentDirectory();
+                offloadDir = Path.Combine(offloadRoot, "artifacts", "tool_outputs");
+            }
             Directory.CreateDirectory(offloadDir);
 
             var fileName = $"offload_{result.ToolName}_{Guid.NewGuid():N}.txt";
@@ -1263,13 +1347,20 @@ public class ToolExecutor(
         return new ToolResult(toolName, false, string.Empty, message, IsValidationError: true);
     }
 
-    private async Task<ToolResult> ReadFileAsync(ToolCallRequest request, CancellationToken ct)
+    private async Task<ToolResult> ReadFileAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
         var path = GetStringArg(request.Arguments, "path");
         if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Path is required");
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
-        if (!File.Exists(path)) return new ToolResult(request.Name, false, "", "File not found");
+
+        var resolution = ResolveToolPath(sessionId, path);
+        if (!resolution.IsAllowed)
+        {
+            return new ToolResult(request.Name, false, "", resolution.FailureReason ?? "Path access denied by workspace policy.");
+        }
+        string resolvedPath = resolution.ResolvedPath;
+        if (!File.Exists(resolvedPath)) return new ToolResult(request.Name, false, "", $"File not found: {path}");
 
         int? startLine = null;
         int? endLine = null;
@@ -1286,7 +1377,7 @@ public class ToolExecutor(
                 endLine = el;
         }
 
-        if (startLine.HasValue || endLine.HasValue || path.Contains("offload_") || path.Contains("tool_outputs"))
+        if (startLine.HasValue || endLine.HasValue || resolvedPath.Contains("offload_") || resolvedPath.Contains("tool_outputs"))
         {
             // Stream lines lazily instead of materializing the whole file: offloaded tool
             // outputs can be tens of MB, and ReadAllLinesAsync would spike memory to hold them.
@@ -1300,7 +1391,7 @@ public class ToolExecutor(
                 int end = Math.Max(endLine.Value, startLine.GetValueOrDefault(1));
                 count = end - (startLine ?? 1) + 1;
             }
-            else if (path.Contains("offload_") || path.Contains("tool_outputs"))
+            else if (resolvedPath.Contains("offload_") || resolvedPath.Contains("tool_outputs"))
             {
                 // Reading an offloaded artifact without explicit ranges: default to a bounded
                 // window so a whole-file re-read can never re-offload into an infinite loop.
@@ -1317,7 +1408,7 @@ public class ToolExecutor(
             int delivered = 0;
             int remaining = count;
             bool capped = false;
-            await foreach (var line in File.ReadLinesAsync(path, ct))
+            await foreach (var line in File.ReadLinesAsync(resolvedPath, ct))
             {
                 if (lineIndex < start)
                 {
@@ -1365,7 +1456,7 @@ public class ToolExecutor(
             return new ToolResult(request.Name, true, sb.ToString(), null);
         }
 
-        var content = await File.ReadAllTextAsync(path, ct);
+        var content = await File.ReadAllTextAsync(resolvedPath, ct);
         return new ToolResult(request.Name, true, content, null);
     }
 
@@ -1378,36 +1469,24 @@ public class ToolExecutor(
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
 
-        var dir = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-
-        // Factual change capture (workbench §7–§8): snapshot the file BEFORE the write, then
-        // after, compute a REAL diff and persist it — the Changes tab shows evidence from the
-        // filesystem, never model-generated narration. Task-scoped via CurrentTaskId.
-        string? beforeContent = null;
-        try
+        var resolution = ResolveToolPath(sessionId, path);
+        if (!resolution.IsAllowed)
         {
-            if (File.Exists(path))
-            {
-                beforeContent = await File.ReadAllTextAsync(path, ct);
-            }
+            return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");
         }
-        catch { /* unreadable — record as a fresh file */ }
+        string resolvedPath = resolution.ResolvedPath;
 
-        await File.WriteAllTextAsync(path, content, ct);
+        var res = await MutationService.WriteFileAsync(
+            resolvedPath, content, sessionId, CurrentTaskId, CurrentRunId, null, request.Name, ct);
 
-        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, content);
+        if (!res.Success)
+        {
+            return new ToolResult(request.Name, false, string.Empty, res.ErrorMessage ?? "File write failed");
+        }
 
         return new ToolResult(request.Name, true, "File written successfully", null);
     }
 
-    /// <summary>
-    /// Applies a targeted text replacement inside an existing file (the <c>edit_file</c>
-    /// tool). The old_text must appear EXACTLY once — zero or multiple matches fail with
-    /// guidance instead of risking a corrupt or ambiguous edit. Every mutation flows through
-    /// <see cref="CaptureFileMutationAsync"/>, the same pipeline as write_file, so diffs,
-    /// artifacts, and events stay consistent across tools.
-    /// </summary>
     private async Task<ToolResult> EditFileAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
         var path = GetStringArg(request.Arguments, "path");
@@ -1418,64 +1497,28 @@ public class ToolExecutor(
         if (newText == null) return InvalidCall(request.Name, "new_text is required");
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
-        if (!File.Exists(path)) return new ToolResult(request.Name, false, string.Empty, $"File not found: {path}");
 
-        string beforeContent;
-        try
+        var resolution = ResolveToolPath(sessionId, path);
+        if (!resolution.IsAllowed)
         {
-            beforeContent = await File.ReadAllTextAsync(path, ct);
+            return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");
         }
-        catch (Exception ex)
-        {
-            return new ToolResult(request.Name, false, string.Empty, $"Failed to read {path}: {ex.Message}");
-        }
+        string resolvedPath = resolution.ResolvedPath;
 
-        int idx = beforeContent.IndexOf(oldText, StringComparison.Ordinal);
-        int replaceLen = oldText.Length;
-        bool fuzzyApplied = false;
-        if (idx < 0)
+        var res = await MutationService.EditFileAsync(
+            resolvedPath, oldText, newText, sessionId, CurrentTaskId, CurrentRunId, null, request.Name, ct);
+
+        if (!res.Success)
         {
-            // Exact match failed — try the whitespace/indentation-tolerant fuzzy match before
-            // giving up (blueprint TODO 081). A model that read the file and then the file was
-            // reformatted (indentation drift, CRLF, trailing whitespace) would otherwise fail a
-            // perfectly valid edit. The fuzzy match must still be UNIQUE, and the replacement
-            // replaces the exact original span (preserving the file's real whitespace).
-            var fuzzy = FindTolerantMatch(beforeContent, oldText, out bool fuzzyAmbiguous);
-            if (fuzzy == null)
-            {
-                return new ToolResult(request.Name, false, string.Empty,
-                    fuzzyAmbiguous
-                        ? $"old_text appears more than once in {path} (even after normalizing whitespace/indentation). Include more surrounding context so the match is unique, or use write_file to rewrite the whole file."
-                        : $"old_text was not found in {path} (whitespace/indentation-insensitive search also found nothing). Use read_file to get the exact current content, or write_file to rewrite the whole file.");
-            }
-            idx = fuzzy.Value.Start;
-            replaceLen = fuzzy.Value.Length;
-            fuzzyApplied = true;
-        }
-        else if (beforeContent.IndexOf(oldText, idx + oldText.Length, StringComparison.Ordinal) >= 0)
-        {
-            return new ToolResult(request.Name, false, string.Empty,
-                $"old_text appears more than once in {path}. Include more surrounding context so the match is unique, or use write_file to rewrite the whole file.");
+            return new ToolResult(request.Name, false, string.Empty, res.ErrorMessage ?? "File edit failed");
         }
 
-        string afterContent = beforeContent.Substring(0, idx) + newText + beforeContent.Substring(idx + replaceLen);
-
-        await File.WriteAllTextAsync(path, afterContent, ct);
-
-        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, afterContent);
-
-        return new ToolResult(request.Name, true,
-            fuzzyApplied ? "File edited successfully (whitespace/indentation-tolerant match applied)" : "File edited successfully",
-            null);
+        string msg = res.FuzzyApplied
+            ? "File edited successfully (whitespace-tolerant match)"
+            : "File edited successfully";
+        return new ToolResult(request.Name, true, msg, null);
     }
 
-    /// <summary>
-    /// Applies a unified diff (diff -u format) to an existing file (the <c>apply_patch</c>
-    /// tool, blueprint TODO 082). Parsing and application are pure and whitespace/line-ending
-    /// tolerant (see <see cref="Klydis.Core.Workbench.UnifiedDiff"/>); on success the mutation
-    /// flows through <see cref="CaptureFileMutationAsync"/>, the same pipeline as write_file /
-    /// edit_file, so diffs, artifacts, and events stay consistent.
-    /// </summary>
     private async Task<ToolResult> ApplyPatchAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
         var path = GetStringArg(request.Arguments, "path");
@@ -1484,31 +1527,22 @@ public class ToolExecutor(
         if (string.IsNullOrEmpty(patch)) return InvalidCall(request.Name, "patch is required");
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
-        if (!File.Exists(path)) return new ToolResult(request.Name, false, string.Empty, $"File not found: {path}");
 
-        string beforeContent;
-        try
+        var resolution = ResolveToolPath(sessionId, path);
+        if (!resolution.IsAllowed)
         {
-            beforeContent = await File.ReadAllTextAsync(path, ct);
+            return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");
         }
-        catch (Exception ex)
-        {
-            return new ToolResult(request.Name, false, string.Empty, $"Failed to read {path}: {ex.Message}");
-        }
+        string resolvedPath = resolution.ResolvedPath;
 
-        string? afterContent = Klydis.Core.Workbench.UnifiedDiff.Apply(beforeContent, patch, out string? applyError);
-        if (afterContent == null)
+        var res = await MutationService.ApplyPatchAsync(
+            resolvedPath, patch, sessionId, CurrentTaskId, CurrentRunId, null, request.Name, ct);
+
+        if (!res.Success)
         {
-            return new ToolResult(request.Name, false, string.Empty, $"Failed to apply patch: {applyError}");
-        }
-        if (afterContent == beforeContent)
-        {
-            return new ToolResult(request.Name, false, string.Empty,
-                "Patch applied but produced no changes — is the file already patched?");
+            return new ToolResult(request.Name, false, string.Empty, res.ErrorMessage ?? "Patch failed");
         }
 
-        await File.WriteAllTextAsync(path, afterContent, ct);
-        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, afterContent);
         return new ToolResult(request.Name, true, "Patch applied successfully", null);
     }
 
@@ -1716,13 +1750,19 @@ public class ToolExecutor(
             PayloadJson: payload));
     }
 
-    private Task<ToolResult> ListDirectoryAsync(ToolCallRequest request, CancellationToken ct)
+    private Task<ToolResult> ListDirectoryAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
-        var path = GetStringArg(request.Arguments, "path");
-        if (string.IsNullOrEmpty(path)) return Task.FromResult(InvalidCall(request.Name, "Path is required"));
+        var path = GetStringArg(request.Arguments, "path") ?? string.Empty;
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return Task.FromResult(commandLike);
-        if (!Directory.Exists(path)) return Task.FromResult(new ToolResult(request.Name, false, "", $"Directory not found: {path}"));
+
+        var resolution = ResolveToolPath(sessionId, string.IsNullOrWhiteSpace(path) ? "." : path);
+        if (!resolution.IsAllowed)
+        {
+            return Task.FromResult(new ToolResult(request.Name, false, "", resolution.FailureReason ?? "Path access denied by workspace policy."));
+        }
+        string resolvedPath = resolution.ResolvedPath;
+        if (!Directory.Exists(resolvedPath)) return Task.FromResult(new ToolResult(request.Name, false, "", $"Directory not found: {path}"));
 
         int offset = 0;
         int limit = 50;
@@ -1737,7 +1777,7 @@ public class ToolExecutor(
                 limit = Math.Clamp(lim, 1, 200);
         }
 
-        var info = new DirectoryInfo(path);
+        var info = new DirectoryInfo(resolvedPath);
         var dirs = info.GetDirectories().AsEnumerable();
         var files = info.GetFiles().AsEnumerable();
 
@@ -1775,7 +1815,7 @@ public class ToolExecutor(
         int nextOffset = offset + pagedItems.Count;
 
         var sb = new StringBuilder();
-        sb.AppendLine($"[Directory: {path}] [Total Items: {totalCount} ({dirList.Count} dirs, {fileList.Count} files)] [Showing {Math.Min(offset + 1, totalCount)} to {offset + pagedItems.Count} of {totalCount}]");
+        sb.AppendLine($"[Directory: {resolvedPath}] [Total Items: {totalCount} ({dirList.Count} dirs, {fileList.Count} files)] [Showing {Math.Min(offset + 1, totalCount)} to {offset + pagedItems.Count} of {totalCount}]");
         sb.AppendLine($"[Pagination: offset={offset}, limit={limit}, has_more={hasMore.ToString().ToLowerInvariant()}, next_offset={(hasMore ? nextOffset : -1)}]");
         sb.AppendLine();
         foreach (var item in pagedItems)
@@ -1786,175 +1826,74 @@ public class ToolExecutor(
         return Task.FromResult(new ToolResult(request.Name, true, sb.ToString().TrimEnd(), null));
     }
 
-    private async Task<ToolResult> RunCommandAsync(ToolCallRequest request, CancellationToken ct)
+    private async Task<ToolResult> RunCommandAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
         var command = GetStringArg(request.Arguments, "command");
         if (string.IsNullOrEmpty(command)) return InvalidCall(request.Name, "Command is required");
 
         string shell = GetStringArg(request.Arguments, "shell")?.ToLowerInvariant() ?? "powershell";
-        var workingDir = GetStringArg(request.Arguments, "working_directory");
-        if (string.IsNullOrWhiteSpace(workingDir) || !Directory.Exists(workingDir))
+        var workingDirArg = GetStringArg(request.Arguments, "working_directory");
+        string workingDir;
+
+        if (!string.IsNullOrWhiteSpace(workingDirArg))
+        {
+            var pathRes = ResolveToolPath(sessionId, workingDirArg);
+            if (!pathRes.IsAllowed)
+            {
+                return new ToolResult(request.Name, false, string.Empty, pathRes.FailureReason ?? "Working directory is not permitted by workspace policy.");
+            }
+            workingDir = pathRes.ResolvedPath;
+        }
+        else if (WorkspaceManager != null && !string.IsNullOrWhiteSpace(sessionId))
+        {
+            workingDir = WorkspaceManager.GetScratchDirectory(sessionId);
+        }
+        else
         {
             workingDir = WorkspaceRoot ?? Directory.GetCurrentDirectory();
         }
 
-        int timeoutMs = 60000;
+        try
+        {
+            if (!Directory.Exists(workingDir))
+            {
+                Directory.CreateDirectory(workingDir);
+            }
+        }
+        catch { }
+
+        int timeoutSec = 60;
         if (request.Arguments != null && request.Arguments.TryGetValue("timeout_seconds", out var timeoutObj))
         {
             var unwrapped = UnwrapJsonElement(timeoutObj);
             if (unwrapped != null && int.TryParse(unwrapped.ToString(), out int sec) && sec > 0)
             {
-                timeoutMs = Math.Clamp(sec, 5, 300) * 1000;
+                timeoutSec = Math.Clamp(sec, 5, 300);
             }
         }
 
-        var sanitizedCmd = command;
-        ProcessStartInfo psi;
+        var cmdRequest = new Klydis.Core.Processes.TerminalCommandRequest(
+            Command: command,
+            Shell: shell,
+            WorkingDirectory: workingDir,
+            TimeoutSeconds: timeoutSec,
+            SessionId: sessionId ?? "global",
+            TaskId: CurrentTaskId,
+            RunId: CurrentRunId);
 
-        if (shell == "cmd")
-        {
-            psi = new ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = $"/c {sanitizedCmd}",
-                WorkingDirectory = workingDir,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-        }
-        else if (shell == "bash")
-        {
-            psi = new ProcessStartInfo
-            {
-                FileName = "bash.exe",
-                Arguments = $"-c \"{sanitizedCmd.Replace("\"", "\\\"")}\"",
-                WorkingDirectory = workingDir,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-        }
-        else // default: powershell
-        {
-            shell = "powershell";
-            sanitizedCmd = Regex.Replace(command, @"(?<=\s|^)&&(?=\s|$)", ";");
-            var matchStartFlags = Regex.Match(sanitizedCmd, @"^(?:start|Start-Process)\s+([a-zA-Z0-9_\-\.\:\\]+)\s+(--?[a-zA-Z0-9_\-\.]+.*)$", RegexOptions.IgnoreCase);
-            if (matchStartFlags.Success)
-            {
-                string appName = matchStartFlags.Groups[1].Value;
-                string rawArgs = matchStartFlags.Groups[2].Value;
-                sanitizedCmd = $"Start-Process -FilePath \"{appName}\" -ArgumentList {rawArgs}";
-            }
-            sanitizedCmd = NormalizePowershellWrapper(sanitizedCmd);
-            var encodedCmd = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitizedCmd));
+        var res = await TerminalService.ExecuteAsync(cmdRequest, null, ct);
 
-            psi = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encodedCmd}",
-                WorkingDirectory = workingDir,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-        }
-
-        try
-        {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            using var process = Process.Start(psi);
-            if (process == null) return new ToolResult(request.Name, false, "", "Failed to start process");
-
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-            var stderrTask = process.StandardError.ReadToEndAsync(ct);
-
-            using var timeoutCts = new CancellationTokenSource(timeoutMs);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-
-            try
-            {
-                await process.WaitForExitAsync(linkedCts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                sw.Stop();
-                try { process.Kill(entireProcessTree: true); } catch { }
-                if (timeoutCts.IsCancellationRequested)
-                {
-                    return new ToolResult(request.Name, false, "", $"Command timed out after {timeoutMs / 1000} seconds.",
-                        ExitCode: -1, DurationMs: sw.ElapsedMilliseconds,
-                        ErrorClassification: Klydis.Core.Tasks.CommandErrorClassification.Timeout,
-                        RecoveryGuidance: "TIMEOUT: Operation took too long. Split command into smaller chunks or reduce output size.");
-                }
-                throw;
-            }
-            sw.Stop();
-
-            var stdout = await stdoutTask;
-            var stderr = await stderrTask;
-
-            if (!string.IsNullOrEmpty(stderr) && stderr.Contains("CLIXML", StringComparison.OrdinalIgnoreCase))
-            {
-                stderr = System.Text.RegularExpressions.Regex.Replace(stderr, @"#<\s*CLIXML[\s\S]*?</Objs>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
-            }
-
-            var classification = Klydis.Core.Tasks.CommandExecution.ClassifyError(stderr, stdout, process.ExitCode, false, false);
-            string? guidance = Klydis.Core.Tasks.CommandExecution.GetGuidance(classification);
-
-            var executionEnvelope = new Dictionary<string, object?>
-            {
-                ["status"] = process.ExitCode == 0 ? "succeeded" : "failed",
-                ["exit_code"] = process.ExitCode,
-                ["stdout"] = string.IsNullOrWhiteSpace(stdout) ? null : stdout.TrimEnd(),
-                ["stderr"] = string.IsNullOrWhiteSpace(stderr) ? null : stderr.TrimEnd(),
-                ["command"] = command,
-                ["working_directory"] = workingDir,
-                ["shell"] = shell,
-                ["duration_ms"] = sw.ElapsedMilliseconds,
-                ["timed_out"] = false,
-                ["failure_class"] = process.ExitCode == 0 ? null : classification.ToString(),
-                ["recovery_guidance"] = process.ExitCode == 0 ? null : guidance
-            };
-
-            string jsonEnvelope = JsonSerializer.Serialize(executionEnvelope, new JsonSerializerOptions { WriteIndented = true, DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
-
-            string formattedOutput = $"[COMMAND EXECUTION RESULT]\n```json\n{jsonEnvelope}\n```";
-            if (!string.IsNullOrWhiteSpace(stdout))
-            {
-                formattedOutput += $"\n\n--- STDOUT ---\n{stdout.TrimEnd()}";
-            }
-            if (!string.IsNullOrWhiteSpace(stderr))
-            {
-                formattedOutput += $"\n\n--- STDERR ---\n{stderr.TrimEnd()}";
-            }
-
-            return new ToolResult(
-                request.Name,
-                process.ExitCode == 0,
-                formattedOutput,
-                process.ExitCode != 0 ? (string.IsNullOrWhiteSpace(stderr) ? $"Command exited with code {process.ExitCode}" : stderr.Trim()) : null,
-                ExitCode: process.ExitCode,
-                Stdout: stdout,
-                Stderr: stderr,
-                DurationMs: sw.ElapsedMilliseconds,
-                ErrorClassification: classification,
-                RecoveryGuidance: guidance);
-        }
-        catch (Exception ex)
-        {
-            if (ex is OperationCanceledException) throw;
-            return new ToolResult(request.Name, false, "", ex.Message);
-        }
+        return new ToolResult(
+            request.Name,
+            res.Success,
+            res.FormattedEnvelope,
+            !res.Success ? (string.IsNullOrWhiteSpace(res.Stderr) ? $"Command exited with code {res.ExitCode}" : res.Stderr.Trim()) : null,
+            ExitCode: res.ExitCode,
+            Stdout: res.Stdout,
+            Stderr: res.Stderr,
+            DurationMs: res.DurationMs,
+            ErrorClassification: res.ErrorClassification,
+            RecoveryGuidance: res.RecoveryGuidance);
     }
 
 #pragma warning disable CA1416 // Validate platform compatibility
@@ -2624,7 +2563,13 @@ public class ToolExecutor(
         if (newContent == null) return InvalidCall(request.Name, "new_content is required");
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
-        if (!File.Exists(path)) return new ToolResult(request.Name, false, string.Empty, $"File not found: {path}");
+
+        var resolution = ResolveToolPath(sessionId, path);
+        if (!resolution.IsAllowed)
+        {
+            return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");
+        }
+        string resolvedPath = resolution.ResolvedPath;
 
         int startLine = 1;
         int endLine = 1;
@@ -2642,38 +2587,15 @@ public class ToolExecutor(
         if (startLine < 1) return InvalidCall(request.Name, "start_line must be >= 1 (1-indexed)");
         if (endLine < startLine) return InvalidCall(request.Name, $"end_line ({endLine}) must be >= start_line ({startLine})");
 
-        string beforeContent;
-        try
+        var res = await MutationService.ReplaceLinesAsync(
+            resolvedPath, startLine, endLine, newContent, sessionId, CurrentTaskId, CurrentRunId, null, request.Name, ct);
+
+        if (!res.Success)
         {
-            beforeContent = await File.ReadAllTextAsync(path, ct);
-        }
-        catch (Exception ex)
-        {
-            return new ToolResult(request.Name, false, string.Empty, $"Failed to read {path}: {ex.Message}");
+            return new ToolResult(request.Name, false, string.Empty, res.ErrorMessage ?? "Replace lines failed");
         }
 
-        var lines = beforeContent.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None).ToList();
-        if (startLine > lines.Count)
-        {
-            return new ToolResult(request.Name, false, string.Empty,
-                $"start_line ({startLine}) exceeds file line count ({lines.Count}).");
-        }
-
-        int clampedEnd = Math.Min(endLine, lines.Count);
-        int removeCount = clampedEnd - startLine + 1;
-
-        var replacementLines = newContent.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-
-        lines.RemoveRange(startLine - 1, removeCount);
-        lines.InsertRange(startLine - 1, replacementLines);
-
-        string afterContent = string.Join(beforeContent.Contains("\r\n") ? "\r\n" : "\n", lines);
-
-        await File.WriteAllTextAsync(path, afterContent, ct);
-        await CaptureFileMutationAsync(request, sessionId, path, beforeContent, afterContent);
-
-        return new ToolResult(request.Name, true,
-            $"Successfully replaced lines {startLine}-{clampedEnd} ({removeCount} line(s) replaced with {replacementLines.Length} line(s)).", null);
+        return new ToolResult(request.Name, true, "Lines replaced successfully", null);
     }
 
     private Task<ToolResult> ManageProcessAsync(ToolCallRequest request, CancellationToken ct)
@@ -2891,23 +2813,29 @@ public class ToolExecutor(
     }
 
 
-    private async Task<ToolResult> SearchFilesAsync(ToolCallRequest request, CancellationToken ct)
+    private async Task<ToolResult> SearchFilesAsync(ToolCallRequest request, string sessionId, CancellationToken ct)
     {
-        var path = GetStringArg(request.Arguments, "path");
+        var path = GetStringArg(request.Arguments, "path") ?? string.Empty;
         var pattern = GetStringArg(request.Arguments, "pattern") ?? "*.*";
         var contains = GetStringArg(request.Arguments, "contains");
 
-        if (string.IsNullOrEmpty(path)) return InvalidCall(request.Name, "Valid path is required");
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
-        if (!Directory.Exists(path)) return new ToolResult(request.Name, false, "", "Valid path is required");
+
+        var resolution = ResolveToolPath(sessionId, string.IsNullOrWhiteSpace(path) ? "." : path);
+        if (!resolution.IsAllowed)
+        {
+            return new ToolResult(request.Name, false, "", resolution.FailureReason ?? "Path access denied by workspace policy.");
+        }
+        string resolvedPath = resolution.ResolvedPath;
+        if (!Directory.Exists(resolvedPath)) return new ToolResult(request.Name, false, "", $"Valid directory path is required: {path}");
 
         try
         {
             var results = new List<string>();
             const int maxResults = 20;
 
-            foreach (var file in EnumerateFilesResilient(path, pattern))
+            foreach (var file in EnumerateFilesResilient(resolvedPath, pattern))
             {
                 if (results.Count >= maxResults)
                 {

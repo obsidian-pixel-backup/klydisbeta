@@ -241,20 +241,84 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         _refreshTimer.Tick += (_, _) => Tick();
         _refreshTimer.Start();
 
-        // Event-driven plan sync: every durable plan mutation raises PlanChanged, so the Plan
-        // tab refreshes immediately instead of waiting for the next 2s poll.
+        // Event-driven plan sync: every durable plan mutation raises PlanChanged
         _toolExecutor.PlanChanged += OnPlanChanged;
 
-        // Real-time terminal and artifact stream: whenever run_command or file tools execute,
-        // project immediately into the Terminal, Files, and Preview tabs without waiting for timer poll.
+        // Legacy activity sync
         _toolExecutor.ToolActivityAppended += OnToolActivityAppended;
+
+        // Canonical real-time execution event projection
+        _toolExecutor.EventStore.EventAppended += OnExecutionEventAppended;
+        _toolExecutor.TerminalService.OutputChunkReceived += OnTerminalChunkReceived;
     }
 
     public void Dispose()
     {
         _toolExecutor.PlanChanged -= OnPlanChanged;
         _toolExecutor.ToolActivityAppended -= OnToolActivityAppended;
+        _toolExecutor.EventStore.EventAppended -= OnExecutionEventAppended;
+        _toolExecutor.TerminalService.OutputChunkReceived -= OnTerminalChunkReceived;
         _refreshTimer.Stop();
+    }
+
+    private void OnExecutionEventAppended(Klydis.Core.Tracing.ExecutionEvent evt)
+    {
+        if (!string.IsNullOrEmpty(evt.SessionId) &&
+            !string.Equals(evt.SessionId, "global", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(evt.SessionId, _currentSessionId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        Action update = () =>
+        {
+            switch (evt.Category)
+            {
+                case Klydis.Core.Tracing.ExecutionEventCategory.TerminalStarted:
+                case Klydis.Core.Tracing.ExecutionEventCategory.TerminalCompleted:
+                    RefreshTerminalFeed();
+                    break;
+                case Klydis.Core.Tracing.ExecutionEventCategory.FileCreated:
+                case Klydis.Core.Tracing.ExecutionEventCategory.FileModified:
+                case Klydis.Core.Tracing.ExecutionEventCategory.FileDeleted:
+                case Klydis.Core.Tracing.ExecutionEventCategory.FileWritten:
+                case Klydis.Core.Tracing.ExecutionEventCategory.FileEdited:
+                    FireAndForget.Observe(RefreshSessionFilesAsync(), operation: nameof(RefreshSessionFilesAsync));
+                    FireAndForget.Observe(RefreshChangesAsync(), operation: nameof(RefreshChangesAsync));
+                    FireAndForget.Observe(RefreshSessionArtifactsAsync(), operation: nameof(RefreshSessionArtifactsAsync));
+                    break;
+                case Klydis.Core.Tracing.ExecutionEventCategory.DiffCreated:
+                    FireAndForget.Observe(RefreshChangesAsync(), operation: nameof(RefreshChangesAsync));
+                    break;
+                case Klydis.Core.Tracing.ExecutionEventCategory.ArtifactCreated:
+                case Klydis.Core.Tracing.ExecutionEventCategory.PreviewUpdated:
+                    FireAndForget.Observe(RefreshSessionArtifactsAsync(), operation: nameof(RefreshSessionArtifactsAsync));
+                    break;
+            }
+        };
+
+        if (dispatcher != null && !dispatcher.CheckAccess())
+        {
+            dispatcher.InvokeAsync(update);
+        }
+        else
+        {
+            update();
+        }
+    }
+
+    private void OnTerminalChunkReceived(Klydis.Core.Processes.TerminalChunk chunk)
+    {
+        // Live output streaming update
+        if (!string.IsNullOrEmpty(chunk.SessionId) &&
+            !string.Equals(chunk.SessionId, "global", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(chunk.SessionId, _currentSessionId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // Live chunks are captured in event store and feed is refreshed on completion
     }
 
     private void OnToolActivityAppended(string sessionId, ToolActivityRecord record)
@@ -573,7 +637,21 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
     {
         if (string.IsNullOrEmpty(_workspaceRoot))
         {
-            try { _workspaceRoot = Environment.CurrentDirectory; } catch { _workspaceRoot = string.Empty; }
+            var wsManager = _toolExecutor?.WorkspaceManager;
+            string? sid = _currentSessionId;
+            if (wsManager != null && !string.IsNullOrEmpty(sid))
+            {
+                _workspaceRoot = wsManager.GetWorkspaceRoot(sid);
+            }
+            else if (!string.IsNullOrEmpty(_toolExecutor?.WorkspaceRoot))
+            {
+                _workspaceRoot = _toolExecutor.WorkspaceRoot;
+            }
+            else
+            {
+                string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                _workspaceRoot = Path.Combine(userProfile, "Klydis", "Workspace", "session-default");
+            }
         }
         return _workspaceRoot;
     }

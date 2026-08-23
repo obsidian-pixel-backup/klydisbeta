@@ -254,6 +254,11 @@ public class ChatEngine(
     private readonly Klydis.Core.Tracing.IAgentTrace _agentTrace = agentTrace ?? new Klydis.Core.Tracing.AgentTraceService(messageStore);
     public Klydis.Core.Tracing.IAgentTrace AgentTrace => _agentTrace;
     public ToolExecutor ToolExecutor => toolExecutor;
+    public Klydis.Core.Tracing.IExecutionEventStore EventStore => toolExecutor.EventStore;
+
+    private Klydis.Core.Tasks.AutonomousRunController? _runController;
+    public Klydis.Core.Tasks.AutonomousRunController RunController =>
+        _runController ??= new Klydis.Core.Tasks.AutonomousRunController(EventStore, logger as ILogger<Klydis.Core.Tasks.AutonomousRunController>);
 
     private readonly List<ChatMessage> _history = new();
     private readonly Klydis.Core.Learning.AdaptiveLearningService? _adaptiveLearning = adaptiveLearning;
@@ -3458,6 +3463,7 @@ public class ChatEngine(
                     }
                     catch { /* best effort */ }
 
+                    var wsContext = _runtime?.GetWorkspaceContext(generatingSessionId) ?? toolExecutor.WorkspaceManager?.GetWorkspaceContext(generatingSessionId);
                     var gateVerdict = Klydis.Core.Tasks.ActionValidator.ValidateForStep(
                         req, registeredToolDefs,
                         currentTaskStep == null ? null : Klydis.Core.Tasks.ActionObligation.FromStep(currentTaskStep),
@@ -3465,7 +3471,8 @@ public class ChatEngine(
                             CompletionIsEligible: completionEligibleNow,
                             CompletionIneligibilityReason: completionIneligibilityReason,
                             RunAlreadyExecuted: _runExecutedActions,
-                            WorkspaceRoot: _runtime?.WorkspaceRoot));
+                            WorkspaceRoot: _runtime?.WorkspaceRoot,
+                            WorkspaceContext: wsContext));
                     if (!gateVerdict.Allowed)
                     {
                         actionGateRejectionsThisTurn++;
@@ -3473,9 +3480,9 @@ public class ChatEngine(
                             req, CurrentTaskId, activeRunId, turnActionOrdinal);
                         string gateErrorCode = Klydis.Core.Tasks.ActionGate.ErrorCode(gateVerdict.Error!.Value);
                         var fp = _fingerprintTracker.RecordFailure(req.Name, gateErrorCode, req.Arguments, currentStepText);
-                        string rejection = fp.IsStrategyBlocked
+                        string rejection = (fp.IsStrategyBlocked
                             ? _fingerprintTracker.FormatBlockedFeedback(req.Name, gateErrorCode, fp.AttemptCount)
-                            : BuildActionGateRejection(actionId, req, gateVerdict, registeredToolDefs);
+                            : BuildActionGateRejection(actionId, req, gateVerdict, registeredToolDefs)) ?? string.Empty;
                         logger.LogWarning(
                             "ACTION_GATE_REJECTED actionId={ActionId} task={TaskId} run={RunId} step={Step} " +
                             "tool={Tool} code={Code} reason={Reason} allowed={Allowed}",
@@ -4655,30 +4662,26 @@ public class ChatEngine(
                         break;
                     }
 
-                    // AUTONOMOUS MULTI-STEP LONG-HORIZON CONTINUATION:
-                    // In autonomous / goal mode, if the model completed a step and open plan steps remain,
-                    // automatically advance the plan and continue the agentic loop without stopping after a single message!
-                    if ((isGoalMode || mode == InteractionMode.Autonomous) && openStepsRemain && currentStepForTurn != null)
+                    // AUTONOMOUS RUN CONTINUATION & SUPERVISOR OWNERSHIP:
+                    // In autonomous / goal mode, the supervisor owns task continuity.
+                    // The execution loop continues automatically until the objective is verified complete
+                    // or a terminal condition is reached. The model does not need to ask the user to 'continue'.
+                    if ((isGoalMode || mode == InteractionMode.Autonomous) && !_goalCompletedThisTurn && iterationCount < maxIterations)
                     {
-                        await toolExecutor.AdvancePlanItemDoneAsync(generatingSessionId, currentStepForTurn.Title);
-                        var remainingPlan = toolExecutor.GetSessionPlanEntries(generatingSessionId);
-                        var nextStep = remainingPlan.FirstOrDefault(e => !e.Done);
-                        if (nextStep != null)
+                        if (openStepsRemain && currentStepForTurn != null)
                         {
-                            logger.LogInformation("Autonomous loop auto-advancing from completed step '{Current}' to next step '{Next}'.",
-                                currentStepForTurn.Title, nextStep.Text);
-                            var advanceMsg = $"[Autonomous Execution: Step '{currentStepForTurn.Title}' completed. Proceeding immediately to Next Step: '{nextStep.Text}'. Reason independently, execute the required tools, and continue building the deliverable.]";
-                            AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, advanceMsg), generatingSessionId);
-                            yield return new ChatStreamEvent(ChatStreamEventType.Error, $"✔ Step completed — auto-advancing to: {nextStep.Text}…");
-                            continue;
-                        }
-                        else
-                        {
-                            // All steps completed! Prompt model to verify and call task_complete.
-                            var completePrompt = "[Autonomous Execution: All plan steps are complete. Perform final verification if needed, and call tool 'task_complete' with a summary of the completed work.]";
-                            AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, completePrompt), generatingSessionId);
-                            yield return new ChatStreamEvent(ChatStreamEventType.Error, "✔ All steps complete — finalizing and verifying deliverable…");
-                            continue;
+                            await toolExecutor.AdvancePlanItemDoneAsync(generatingSessionId, currentStepForTurn.Title);
+                            var remainingPlan = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                            var nextStep = remainingPlan.FirstOrDefault(e => !e.Done);
+                            if (nextStep != null)
+                            {
+                                logger.LogInformation("Autonomous loop auto-advancing from completed step '{Current}' to next step '{Next}'.",
+                                    currentStepForTurn.Title, nextStep.Text);
+                                var advanceMsg = $"[Autonomous Execution: Step '{currentStepForTurn.Title}' completed. Proceeding immediately to Next Step: '{nextStep.Text}'. Reason independently, execute the required tools, and continue building the deliverable.]";
+                                AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, advanceMsg), generatingSessionId);
+                                yield return new ChatStreamEvent(ChatStreamEventType.Error, $"✔ Step completed — auto-advancing to: {nextStep.Text}…");
+                                continue;
+                            }
                         }
                     }
 

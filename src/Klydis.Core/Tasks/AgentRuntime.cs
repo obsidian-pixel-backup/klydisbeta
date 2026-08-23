@@ -346,6 +346,23 @@ public class AgentRuntime : IAgentRuntime
     }
 
     /// <summary>
+    /// The workspace manager governing session workspaces and filesystem boundaries.
+    /// </summary>
+    public Klydis.Core.Workspace.IWorkspaceManager? WorkspaceManager { get; set; }
+
+    /// <summary>
+    /// Gets the workspace context for the specified session, or null if no manager is configured.
+    /// </summary>
+    public Klydis.Core.Workspace.AgentWorkspaceContext? GetWorkspaceContext(string? sessionId)
+    {
+        if (WorkspaceManager != null && !string.IsNullOrWhiteSpace(sessionId))
+        {
+            return WorkspaceManager.GetWorkspaceContext(sessionId);
+        }
+        return null;
+    }
+
+    /// <summary>
     /// The task workspace root (review §12) — established by the app when a project directory
     /// is known, propagated through the action-validations context so the boundary validator
     /// enforces containment for every filesystem action. Null = permissive (no task workspace

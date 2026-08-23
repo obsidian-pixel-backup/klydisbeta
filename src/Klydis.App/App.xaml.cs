@@ -192,6 +192,7 @@ public partial class App : Application
             // Unresolvable working directory — keep the root null (permissive) and surface it.
             System.Diagnostics.Debug.WriteLine($"Failed to resolve workspace root from the process working directory; workspace enforcement is DISABLED: {ex}");
         }
+        services.AddSingleton<Klydis.Core.Workspace.IWorkspaceManager, Klydis.Core.Workspace.WorkspaceManager>();
         services.AddSingleton<Klydis.Core.Tasks.ITaskEventBus, Klydis.Core.Tasks.TaskEventBus>();
         services.AddSingleton<Klydis.Core.Tasks.IWorkspaceVersionManager, Klydis.Core.Tasks.WorkspaceVersionManager>();
         services.AddSingleton<Klydis.Core.Tasks.ITaskWorkspaceManager>(sp => new Klydis.Core.Tasks.TaskWorkspaceManager(appWorkspaceRoot));
@@ -211,9 +212,7 @@ public partial class App : Application
                 sp.GetRequiredService<Klydis.Core.Tasks.ICompletionEngine>(),
                 sp.GetService<Klydis.Core.Skills.ISkillRouter>(),
                 sp.GetService<ILogger<Klydis.Core.Tasks.AgentRuntime>>());
-            // Unbounded system access: runtime.WorkspaceRoot is null so the Action Gate
-            // allows the agent full system access to any directory on the machine.
-            runtime.WorkspaceRoot = null;
+            runtime.WorkspaceManager = sp.GetService<Klydis.Core.Workspace.IWorkspaceManager>();
             return runtime;
         });
         services.AddSingleton<Klydis.Core.Tasks.IAgentRuntime>(sp => sp.GetRequiredService<Klydis.Core.Tasks.AgentRuntime>());
@@ -332,16 +331,14 @@ public partial class App : Application
                 sp.GetService<Klydis.Core.RAG.DocumentIngestionEngine>(),
                 sp.GetRequiredService<Klydis.Core.Learning.AdaptiveLearningService>(),
                 sp.GetService<Klydis.Core.Tasks.TaskManager>(),
-                sp.GetRequiredService<Klydis.Core.Web.WebOrchestrator>()
+                sp.GetRequiredService<Klydis.Core.Web.WebOrchestrator>(),
+                sp.GetService<Klydis.Core.Workspace.IWorkspaceManager>()
             );
             // Default to Standard (approval gate for risky/flagged tools). AutoPilot mode
             // executes arbitrary PowerShell with no approval gate, which combined with
             // prompt-injection surface from RAG docs and crawled pages is unsafe as a default;
             // users who want the fully autonomous mode switch to it in the UI selector.
             toolExecutor.CurrentRiskLevel = RiskLevel.Standard;
-            // P0: same canonical workspace root as the runtime, so run_command defaults and
-            // tool-output offload stay inside the project boundary.
-            toolExecutor.WorkspaceRoot = appWorkspaceRoot;
             toolExecutor.CapabilityRegistry = sp.GetRequiredService<ICapabilityRegistry>() as CapabilityRegistry;
             toolExecutor.CapabilityToolBridge = sp.GetRequiredService<CapabilityToolBridge>();
             return toolExecutor;

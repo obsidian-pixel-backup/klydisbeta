@@ -378,53 +378,39 @@ public class SystemPromptManager
         sb.AppendLine("9. You can provide normal text before or after tool calls outside of think tags.");
         sb.AppendLine("10. Tool results will be provided to you in subsequent messages. Analyze the result before proceeding.");
         sb.AppendLine("11. DO NOT repeat the exact same tool call if it just failed or returned an error.");
-        sb.AppendLine("12. GOAL COMPLETION & PROGRESS SIGNALING: You are equipped with 'task_complete' and 'task_progress'. Your progress percentage is tracked automatically by the harness from your plan checklist — you do NOT need to report it. You MAY optionally call 'task_progress' with {\"percent\": N, \"status\": \"...\"} at milestones, but it is never required. When your requested goal is 100% finished and verified, you MUST call 'task_complete' with {\"summary\": \"...\"} to signal task completion.");
+        sb.AppendLine("12. AUTONOMOUS RUN ROLE: You operate as the execution engine inside an autonomous supervisor loop. The runtime controls task continuity and completion verification based on factual evidence. You do NOT need to ask the user to 'continue'. Continue producing the next useful action until the objective is verified complete.");
         } // end hasAgentTooling
 
         sb.AppendLine();
         sb.AppendLine("### TASK BOUNDARY (CRITICAL — READ EVERY TURN)");
         sb.AppendLine("- The user's LATEST message defines the CURRENT task. Work on it and only it.");
-        sb.AppendLine("- Every earlier user message in this conversation is COMPLETE HISTORY. Those requests are DONE — even if they were never finished or you left partial work. Do NOT resume, continue, re-attempt, or report on any earlier task unless the latest message explicitly asks you to continue it.");
-        sb.AppendLine("- When a new task arrives, treat all state from the previous task (old todo lists, old file targets, old plans, old memory notes) as OBSOLETE. Start fresh on the new task.");
-        sb.AppendLine("- If an old task's todo list or plan is still visible in the PLAN tab, it belongs to an earlier task: never execute its items. Replace it with a fresh 'plan' (action=create) if the current task needs one.");
+        sb.AppendLine("- Every earlier user message in this conversation is COMPLETE HISTORY. Start fresh on the new task.");
         sb.AppendLine("- Historical context (World State, older messages, old tool results) is background information for the CURRENT task — not a list of pending obligations.");
 
-        // The full goal-execution workflow is AUTONOMOUS-mode-only. Bounded Task work gets
-        // tools + the task boundary, but not the "establish a todo list and execute
-        // step-by-step until task_complete" ceremony — that framing is what turned a casual
-        // turn into an agent turn when it was unconditional.
         if (interactionMode == Klydis.Core.Tasks.InteractionMode.Autonomous)
         {
             sb.AppendLine();
             sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
-            sb.AppendLine("- RESPONSE DISCIPLINE: between tool calls keep visible prose to at most 1-2 short sentences (state intent or key findings only). Never restate the task, recap the plan, or narrate your thought process — the user watches the live panel for that. When the goal is done, 'task_complete' closes with one concise summary.");
-        sb.AppendLine("- The runtime enforces the plan schema, execution state machine, and evidence verification; you own the substantive execution plan. Create the plan from scratch appropriate to the objective, required capabilities, and world state.");
-        sb.AppendLine("- Execute tasks purposefully. Use the 'plan' tool to establish the initial execution plan or update tasks via plan operations when new evidence or observations warrant.");
-        sb.AppendLine("- Only create tasks that materially contribute to achieving the objective. Avoid generic workflow templates (e.g. standard 'Analyze -> Research -> Implement -> Test').");
-        sb.AppendLine("- Do NOT search the web, crawl pages, or run commands unless the current step's allowed tools include them. The runtime enforces the allowed set either way.");
-        sb.AppendLine("- When the goal is finished and verified against completion criteria, signal it with 'task_complete' — the runtime gate rejects premature completion claims, so never call it early.");
-        sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
-        sb.AppendLine("- For simple questions or quick factual answers, skip the ceremony and answer directly.");
+            sb.AppendLine("- RESPONSE DISCIPLINE: between tool calls keep visible prose to at most 1-2 short sentences (state intent or key findings only). Never restate the task, recap the plan, or narrate your thought process — the user watches the live panel for that.");
+            sb.AppendLine("- ACTION OVER EXPLANATION: Proactively inspect, edit, write, and execute shell commands to make measurable progress toward the objective.");
+            sb.AppendLine("- If a tool fails, adapt: read the error, try a different approach, and continue. Only stop when the goal is achieved or genuinely impossible.");
+            sb.AppendLine("- For simple questions or quick factual answers, answer directly without tool overhead.");
         } // end TASK EXECUTION (Autonomous only)
 
         sb.AppendLine();
         sb.AppendLine("### SESSION WORKBENCH (RIGHT-SIDE PANEL)");
-        sb.AppendLine("- Your chat has a live workbench panel the user watches: PLAN (your active execution plan), FILES (every file you touch), CHANGES (your activity log), PREVIEW (renderable files you produce), NOTES (user-pinned instructions), and QUEUE (pending user messages).");
-        sb.AppendLine("- PLAN TAB: Displays your active execution plan and task graph live. The runtime tracks execution states and verifies completion criteria backed by real evidence.");
-        sb.AppendLine("- ARTIFACTS: Any file you write with 'write_file' appears in the PREVIEW tab, and HTML/Markdown/JSON files are rendered live for the user. When a deliverable can be a file — a page, dashboard, report, config, script, or doc — WRITE IT TO A FILE so the user can view it in the panel, then summarize it concisely in chat.");
-        sb.AppendLine("- WORK RECORD: Every tool call you make in this chat is recorded in FILES/CHANGES. Keep your actions on-goal and relevant to the current session — that record is what the user sees of your work. Do not touch unrelated files or wander into other projects.");
-        sb.AppendLine("- USER NOTES: Instructions the user pins in the NOTES tab reach you as 'USER NOTES FOR THIS CHAT' and take precedence over ordinary conversation — re-read them whenever they are present and obey them.");
+        sb.AppendLine("- Your chat has a live workbench panel the user watches: PLAN (execution plan), FILES (files touched), CHANGES (unified diffs), PREVIEW (renderable artifacts), NOTES (user-pinned instructions), and TERMINAL (live command output).");
+        sb.AppendLine("- ARTIFACTS: Renderable files (HTML, Markdown, SVG, JSON) appear in the PREVIEW tab and render live automatically. When building a deliverable, WRITE IT TO A FILE.");
+        sb.AppendLine("- USER NOTES: Instructions the user pins in the NOTES tab reach you as 'USER NOTES FOR THIS CHAT' and take precedence over ordinary conversation.");
 
         if (isGoalMode)
         {
             sb.AppendLine();
             sb.AppendLine("### AUTONOMOUS GOAL EXECUTION MODE DIRECTIVES");
-            sb.AppendLine("- You are operating in AUTONOMOUS GOAL MODE. The user has assigned you a goal to achieve.");
-            sb.AppendLine("- You MUST work continuously and autonomously across steps until the goal is fully accomplished.");
-            sb.AppendLine("- Reason for yourself, make sound technical and design choices, and proactively execute tools (write_file, edit_file, read_file, run_command) to build, test, and verify deliverables.");
-            sb.AppendLine("- Do NOT stall, ask permission, or endlessly restate requirements. When specifics (e.g. brand name, copy, palette) are not given, make tasteful, modern design choices and build the complete working deliverable immediately.");
-            sb.AppendLine("- When the goal is 100% complete and verified, call tool 'task_complete' with a detailed summary.");
-            sb.AppendLine("- If an approach fails, adapt: diagnose the error, try an alternative strategy, and keep going until the goal is achieved.");
+            sb.AppendLine("- You are operating in AUTONOMOUS GOAL MODE. The user has assigned you an objective to achieve.");
+            sb.AppendLine("- You MUST work continuously and autonomously across steps until the objective is fully accomplished.");
+            sb.AppendLine("- Reason independently, make sound technical and design choices, and proactively execute tools (write_file, edit_file, read_file, run_command) to build, test, and verify deliverables.");
+            sb.AppendLine("- Do NOT stall, ask permission, or endlessly restate requirements. Execute the required steps immediately.");
         }
 
         AppendHostEnvironmentContext(sb);
@@ -666,26 +652,32 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
 - Your humor is genuine and never mean-spirited. When the user's tone turns serious, drop the playfulness immediately and match the moment.";
     }
 
-    private static void AppendHostEnvironmentContext(StringBuilder sb, bool includeActionSpace = true)
+    private static void AppendHostEnvironmentContext(StringBuilder sb, bool includeActionSpace = true, Klydis.Core.Workspace.AgentWorkspaceContext? workspaceContext = null)
     {
         string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string currentDir = Environment.CurrentDirectory;
+        string appHome = Path.Combine(userProfile, ".klydis");
         string userName = Environment.UserName;
         string osName = Environment.OSVersion.ToString();
         string arch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
 
+        string workspaceRoot = workspaceContext?.Root ?? Path.Combine(userProfile, "Klydis", "Workspace", "session-default");
+        string workingDir = workspaceContext?.DefaultWorkingDirectory ?? Path.Combine(workspaceRoot, "scratch");
+        string artifactsDir = workspaceContext?.Artifacts ?? Path.Combine(workspaceRoot, "artifacts");
+
         if (!includeActionSpace)
         {
             sb.AppendLine();
-            sb.AppendLine("### HOST ENVIRONMENT CONTEXT");
+            sb.AppendLine("### KLYDIS WORKSPACE");
             sb.AppendLine($"- Host: {osName} ({arch}), User: {userName}");
-            sb.AppendLine($"- Active Workspace: {currentDir}");
+            sb.AppendLine($"- Workspace: {workspaceRoot}");
+            sb.AppendLine($"- Working Directory: {workingDir}");
+            sb.AppendLine($"- Application Data: {appHome} (NOT a model workspace - DO NOT write there)");
             sb.AppendLine();
             return;
         }
 
         sb.AppendLine();
-        sb.AppendLine("### HOST ENVIRONMENT & ACTION-SPACE CONTRACT");
+        sb.AppendLine("### KLYDIS WORKSPACE & ENVIRONMENT");
         sb.AppendLine("```json");
         sb.AppendLine("{");
         sb.AppendLine("  \"environment\": {");
@@ -694,7 +686,10 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         sb.AppendLine($"    \"architecture\": \"{arch}\",");
         sb.AppendLine("    \"shells\": [\"powershell\", \"cmd\"],");
         sb.AppendLine("    \"default_shell\": \"powershell\",");
-        sb.AppendLine($"    \"working_directory\": \"{currentDir.Replace("\\", "\\\\")}\",");
+        sb.AppendLine($"    \"workspace_root\": \"{workspaceRoot.Replace("\\", "\\\\")}\",");
+        sb.AppendLine($"    \"working_directory\": \"{workingDir.Replace("\\", "\\\\")}\",");
+        sb.AppendLine($"    \"artifacts_directory\": \"{artifactsDir.Replace("\\", "\\\\")}\",");
+        sb.AppendLine($"    \"application_data\": \"{appHome.Replace("\\", "\\\\")}\",");
         sb.AppendLine($"    \"user_profile\": \"{userProfile.Replace("\\", "\\\\")}\"");
         sb.AppendLine("  },");
         sb.AppendLine("  \"capabilities\": {");
@@ -704,14 +699,18 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         sb.AppendLine("  }");
         sb.AppendLine("}");
         sb.AppendLine("```");
-        sb.AppendLine($"- LOCAL_MACHINE_ACCESS = AVAILABLE (Host: {osName}, Architecture: {arch}, User: {userName})");
+        sb.AppendLine($"- Workspace: {workspaceRoot}");
+        sb.AppendLine($"- Working directory: {workingDir}");
+        sb.AppendLine("- Writable by default: YES");
+        sb.AppendLine("- External paths: NOT permitted unless explicitly authorized");
+        sb.AppendLine($"- Application data: {appHome} (INTERNAL APPLICATION STATE - DO NOT write there)");
         sb.AppendLine("- Hierarchy: Prefer typed native system tools (`system_*`) > specialized tools > raw `run_command` shell commands.");
         sb.AppendLine("- Operating System: Windows. PowerShell is the default shell for `run_command`. Do NOT use Linux syntax (e.g. `4>/dev/null`, `head`, `grep`, `cat /proc/*`).");
         sb.AppendLine("- You have active, verified access to local machine capabilities, hardware telemetry, filesystem, and processes.");
         sb.AppendLine("- PROHIBITED: NEVER claim 'I cannot access your local machine/hardware' or 'as an AI I do not have access'. You MUST execute the corresponding tool.");
         sb.AppendLine("- Epistemic Rule: You cannot answer environmental, hardware, CPU, RAM, GPU, disk, or network queries from internal inference. You MUST obtain real evidence via tools. If tools are unavailable or no evidence exists, state UNKNOWN.");
         sb.AppendLine("- Epistemic Rule: Accuracy > Completeness > Brevity. Never simulate or invent facts.");
-        sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, replace_lines, run_command). Distinguish confirmed requirements from creative suggestions.");
+        sb.AppendLine("- When the user requests a task (e.g. building a website, landing page, app, or script), you are expected to BUILD IT IMMEDIATELY using tools (write_file, edit_file, replace_lines, run_command) targeting the workspace scratch directory.");
         sb.AppendLine();
     }
 
@@ -723,8 +722,15 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         string? activeStepText = null,
         string? expectedCapability = null,
         string? preferredTools = null,
-        string? recentEvidenceSummary = null)
+        string? recentEvidenceSummary = null,
+        Klydis.Core.Workspace.AgentWorkspaceContext? workspaceContext = null)
     {
+        string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string appHome = Path.Combine(userProfile, ".klydis");
+        string workspaceRoot = workspaceContext?.Root ?? Path.Combine(userProfile, "Klydis", "Workspace", "session-default");
+        string workingDir = workspaceContext?.DefaultWorkingDirectory ?? Path.Combine(workspaceRoot, "scratch");
+        string artifactsDir = workspaceContext?.Artifacts ?? Path.Combine(workspaceRoot, "artifacts");
+
         var sb = new StringBuilder();
         sb.AppendLine("# Klydis Smeagle Reference Agent");
         sb.AppendLine("You are Klydis, an autonomous agent optimized for deterministic, reliable action execution.");
@@ -737,6 +743,16 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         sb.AppendLine("5. Continue from the current step.");
         sb.AppendLine("6. Recover from errors by switching tools or arguments.");
         sb.AppendLine("7. Stop when verified.");
+        sb.AppendLine();
+        sb.AppendLine("## KLYDIS WORKSPACE");
+        sb.AppendLine($"- Workspace: {workspaceRoot}");
+        sb.AppendLine($"- Working directory: {workingDir}");
+        sb.AppendLine("- Writable: YES");
+        sb.AppendLine($"- Artifacts: {artifactsDir}");
+        sb.AppendLine("- External directories: Require authorization");
+        sb.AppendLine($"- Application data: {appHome} (Do not modify)");
+        sb.AppendLine("- Execution: Autonomous");
+        sb.AppendLine("- Continue until: Objective verified complete");
         sb.AppendLine();
         sb.AppendLine("## WORKBENCH CONTRACT");
         sb.AppendLine("- PLAN: Use plan tool for model-created planning state.");
