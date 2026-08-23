@@ -166,13 +166,13 @@ public partial class SettingsViewModel : ObservableObject
         // concrete value (direct field assignment: no apply-on-init).
         _customAccentColorHex = !string.IsNullOrEmpty(themeService.CustomAccentColorHex)
             ? themeService.CustomAccentColorHex
-            : ThemeService.AccentColors[themeService.CurrentAccent];
+            : ThemeService.GetDefaultAccentColorHex(themeService.CurrentAccent);
         _customBackgroundColorHex = !string.IsNullOrEmpty(themeService.CustomBackgroundColorHex)
             ? themeService.CustomBackgroundColorHex
-            : ThemeService.BackgroundColors[themeService.CurrentBackground];
+            : ThemeService.GetDefaultBackgroundColorHex(themeService.CurrentBackground, themeService.EffectiveMode);
         _customFontColorHex = !string.IsNullOrEmpty(themeService.CustomFontColorHex)
             ? themeService.CustomFontColorHex
-            : (themeService.EffectiveMode == ThemeMode.Light ? "#101618" : "#C7F8FE");
+            : ThemeService.GetDefaultFontColorHex(themeService.CurrentBackground, themeService.EffectiveMode);
         _selectedFontFamily = themeService.FontFamilyName;
         _selectedFontStyle = ThemeService.FontStyleOptions.FirstOrDefault(o =>
                 o.Weight.Equals(themeService.FontWeightName, StringComparison.OrdinalIgnoreCase) &&
@@ -253,25 +253,56 @@ public partial class SettingsViewModel : ObservableObject
             {
                 Name = accent.ToString(),
                 Swatch = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)),
-                IsSelected = accent == _selectedAccent
+                IsSelected = accent == _selectedAccent && !_themeService.HasCustomAccent
             });
         }
 
-        foreach (var (bg, hex) in ThemeService.BackgroundColors)
-        {
-            BackgroundSwatches.Add(new BackgroundSwatch
-            {
-                Name = bg.ToString(),
-                Swatch = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)),
-                IsSelected = bg == _selectedBackground
-            });
-        }
+        RefreshBackgroundSwatches();
 
         var assembly = Assembly.GetExecutingAssembly();
         var version = assembly.GetName().Version;
         AppVersion = version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "dev";
         AppDescription = assembly.GetCustomAttribute<AssemblyDescriptionAttribute>()?.Description
             ?? "Self-contained local LLM orchestrator.";
+    }
+
+    public bool HasCustomAccent => _themeService.HasCustomAccent;
+    public bool HasCustomBackground => _themeService.HasCustomBackground;
+    public bool HasCustomFont => _themeService.HasCustomFont;
+
+    private void NotifyCustomColorStatus()
+    {
+        OnPropertyChanged(nameof(HasCustomAccent));
+        OnPropertyChanged(nameof(HasCustomBackground));
+        OnPropertyChanged(nameof(HasCustomFont));
+    }
+
+    private void UpdateSwatchSelections()
+    {
+        foreach (var swatch in AccentSwatches)
+        {
+            swatch.IsSelected = swatch.Name == SelectedAccent.ToString() && !HasCustomAccent;
+        }
+        foreach (var swatch in BackgroundSwatches)
+        {
+            swatch.IsSelected = swatch.Name == SelectedBackground.ToString() && !HasCustomBackground;
+        }
+    }
+
+    private void RefreshBackgroundSwatches()
+    {
+        BackgroundSwatches.Clear();
+        var effectiveMode = _themeService.EffectiveMode;
+        foreach (var (bg, _) in ThemeService.BackgroundColors)
+        {
+            var hex = ThemeService.GetDefaultBackgroundColorHex(bg, effectiveMode);
+            BackgroundSwatches.Add(new BackgroundSwatch
+            {
+                Name = bg.ToString(),
+                Swatch = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)),
+                IsSelected = bg == SelectedBackground && !HasCustomBackground
+            });
+        }
     }
 
     private void RefreshAvailableDraftModels()
@@ -356,17 +387,38 @@ public partial class SettingsViewModel : ObservableObject
     [RelayCommand]
     private void SelectMode(string modeName)
     {
-        if (System.Enum.TryParse<ThemeMode>(modeName, out var mode) && mode != SelectedMode)
+        if (System.Enum.TryParse<ThemeMode>(modeName, out var mode))
         {
             SelectedMode = mode;
             _themeService.ApplyMode(mode);
+
+            _suppressCustomApply = true;
+            try
+            {
+                if (!HasCustomBackground)
+                {
+                    CustomBackgroundColorHex = ThemeService.GetDefaultBackgroundColorHex(SelectedBackground, _themeService.EffectiveMode);
+                }
+                if (!HasCustomFont)
+                {
+                    CustomFontColorHex = ThemeService.GetDefaultFontColorHex(SelectedBackground, _themeService.EffectiveMode);
+                }
+            }
+            finally
+            {
+                _suppressCustomApply = false;
+            }
+
+            RefreshBackgroundSwatches();
+            UpdateSwatchSelections();
+            NotifyCustomColorStatus();
         }
     }
 
     [RelayCommand]
     private void SelectAccent(string accentName)
     {
-        if (!System.Enum.TryParse<AccentTheme>(accentName, out var accent) || accent == SelectedAccent)
+        if (!System.Enum.TryParse<AccentTheme>(accentName, out var accent))
         {
             return;
         }
@@ -374,16 +426,24 @@ public partial class SettingsViewModel : ObservableObject
         SelectedAccent = accent;
         _themeService.ApplyAccent(accent);
 
-        foreach (var swatch in AccentSwatches)
+        _suppressCustomApply = true;
+        try
         {
-            swatch.IsSelected = swatch.Name == accentName;
+            CustomAccentColorHex = ThemeService.GetDefaultAccentColorHex(accent);
         }
+        finally
+        {
+            _suppressCustomApply = false;
+        }
+
+        UpdateSwatchSelections();
+        NotifyCustomColorStatus();
     }
 
     [RelayCommand]
     private void SelectBackground(string backgroundName)
     {
-        if (!System.Enum.TryParse<BackgroundTheme>(backgroundName, out var bg) || bg == SelectedBackground)
+        if (!System.Enum.TryParse<BackgroundTheme>(backgroundName, out var bg))
         {
             return;
         }
@@ -391,10 +451,22 @@ public partial class SettingsViewModel : ObservableObject
         SelectedBackground = bg;
         _themeService.ApplyBackground(bg);
 
-        foreach (var swatch in BackgroundSwatches)
+        _suppressCustomApply = true;
+        try
         {
-            swatch.IsSelected = swatch.Name == backgroundName;
+            CustomBackgroundColorHex = ThemeService.GetDefaultBackgroundColorHex(bg, _themeService.EffectiveMode);
+            if (!HasCustomFont)
+            {
+                CustomFontColorHex = ThemeService.GetDefaultFontColorHex(bg, _themeService.EffectiveMode);
+            }
         }
+        finally
+        {
+            _suppressCustomApply = false;
+        }
+
+        UpdateSwatchSelections();
+        NotifyCustomColorStatus();
     }
 
     // ---- Custom colors (applied live as the pickers change) ----
@@ -406,47 +478,99 @@ public partial class SettingsViewModel : ObservableObject
     {
         if (_suppressCustomApply) return;
         _themeService.ApplyCustomAccentColor(value);
+        UpdateSwatchSelections();
+        NotifyCustomColorStatus();
     }
 
     partial void OnCustomBackgroundColorHexChanged(string value)
     {
         if (_suppressCustomApply) return;
         _themeService.ApplyCustomBackgroundColor(value);
+        UpdateSwatchSelections();
+        NotifyCustomColorStatus();
     }
 
     partial void OnCustomFontColorHexChanged(string value)
     {
         if (_suppressCustomApply) return;
         _themeService.ApplyCustomFontColor(value);
+        NotifyCustomColorStatus();
     }
 
     [RelayCommand]
     private void ResetCustomAccentColor()
     {
-        // Clear the override entirely (so the theme keeps driving the color), then re-seed
-        // the picker with the theme's current color without triggering a re-apply.
-        _themeService.ApplyCustomAccentColor(null);
+        _themeService.ClearCustomAccentColor();
         _suppressCustomApply = true;
-        try { CustomAccentColorHex = ThemeService.AccentColors[SelectedAccent]; }
-        finally { _suppressCustomApply = false; }
+        try
+        {
+            CustomAccentColorHex = ThemeService.GetDefaultAccentColorHex(SelectedAccent);
+        }
+        finally
+        {
+            _suppressCustomApply = false;
+        }
+        UpdateSwatchSelections();
+        NotifyCustomColorStatus();
     }
 
     [RelayCommand]
     private void ResetCustomBackgroundColor()
     {
-        _themeService.ApplyCustomBackgroundColor(null);
+        _themeService.ClearCustomBackgroundColor();
         _suppressCustomApply = true;
-        try { CustomBackgroundColorHex = ThemeService.BackgroundColors[SelectedBackground]; }
-        finally { _suppressCustomApply = false; }
+        try
+        {
+            CustomBackgroundColorHex = ThemeService.GetDefaultBackgroundColorHex(SelectedBackground, _themeService.EffectiveMode);
+        }
+        finally
+        {
+            _suppressCustomApply = false;
+        }
+        UpdateSwatchSelections();
+        NotifyCustomColorStatus();
     }
 
     [RelayCommand]
     private void ResetCustomFontColor()
     {
-        _themeService.ApplyCustomFontColor(null);
+        _themeService.ClearCustomFontColor();
         _suppressCustomApply = true;
-        try { CustomFontColorHex = SelectedMode == ThemeMode.Light ? "#101618" : "#C7F8FE"; }
-        finally { _suppressCustomApply = false; }
+        try
+        {
+            CustomFontColorHex = ThemeService.GetDefaultFontColorHex(SelectedBackground, _themeService.EffectiveMode);
+        }
+        finally
+        {
+            _suppressCustomApply = false;
+        }
+        NotifyCustomColorStatus();
+    }
+
+    [RelayCommand]
+    public void ResetAllAppearance()
+    {
+        _suppressCustomApply = true;
+        try
+        {
+            _themeService.ResetAllAppearanceToDefaults();
+            SelectedMode = ThemeMode.Dark;
+            SelectedBackground = BackgroundTheme.Ocean;
+            SelectedAccent = AccentTheme.Fluorescent;
+            CustomAccentColorHex = ThemeService.GetDefaultAccentColorHex(AccentTheme.Fluorescent);
+            CustomBackgroundColorHex = ThemeService.GetDefaultBackgroundColorHex(BackgroundTheme.Ocean, ThemeMode.Dark);
+            CustomFontColorHex = ThemeService.GetDefaultFontColorHex(BackgroundTheme.Ocean, ThemeMode.Dark);
+            SelectedFontFamily = "Segoe UI Variable";
+            SelectedFontStyle = ThemeService.FontStyleOptions[0];
+
+            RefreshBackgroundSwatches();
+            UpdateSwatchSelections();
+            NotifyCustomColorStatus();
+        }
+        finally
+        {
+            _suppressCustomApply = false;
+        }
     }
 
     // ---- Typography (fonts & styles) ----

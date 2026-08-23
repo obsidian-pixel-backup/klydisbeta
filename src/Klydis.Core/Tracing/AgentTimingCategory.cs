@@ -14,6 +14,10 @@ public enum AgentTimingCategory
     Planning,
     ContextBuild,
 
+    PromptConstruction,
+    TemplateRendering,
+    TokenCounting,
+
     ModelQueueWait,
     ModelInference,
     ModelStreaming,
@@ -32,9 +36,12 @@ public enum AgentTimingCategory
 
     EvidenceProcessing,
     Verification,
+    ClaimValidation,
 
     Compaction,
     Scheduling,
+    Persistence,
+    Recovery,
 
     Other
 }

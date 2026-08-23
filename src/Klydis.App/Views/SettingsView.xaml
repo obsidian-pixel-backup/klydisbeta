@@ -36,13 +36,13 @@
         <!-- Theme gallery tile: a small mockup of the accent color rather than a
              flat swatch, so it previews how the accent will actually read. -->
         <Style x:Key="ThemeTileStyle" TargetType="Border">
-            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="CornerRadius" Value="10"/>
             <Setter Property="BorderThickness" Value="2"/>
             <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Padding" Value="12"/>
-            <Setter Property="Width" Value="150"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="Width" Value="135"/>
         </Style>
         <Style x:Key="ThemeCheckRingStyle" TargetType="Ellipse">
             <Setter Property="Stroke" Value="{DynamicResource BorderMidBrush}"/>
@@ -199,297 +199,338 @@
 
         <!-- Content -->
         <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel Margin="32,28" MaxWidth="760" HorizontalAlignment="Left">
+            <StackPanel Margin="32,24" HorizontalAlignment="Stretch" MaxWidth="1180">
 
-                <!-- Appearance section -->
+                <!-- Appearance section (2-column layout) -->
                 <StackPanel Visibility="{Binding SelectedCategory, Converter={StaticResource RoleToVisibilityConverter}, ConverterParameter=Appearance}">
-                    <TextBlock Text="Appearance" FontSize="24" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                    <TextBlock Text="Personalize how Klydis looks." FontSize="13" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,24"/>
+                    <!-- Appearance Header with Reset All to Defaults -->
+                    <Grid Margin="0,0,0,20">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="Appearance" FontSize="24" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                            <TextBlock Text="Personalize how Klydis looks across themes, backgrounds, colors, and typography." FontSize="13" Foreground="{DynamicResource TextMutedBrush}"/>
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Reset All to Defaults" Command="{Binding ResetAllAppearanceCommand}"
+                                Style="{DynamicResource SecondaryButton}" VerticalAlignment="Center" Padding="14,7" FontSize="12"
+                                ToolTip="Reset mode, background, accent theme, typography, and all manual color overrides back to factory defaults"/>
+                    </Grid>
 
-                    <!-- Mode: a single compact row, like Windows' "Choose your mode" -->
-                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="16,14" Margin="0,0,0,20">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8" Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center">
-                                <!-- Brightness/contrast glyph: a filled half-circle inside a ring,
-                                     the universally recognized "light/dark mode" symbol. -->
-                                <Grid Width="16" Height="16" HorizontalAlignment="Center" VerticalAlignment="Center">
-                                    <Ellipse Stroke="{DynamicResource AccentPrimaryBrush}" StrokeThickness="1.4" Width="16" Height="16"/>
-                                    <Path Data="M 8,1 A 7,7 0 0 1 8,15 Z" Fill="{DynamicResource AccentPrimaryBrush}"/>
+                    <!-- 2-Column Grid -->
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="1.15*" MinWidth="340"/>
+                            <ColumnDefinition Width="20"/>
+                            <ColumnDefinition Width="1*" MinWidth="320"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- LEFT COLUMN: Mode + Backgrounds + Themes -->
+                        <StackPanel Grid.Column="0">
+                            <!-- Mode: a single compact row, like Windows' "Choose your mode" -->
+                            <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="16,14" Margin="0,0,0,18">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8" Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center">
+                                        <Grid Width="16" Height="16" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <Ellipse Stroke="{DynamicResource AccentPrimaryBrush}" StrokeThickness="1.4" Width="16" Height="16"/>
+                                            <Path Data="M 8,1 A 7,7 0 0 1 8,15 Z" Fill="{DynamicResource AccentPrimaryBrush}"/>
+                                        </Grid>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,12,0">
+                                        <TextBlock Text="Mode" FontSize="13.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                        <TextBlock Text="Change the lightness across Klydis" FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}"/>
+                                    </StackPanel>
+
+                                    <Border Grid.Column="2" BorderBrush="{DynamicResource BorderMidBrush}" BorderThickness="1" CornerRadius="7" VerticalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" Margin="3">
+                                            <Border>
+                                                <Border.Style>
+                                                    <Style TargetType="Border" BasedOn="{StaticResource ModeOptionStyle}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding SelectedMode}" Value="Dark">
+                                                                <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <Border.InputBindings>
+                                                    <MouseBinding MouseAction="LeftClick" Command="{Binding SelectModeCommand}" CommandParameter="Dark"/>
+                                                </Border.InputBindings>
+                                                <TextBlock Text="Dark" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                            </Border>
+                                            <Border>
+                                                <Border.Style>
+                                                    <Style TargetType="Border" BasedOn="{StaticResource ModeOptionStyle}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding SelectedMode}" Value="Light">
+                                                                <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <Border.InputBindings>
+                                                    <MouseBinding MouseAction="LeftClick" Command="{Binding SelectModeCommand}" CommandParameter="Light"/>
+                                                </Border.InputBindings>
+                                                <TextBlock Text="Light" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                            </Border>
+                                            <Border>
+                                                <Border.Style>
+                                                    <Style TargetType="Border" BasedOn="{StaticResource ModeOptionStyle}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding SelectedMode}" Value="System">
+                                                                <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <Border.InputBindings>
+                                                    <MouseBinding MouseAction="LeftClick" Command="{Binding SelectModeCommand}" CommandParameter="System"/>
+                                                </Border.InputBindings>
+                                                <TextBlock Text="System" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
                                 </Grid>
                             </Border>
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,12,0">
-                                <TextBlock Text="Mode" FontSize="13.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                <TextBlock Text="Change the lightness of colors across Klydis" FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}"/>
-                            </StackPanel>
 
-                            <Border Grid.Column="2" BorderBrush="{DynamicResource BorderMidBrush}" BorderThickness="1" CornerRadius="7" VerticalAlignment="Center">
-                                <StackPanel Orientation="Horizontal" Margin="3">
-                                    <Border>
-                                        <Border.Style>
-                                            <Style TargetType="Border" BasedOn="{StaticResource ModeOptionStyle}">
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding SelectedMode}" Value="Dark">
-                                                        <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Border.Style>
-                                        <Border.InputBindings>
-                                            <MouseBinding MouseAction="LeftClick" Command="{Binding SelectModeCommand}" CommandParameter="Dark"/>
-                                        </Border.InputBindings>
-                                        <TextBlock Text="Dark" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                    </Border>
-                                    <Border>
-                                        <Border.Style>
-                                            <Style TargetType="Border" BasedOn="{StaticResource ModeOptionStyle}">
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding SelectedMode}" Value="Light">
-                                                        <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Border.Style>
-                                        <Border.InputBindings>
-                                            <MouseBinding MouseAction="LeftClick" Command="{Binding SelectModeCommand}" CommandParameter="Light"/>
-                                        </Border.InputBindings>
-                                        <TextBlock Text="Light" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                    </Border>
-                                    <Border>
-                                        <Border.Style>
-                                            <Style TargetType="Border" BasedOn="{StaticResource ModeOptionStyle}">
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding SelectedMode}" Value="System">
-                                                        <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Border.Style>
-                                        <Border.InputBindings>
-                                            <MouseBinding MouseAction="LeftClick" Command="{Binding SelectModeCommand}" CommandParameter="System"/>
-                                        </Border.InputBindings>
-                                        <TextBlock Text="System" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                    </Border>
-                                </StackPanel>
-                            </Border>
-                        </Grid>
-                    </Border>
-
-                    <!-- Backgrounds: a gallery of background color identities -->
-                    <TextBlock Text="BACKGROUNDS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
-                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
-                        <StackPanel>
-                            <TextBlock Text="Pick the background color identity of the app." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,16"/>
-                            <ItemsControl ItemsSource="{Binding BackgroundSwatches}">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <WrapPanel/>
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate DataType="{x:Type viewmodels:BackgroundSwatch}">
-                                        <Border Margin="0,0,12,12">
-                                            <Border.Style>
-                                                <Style TargetType="Border" BasedOn="{StaticResource ThemeTileStyle}">
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                                            <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
-                                                            <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Border.Style>
-                                            <Border.InputBindings>
-                                                <MouseBinding MouseAction="LeftClick"
-                                                              Command="{Binding DataContext.SelectBackgroundCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                                                              CommandParameter="{Binding Name}"/>
-                                            </Border.InputBindings>
-                                            <StackPanel>
-                                                <Border CornerRadius="8" Height="64" ClipToBounds="True" Background="{Binding Swatch}">
-                                                    <StackPanel VerticalAlignment="Center" Margin="10">
-                                                        <Border Height="9" Width="70" CornerRadius="5" Background="#FFFFFF" HorizontalAlignment="Left" Margin="0,0,0,6" Opacity="0.8"/>
-                                                        <Border Height="9" Width="45" CornerRadius="5" Background="#FFFFFF" Opacity="0.4" HorizontalAlignment="Left"/>
-                                                    </StackPanel>
-                                                </Border>
-                                                <Grid Margin="1,8,1,0">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*"/>
-                                                        <ColumnDefinition Width="Auto"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
-                                                    <Grid Grid.Column="1" Width="15" Height="15">
-                                                        <Ellipse Style="{StaticResource ThemeCheckRingStyle}" Visibility="{Binding IsSelected, Converter={StaticResource InverseBoolToVisConverter}}"/>
-                                                        <Ellipse Fill="{DynamicResource AccentPrimaryBrush}" Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
-                                                        <Path Data="M 3,8 L 6.5,11.5 L 13,4" Stroke="{DynamicResource TextInverse}" StrokeThickness="2"
-                                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-                                                              Width="9" Height="9" Stretch="Uniform"
-                                                              Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
-                                                    </Grid>
-                                                </Grid>
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Themes: a gallery of accent color identities, like Windows'
-                         "Current theme" thumbnail grid -->
-                    <TextBlock Text="THEMES" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
-                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20">
-                        <StackPanel>
-                            <TextBlock Text="Pick the accent color Klydis uses across the whole app." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,16"/>
-                            <ItemsControl ItemsSource="{Binding AccentSwatches}">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <WrapPanel/>
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate DataType="{x:Type viewmodels:AccentSwatch}">
-                                        <Border Margin="0,0,12,12">
-                                            <Border.Style>
-                                                <Style TargetType="Border" BasedOn="{StaticResource ThemeTileStyle}">
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                                            <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
-                                                            <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Border.Style>
-                                            <Border.InputBindings>
-                                                <MouseBinding MouseAction="LeftClick"
-                                                              Command="{Binding DataContext.SelectAccentCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                                                              CommandParameter="{Binding Name}"/>
-                                            </Border.InputBindings>
-                                            <StackPanel>
-                                                <!-- Mocked on a fixed dark backdrop so the color identity
-                                                     previews consistently regardless of the active mode. -->
-                                                <Border CornerRadius="8" Height="64" ClipToBounds="True" Background="#001619">
-                                                    <StackPanel VerticalAlignment="Center" Margin="10">
-                                                        <Border Height="9" Width="70" CornerRadius="5" Background="{Binding Swatch}" HorizontalAlignment="Left" Margin="0,0,0,6"/>
-                                                        <Border Height="9" Width="45" CornerRadius="5" Background="{Binding Swatch}" Opacity="0.4" HorizontalAlignment="Left"/>
-                                                    </StackPanel>
-                                                </Border>
-                                                <Grid Margin="1,8,1,0">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*"/>
-                                                        <ColumnDefinition Width="Auto"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
-                                                    <Grid Grid.Column="1" Width="15" Height="15">
-                                                        <Ellipse Style="{StaticResource ThemeCheckRingStyle}" Visibility="{Binding IsSelected, Converter={StaticResource InverseBoolToVisConverter}}"/>
-                                                        <Ellipse Fill="{DynamicResource AccentPrimaryBrush}" Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
-                                                        <Path Data="M 3,8 L 6.5,11.5 L 13,4" Stroke="{DynamicResource TextInverse}" StrokeThickness="2"
-                                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-                                                              Width="9" Height="9" Stretch="Uniform"
-                                                              Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
-                                                    </Grid>
-                                                </Grid>
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Custom colors: user-defined accent / background / font colors that
-                         override the active theme. Each picker also has a reset that returns
-                         control to the built-in theme color. -->
-                    <TextBlock Text="CUSTOM COLORS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,24,0,10"/>
-                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,20">
-                        <StackPanel>
-                            <TextBlock Text="Pick your own colors for accents, background, and text. Changes apply instantly."
-                                       FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,16"/>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="12"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="12"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <Border Grid.Column="0" Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14">
-                                    <StackPanel>
-                                        <TextBlock Text="Accent color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                        <TextBlock Text="Buttons, highlights, links" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,10"/>
-                                        <controls:ColorPickerControl SelectedColor="{Binding CustomAccentColorHex, Mode=TwoWay}"/>
-                                        <Button Content="Reset to theme" Command="{Binding ResetCustomAccentColorCommand}"
-                                                Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4"
-                                                HorizontalAlignment="Left" Margin="0,10,0,0"/>
-                                    </StackPanel>
-                                </Border>
-                                <Border Grid.Column="2" Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14">
-                                    <StackPanel>
-                                        <TextBlock Text="Background color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                        <TextBlock Text="Windows, panels &amp; surfaces" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,10"/>
-                                        <controls:ColorPickerControl SelectedColor="{Binding CustomBackgroundColorHex, Mode=TwoWay}"/>
-                                        <Button Content="Reset to theme" Command="{Binding ResetCustomBackgroundColorCommand}"
-                                                Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4"
-                                                HorizontalAlignment="Left" Margin="0,10,0,0"/>
-                                    </StackPanel>
-                                </Border>
-                                <Border Grid.Column="4" Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14">
-                                    <StackPanel>
-                                        <TextBlock Text="Font / text color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                        <TextBlock Text="Primary text color" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,10"/>
-                                        <controls:ColorPickerControl SelectedColor="{Binding CustomFontColorHex, Mode=TwoWay}"/>
-                                        <Button Content="Reset to theme" Command="{Binding ResetCustomFontColorCommand}"
-                                                Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4"
-                                                HorizontalAlignment="Left" Margin="0,10,0,0"/>
-                                    </StackPanel>
-                                </Border>
-                            </Grid>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Fonts & styles: app font family + global weight/style -->
-                    <TextBlock Text="FONTS &amp; STYLES" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,24,0,10"/>
-                    <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="20">
-                        <StackPanel>
-                            <TextBlock Text="Choose the app font family and a global style. Bold / Italic restyle all text that doesn't set its own weight."
-                                       FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,16"/>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="220"/>
-                                    <ColumnDefinition Width="12"/>
-                                    <ColumnDefinition Width="160"/>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Grid.Column="0">
-                                    <TextBlock Text="Font family" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
-                                    <ComboBox ItemsSource="{Binding AvailableFontFamilies}"
-                                              SelectedItem="{Binding SelectedFontFamily, Mode=TwoWay}"
-                                              FontSize="12.5" Padding="8,4"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Text="Style" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
-                                    <ComboBox ItemsSource="{Binding AvailableFontStyles}"
-                                              SelectedItem="{Binding SelectedFontStyle, Mode=TwoWay}"
-                                              DisplayMemberPath="Label" FontSize="12.5" Padding="8,4"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="4" VerticalAlignment="Bottom">
-                                    <Button Content="Reset fonts" Command="{Binding ResetTypographyCommand}"
-                                            Style="{DynamicResource GhostButton}" FontSize="11" Padding="10,6"/>
-                                </StackPanel>
-                            </Grid>
-                            <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14,12" Margin="0,16,0,0">
+                            <!-- Backgrounds: a gallery of background color identities -->
+                            <TextBlock Text="BACKGROUNDS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
+                            <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="18,16" Margin="0,0,0,18">
                                 <StackPanel>
-                                    <TextBlock Text="PREVIEW" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,8"/>
-                                    <TextBlock Text="The quick brown fox jumps over the lazy dog" FontSize="16" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock Text="0123456789 · Klydis Desktop · ABCDEFGHIJKLMNOPQRSTUVWXYZ" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                    <TextBlock Text="Pick the background color identity of the app." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,14"/>
+                                    <ItemsControl ItemsSource="{Binding BackgroundSwatches}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel/>
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type viewmodels:BackgroundSwatch}">
+                                                <Border Margin="0,0,10,10">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border" BasedOn="{StaticResource ThemeTileStyle}">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                                    <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                                                    <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                    <Border.InputBindings>
+                                                        <MouseBinding MouseAction="LeftClick"
+                                                                      Command="{Binding DataContext.SelectBackgroundCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                                      CommandParameter="{Binding Name}"/>
+                                                    </Border.InputBindings>
+                                                    <StackPanel>
+                                                        <Border CornerRadius="6" Height="50" ClipToBounds="True" Background="{Binding Swatch}">
+                                                            <StackPanel VerticalAlignment="Center" Margin="8">
+                                                                <Border Height="8" Width="58" CornerRadius="4" Background="{DynamicResource TextPrimaryBrush}" HorizontalAlignment="Left" Margin="0,0,0,5" Opacity="0.85"/>
+                                                                <Border Height="8" Width="38" CornerRadius="4" Background="{DynamicResource TextPrimaryBrush}" Opacity="0.4" HorizontalAlignment="Left"/>
+                                                            </StackPanel>
+                                                        </Border>
+                                                        <Grid Margin="1,8,1,0">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
+                                                            <Grid Grid.Column="1" Width="15" Height="15">
+                                                                <Ellipse Style="{StaticResource ThemeCheckRingStyle}" Visibility="{Binding IsSelected, Converter={StaticResource InverseBoolToVisConverter}}"/>
+                                                                <Ellipse Fill="{DynamicResource AccentPrimaryBrush}" Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
+                                                                <Path Data="M 3,8 L 6.5,11.5 L 13,4" Stroke="{DynamicResource TextInverse}" StrokeThickness="2"
+                                                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                                      Width="9" Height="9" Stretch="Uniform"
+                                                                      Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
+                                                            </Grid>
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Themes: a gallery of accent color identities -->
+                            <TextBlock Text="THEMES" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
+                            <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="18,16">
+                                <StackPanel>
+                                    <TextBlock Text="Pick the accent color Klydis uses across the whole app." FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,14"/>
+                                    <ItemsControl ItemsSource="{Binding AccentSwatches}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel/>
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type viewmodels:AccentSwatch}">
+                                                <Border Margin="0,0,10,10">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border" BasedOn="{StaticResource ThemeTileStyle}">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                                    <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                                                    <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                    <Border.InputBindings>
+                                                        <MouseBinding MouseAction="LeftClick"
+                                                                      Command="{Binding DataContext.SelectAccentCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                                      CommandParameter="{Binding Name}"/>
+                                                    </Border.InputBindings>
+                                                    <StackPanel>
+                                                        <Border CornerRadius="6" Height="50" ClipToBounds="True" Background="{DynamicResource SurfaceBrush}">
+                                                            <StackPanel VerticalAlignment="Center" Margin="8">
+                                                                <Border Height="8" Width="58" CornerRadius="4" Background="{Binding Swatch}" HorizontalAlignment="Left" Margin="0,0,0,5"/>
+                                                                <Border Height="8" Width="38" CornerRadius="4" Background="{Binding Swatch}" Opacity="0.4" HorizontalAlignment="Left"/>
+                                                            </StackPanel>
+                                                        </Border>
+                                                        <Grid Margin="1,8,1,0">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
+                                                            <Grid Grid.Column="1" Width="15" Height="15">
+                                                                <Ellipse Style="{StaticResource ThemeCheckRingStyle}" Visibility="{Binding IsSelected, Converter={StaticResource InverseBoolToVisConverter}}"/>
+                                                                <Ellipse Fill="{DynamicResource AccentPrimaryBrush}" Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
+                                                                <Path Data="M 3,8 L 6.5,11.5 L 13,4" Stroke="{DynamicResource TextInverse}" StrokeThickness="2"
+                                                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                                                      Width="9" Height="9" Stretch="Uniform"
+                                                                      Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisConverter}}"/>
+                                                            </Grid>
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
                                 </StackPanel>
                             </Border>
                         </StackPanel>
-                    </Border>
+
+                        <!-- RIGHT COLUMN: Custom Colors + Fonts & Styles -->
+                        <StackPanel Grid.Column="2">
+                            <!-- Custom colors card -->
+                            <TextBlock Text="CUSTOM COLORS" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
+                            <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="18,16" Margin="0,0,0,18">
+                                <StackPanel>
+                                    <TextBlock Text="Customize your own colors. Selecting any theme or background preset immediately overrides these."
+                                               FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap" Margin="0,0,0,14"/>
+
+                                    <!-- Accent Color Picker -->
+                                    <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <Grid Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="Accent color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <TextBlock Text="Buttons, highlights &amp; links" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Content="Reset to theme" Command="{Binding ResetCustomAccentColorCommand}"
+                                                        Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
+                                                        ToolTip="Reset accent color override to active theme preset"/>
+                                            </Grid>
+                                            <controls:ColorPickerControl SelectedColor="{Binding CustomAccentColorHex, Mode=TwoWay}"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Background Color Picker -->
+                                    <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14" Margin="0,0,0,12">
+                                        <StackPanel>
+                                            <Grid Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="Background color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <TextBlock Text="Windows, panels &amp; surfaces" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Content="Reset to theme" Command="{Binding ResetCustomBackgroundColorCommand}"
+                                                        Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
+                                                        ToolTip="Reset background override to active background preset"/>
+                                            </Grid>
+                                            <controls:ColorPickerControl SelectedColor="{Binding CustomBackgroundColorHex, Mode=TwoWay}"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Font / Text Color Picker -->
+                                    <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14">
+                                        <StackPanel>
+                                            <Grid Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="Font / text color" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <TextBlock Text="Primary text color" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Content="Reset to theme" Command="{Binding ResetCustomFontColorCommand}"
+                                                        Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
+                                                        ToolTip="Reset text color override to active theme preset"/>
+                                            </Grid>
+                                            <controls:ColorPickerControl SelectedColor="{Binding CustomFontColorHex, Mode=TwoWay}"/>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Fonts & styles: app font family + global weight/style -->
+                            <TextBlock Text="FONTS &amp; STYLES" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="2,0,0,10"/>
+                            <Border Background="{DynamicResource SurfaceBrush}" CornerRadius="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="18,16">
+                                <StackPanel>
+                                    <TextBlock Text="Choose the app font family and global typography style."
+                                               FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,14"/>
+                                    <Grid Margin="0,0,0,12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="10"/>
+                                            <ColumnDefinition Width="110"/>
+                                            <ColumnDefinition Width="10"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0">
+                                            <TextBlock Text="Font family" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                            <ComboBox ItemsSource="{Binding AvailableFontFamilies}"
+                                                      SelectedItem="{Binding SelectedFontFamily, Mode=TwoWay}"
+                                                      FontSize="12" Padding="8,4"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2">
+                                            <TextBlock Text="Style" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                            <ComboBox ItemsSource="{Binding AvailableFontStyles}"
+                                                      SelectedItem="{Binding SelectedFontStyle, Mode=TwoWay}"
+                                                      DisplayMemberPath="Label" FontSize="12" Padding="8,4"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="4" VerticalAlignment="Bottom">
+                                            <Button Content="Reset fonts" Command="{Binding ResetTypographyCommand}"
+                                                    Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,5"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="14,12">
+                                        <StackPanel>
+                                            <TextBlock Text="PREVIEW" FontSize="10" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
+                                            <TextBlock Text="The quick brown fox jumps over the lazy dog" FontSize="15" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                                            <TextBlock Text="0123456789 · Klydis Desktop · ABCDEFGHIJKLMNOPQRSTUVWXYZ" FontSize="11.5" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Grid>
                 </StackPanel>
 
                 <!-- Model Settings section -->

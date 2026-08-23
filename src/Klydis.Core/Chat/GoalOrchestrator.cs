@@ -212,6 +212,21 @@ public class GoalOrchestrator(
                             toolCallCountInTurn++;
                             lastToolCalled = evt.Content;
 
+                            // Repetition-attractor detection: track a canonical signature so
+                            // the post-turn check can catch a model calling the SAME tool with
+                            // the SAME arguments over and over (mistral/llama loop behavior)
+                            // even when it technically makes plan progress elsewhere.
+                            string sigArgs = string.Empty;
+                            if (evt.Metadata != null && evt.Metadata.TryGetValue("Arguments", out var sigArgObj) && sigArgObj != null)
+                            {
+                                sigArgs = sigArgObj.ToString() ?? string.Empty;
+                            }
+                            state.RecentToolSignatures.Add($"{evt.Content}|{sigArgs}");
+                            while (state.RecentToolSignatures.Count > 12)
+                            {
+                                state.RecentToolSignatures.RemoveAt(0);
+                            }
+
                             if (string.Equals(evt.Content, "task_complete", StringComparison.OrdinalIgnoreCase))
                             {
                                 // Deterministic verification gate: "done" only when every gating
@@ -325,6 +340,27 @@ public class GoalOrchestrator(
                 yield return GoalStreamEvent.StagnationDetected(state.LastStagnationNotice, state.ConsecutiveStalledTurns);
                 // Reset so the notice is injected once per window rather than spammed every turn.
                 state.ConsecutiveStalledTurns = 0;
+            }
+
+            // Repetition-attractor guard (the "same output and tool call over and over"
+            // failure): identical tool+args executed >= 5 times in the rolling window is a
+            // degenerate loop even if plan items tick along between repeats. Inject a decisive
+            // repair notice and clear the window so the model is forced to change approach.
+            var repeated = state.RecentToolSignatures
+                .GroupBy(s => s)
+                .Where(g => !string.IsNullOrWhiteSpace(g.Key))
+                .Select(g => (Sig: g.Key, Count: g.Count()))
+                .OrderByDescending(g => g.Count)
+                .FirstOrDefault();
+            if (repeated.Sig != null && repeated.Count >= 5)
+            {
+                int toolSep = repeated.Sig.IndexOf('|');
+                string toolName = toolSep > 0 ? repeated.Sig.Substring(0, toolSep) : repeated.Sig;
+                state.LastStagnationNotice =
+                    $"REPETITION DETECTED: you have executed the identical tool call '{toolName}' with the same arguments {repeated.Count} times. The result will not change by repeating it (the no-op identical-retry guard would block it next anyway). STOP repeating this action — read the last tool result, choose a DIFFERENT tool or approach, and continue the goal.";
+                _logger?.LogWarning("Repetition attractor detected at turn {Turn}: '{Signature}' x{Count}", state.TurnCount, toolName, repeated.Count);
+                yield return GoalStreamEvent.StagnationDetected(state.LastStagnationNotice, repeated.Count);
+                state.RecentToolSignatures.Clear();
             }
 
             if (goalComplete)

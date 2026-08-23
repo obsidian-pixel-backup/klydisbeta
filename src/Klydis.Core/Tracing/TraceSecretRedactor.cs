@@ -11,12 +11,19 @@ namespace Klydis.Core.Tracing;
 /// </summary>
 public static class TraceSecretRedactor
 {
+    private static readonly HashSet<string> AllowedMetricKeyNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "output_tokens", "prompt_tokens", "total_tokens", "tokens_per_sec", "time_to_first_token_ms",
+        "ttft_ms", "token_count", "tokens", "streaming_duration_ms", "stop_tokens", "thinking_tokens",
+        "max_tokens", "context_tokens", "input_tokens", "token_budget"
+    };
+
     private static readonly HashSet<string> SensitiveKeyNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "password", "passwd", "pwd",
         "secret", "client_secret",
         "api_key", "apikey", "api-key",
-        "token", "access_token", "auth_token", "refresh_token", "id_token",
+        "access_token", "auth_token", "refresh_token", "id_token", "bearer_token", "session_token",
         "authorization", "auth", "proxy-authorization",
         "cookie", "set-cookie",
         "private_key", "privatekey", "ssh_key",
@@ -40,11 +47,11 @@ public static class TraceSecretRedactor
         RegexOptions.Compiled);
 
     private static readonly Regex JsonKeyPatternRegex = new(
-        @"(?i)""(password|secret|client_secret|api_key|apikey|token|access_token|auth_token|authorization|private_key)""\s*:\s*""([^""]+)""",
+        @"(?i)""(password|secret|client_secret|api_key|apikey|access_token|auth_token|authorization|private_key)""\s*:\s*""([^""]+)""",
         RegexOptions.Compiled);
 
     private static readonly Regex AssignmentPatternRegex = new(
-        @"(?i)\b(password|secret|client_secret|api_key|apikey|token|access_token|auth_token|authorization|private_key)\s*=\s*([^\s,;'""]+)",
+        @"(?i)\b(password|secret|client_secret|api_key|apikey|access_token|auth_token|authorization|private_key)\s*=\s*([^\s,;'""]+)",
         RegexOptions.Compiled);
 
     /// <summary>
@@ -125,6 +132,8 @@ public static class TraceSecretRedactor
 
     private static bool IsSensitiveKey(string key)
     {
+        if (AllowedMetricKeyNames.Contains(key)) return false;
+        if (string.Equals(key, "token", StringComparison.OrdinalIgnoreCase)) return true;
         if (SensitiveKeyNames.Contains(key)) return true;
         foreach (var sensitive in SensitiveKeyNames)
         {

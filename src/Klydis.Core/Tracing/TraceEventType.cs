@@ -133,6 +133,14 @@ public enum TraceEventType
     ArtifactCreated,
     ArtifactUpdated,
 
+    // Epistemic Claims
+    ClaimExtracted,
+    ClaimValidated,
+
+    // Liveliness & Heartbeat
+    Heartbeat,
+    InferenceStalled,
+
     // Errors & Crashes
     Error,
     Crash

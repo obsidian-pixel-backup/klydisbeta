@@ -905,13 +905,93 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         PendingAttachments.Clear();
     }
 
+    /// <summary>
+    /// Adds one or more dragged-in / pasted paths as context attachments. Directories are
+    /// expanded (recursively, with sensible caps) so dropping a whole folder onto the chat
+    /// attaches every usable file inside it.
+    /// </summary>
+    public void AddAttachmentsFromPaths(IEnumerable<string> paths)
+    {
+        if (paths == null) return;
+
+        foreach (var path in paths)
+        {
+            if (System.IO.File.Exists(path))
+            {
+                AddSingleAttachment(path);
+            }
+            else if (System.IO.Directory.Exists(path))
+            {
+                AddFolderAttachments(path);
+            }
+        }
+    }
+
     public void AddAttachmentFromPath(string path)
     {
-        if (System.IO.File.Exists(path))
+        AddAttachmentsFromPaths(new[] { path });
+    }
+
+    private void AddSingleAttachment(string path)
+    {
+        try
         {
             var item = AttachmentItemViewModel.FromFile(path);
             item.OnRemoveRequested = RemoveAttachment;
             PendingAttachments.Add(item);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Adding attachment {path} failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Expands a dropped folder into its usable files (breadth-first so top-level files appear
+    /// first), skipping common junk / dependency / build directories and capping the total so a
+    /// dropped project root can never flood the attachment panel.
+    /// </summary>
+    private void AddFolderAttachments(string folderPath, int maxFiles = 400)
+    {
+        var skippedDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".git", ".hg", ".svn", ".vs", ".idea", ".vscode", ".gradle", ".next", ".nuxt",
+            "node_modules", "packages", "bin", "obj", "dist", "build", "target", "vendor",
+            "__pycache__", ".pytest_cache", ".mypy_cache", "venv", ".venv", "env", "lib", ".cache", ".local"
+        };
+
+        var pending = new Queue<string>();
+        pending.Enqueue(folderPath);
+        int added = 0;
+
+        while (pending.Count > 0 && added < maxFiles)
+        {
+            var dir = pending.Dequeue();
+
+            IEnumerable<string> subDirs;
+            try { subDirs = System.IO.Directory.EnumerateDirectories(dir); }
+            catch { continue; }
+
+            foreach (var sub in subDirs)
+            {
+                if (!skippedDirs.Contains(System.IO.Path.GetFileName(sub)) &&
+                    (System.IO.File.GetAttributes(sub) & System.IO.FileAttributes.Hidden) == 0 &&
+                    (System.IO.File.GetAttributes(sub) & System.IO.FileAttributes.System) == 0)
+                {
+                    pending.Enqueue(sub);
+                }
+            }
+
+            IEnumerable<string> files;
+            try { files = System.IO.Directory.EnumerateFiles(dir); }
+            catch { continue; }
+
+            foreach (var file in files)
+            {
+                if (added >= maxFiles) break;
+                AddSingleAttachment(file);
+                added++;
+            }
         }
     }
 
@@ -1503,7 +1583,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                                 });
                             });
                             break;
-                        case ChatStreamEventType.StreamEnd:
+                        case ChatStreamEventType.GoalComplete:
+                            // Supervisor accepted task_complete — the task is verified done.
+                            // Committing the final completion message as a real assistant
+                            // message was previously MISSING here, which is why goal runs
+                            // ended with no visible final answer even when the engine sealed
+                            // the task (qwen empty-output failure).
                             FlushAllPendingText();
                             OnUi(() =>
                             {
@@ -1520,11 +1605,25 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                                     thoughtMessage = null;
                                 }
                                 CloseAssistantBubble();
-                                if (pendingToolCall != null)
+                                pendingToolCall = null;
+                                AppendMessage(new ChatMessageViewModel
                                 {
-                                    pendingToolCall = null;
-                                }
+                                    Role = "assistant",
+                                    Content = evt.Content,
+                                    Timestamp = DateTime.Now
+                                });
                             });
+                            break;
+                        case ChatStreamEventType.CompletionRejected:
+                            // The deterministic verifier rejected a task_complete claim —
+                            // surface it visibly (instead of silently continuing) so the user
+                            // understands the agent is still working and why.
+                            OnUi(() => AppendMessage(new ChatMessageViewModel
+                            {
+                                Role = "system",
+                                Content = $"⏳ Completion not yet accepted — {evt.Content}. The agent continues working.",
+                                Timestamp = DateTime.Now
+                            }));
                             break;
                     }
                 }
@@ -1608,6 +1707,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             if (stillOwner)
             {
                 IsGenerating = false;
+                // Scope the autonomous read-only approval relaxation to the generating turn
+                // only: once the turn ends, conversation-mode approval prompts behave exactly
+                // as before (destructive tools were never covered by the flag anyway).
+                _toolExecutor.AutoApproveReadOnlyTools = false;
                 _generatingSessionId = null;
                 _generationCts?.Dispose();
                 _generationCts = null;

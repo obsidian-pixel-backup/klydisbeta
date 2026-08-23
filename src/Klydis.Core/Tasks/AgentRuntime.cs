@@ -95,6 +95,26 @@ public class AgentRuntime : IAgentRuntime
     public SemanticRepetitionDetector RepetitionDetector { get; } = new SemanticRepetitionDetector();
 
     /// <summary>
+    /// Progress engine evaluating semantic state delta and scoring advancement.
+    /// </summary>
+    public ProgressEngine ProgressEngine { get; } = new ProgressEngine();
+
+    /// <summary>
+    /// Multi-dimensional budget tracking system for autonomous task runs.
+    /// </summary>
+    public ProgressBudget ProgressBudget { get; } = new ProgressBudget();
+
+    /// <summary>
+    /// Epistemic Claim Ledger maintaining factual assertions with provenance.
+    /// </summary>
+    public Epistemic.ClaimLedger ClaimLedger { get; } = new Epistemic.ClaimLedger();
+
+    /// <summary>
+    /// 7-level runtime recovery and supervisor escalation ladder.
+    /// </summary>
+    public SupervisorEscalationLadder EscalationLadder { get; } = new SupervisorEscalationLadder();
+
+    /// <summary>
     /// Maps the inference engine's raw end-of-generation flags to a <see cref="GenerationOutcome"/>.
     /// The outcome is a fact about the generation; the supervisor turns it into a decision.
     /// </summary>
@@ -289,6 +309,9 @@ public class AgentRuntime : IAgentRuntime
     /// <summary>The run's CURRENT (non-stale) evidence.</summary>
     public IReadOnlyList<EvidenceLedgerEntry> GetRunEvidence(string taskId)
         => _evidenceLedger.GetCurrentEvidence(taskId);
+
+    /// <summary>Exposes the underlying execution-evidence ledger (for ResponseCompiler and other evidence consumers).</summary>
+    public ExecutionEvidenceLedger EvidenceLedger => _evidenceLedger;
 
     /// <summary>
     /// Builds the completion eligibility for the task RIGHT NOW (P0 — the checklist gate's

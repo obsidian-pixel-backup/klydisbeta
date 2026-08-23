@@ -88,4 +88,13 @@ public class GoalExecutionState
     /// model reassesses instead of repeating a non-advancing pattern.
     /// </summary>
     public string? LastStagnationNotice { get; set; }
+
+    /// <summary>
+    /// Rolling window (last ~12, oldest first) of canonical tool-call signatures
+    /// (&quot;toolName|serializedArguments&quot;). Identical signatures in this window are the
+    /// repetition-attractor signature that small models exhibit (the same tool call with the
+    /// same arguments forever) — distinct from the stall detector (tools executed but NO plan
+    /// item completed), which they can evade by checking off items while repeating garbage.
+    /// </summary>
+    public List<string> RecentToolSignatures { get; } = new();
 }

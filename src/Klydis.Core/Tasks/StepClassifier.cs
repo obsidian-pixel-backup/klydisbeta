@@ -235,7 +235,8 @@ public static class StepClassifier
                     "system_disks", "system_disk_metrics",
                     "system_os", "system_os_info",
                     "system_temperatures", "system_processes", "system_gpu_processes",
-                    "system_uptime", "system_hardware_report", "system_top_processes", "process_find"
+                    "system_uptime", "system_hardware_report", "system_software_report",
+                    "system_top_processes", "process_find"
                 },
                 skills: new[] { "workspace-navigation", "system-inspection" },
                 artifacts: Array.Empty<string>(),
@@ -273,7 +274,8 @@ public static class StepClassifier
                     "system_disks", "system_disk_metrics",
                     "system_os", "system_os_info",
                     "system_temperatures", "system_processes", "system_gpu_processes",
-                    "system_uptime", "system_hardware_report", "system_top_processes", "process_find"
+                    "system_uptime", "system_hardware_report", "system_software_report",
+                    "system_top_processes", "process_find"
                 },
                 skills: new[] { "system-diagnostics", "command-execution" },
                 artifacts: Array.Empty<string>(),

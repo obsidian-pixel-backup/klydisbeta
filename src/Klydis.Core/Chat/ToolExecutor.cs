@@ -178,6 +178,33 @@ public class ToolExecutor(
     public RiskLevel CurrentRiskLevel { get; set; } = RiskLevel.Standard;
 
     /// <summary>
+    /// When true (set by ChatEngine while an AUTONOMOUS goal turn is generating), read-only
+    /// inspection/control tools bypass the approval dialog even under Safe/Standard risk
+    /// levels. This is the consistency fix for "some models request permissions and stall,
+    /// others execute": under the old rule, Safe level made even <c>plan</c> and
+    /// <c>system_cpu_usage</c> prompt the user, so the same run behaved differently depending
+    /// on which risk mode the session happened to be in. Destructive tools (run_command,
+    /// write_file, risky requests) are NEVER covered by this flag.
+    /// </summary>
+    public bool AutoApproveReadOnlyTools { get; set; }
+
+    /// <summary>Tools with side effects (mutate state, spawn processes, write, delete, launch, persist).</summary>
+    private static readonly HashSet<string> MutatingToolNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "run_command", "write_file", "edit_file", "str_replace", "replace_lines", "apply_patch",
+        "filesystem.write", "filesystem.delete", "filesystem.move", "filesystem.mkdir", "filesystem.edit", "filesystem.copy",
+        "create_custom_tool", "delete_custom_tool", "delete_skill", "learn_lesson", "learn_skill",
+        "store_memory", "index_folder_rag",
+        "process.start", "process.kill", "process.wait", "manage_process",
+        "desktop.window.close", "desktop.window.focus", "desktop.window.maximize", "desktop.window.minimize", "desktop.window.move",
+        "desktop.clipboard.set", "desktop_launch",
+        "git.push", "git.commit"
+    };
+
+    private static bool IsReadOnlyTool(string canonicalName)
+        => !MutatingToolNames.Contains(canonicalName);
+
+    /// <summary>
     /// Generic per-tool-call wall-clock timeout applied at dispatch, on top of any timeout a
     /// tool already implements internally (crawl, browser, command execution). Guards the
     /// whole turn against a single hung tool call — the task-level MaxTurnDuration can only
@@ -476,6 +503,17 @@ public class ToolExecutor(
     public event EventHandler<ToolResult>? ToolExecuted;
 
     /// <summary>
+    /// Raised after a plan mutation has been applied AND persisted durably (plan create/add/
+    /// patch/complete/remove/clear, harness seeding, and programmatic advancement). The UI
+    /// (right-side Plan tab) subscribes to refresh immediately instead of waiting for its
+    /// next 2s poll tick — plan state and the visible checklist are synchronized by event,
+    /// with polling kept only as a fallback for sessions the UI never saw mutate.
+    /// May be raised from background continuations; subscribers must marshal to their own
+    /// dispatcher if needed.
+    /// </summary>
+    public event EventHandler? PlanChanged;
+
+    /// <summary>
     /// Gets all tool definitions, combining built-in tools with custom tools from the database.
     /// </summary>
     public async Task<IList<ToolDefinition>> GetToolDefinitionsAsync()
@@ -735,6 +773,15 @@ public class ToolExecutor(
             requiresApproval = toolDef.RequiresApproval || isRisky;
         }
         else // AutoPilot
+        {
+            requiresApproval = false;
+        }
+
+        // Autonomous goal turns skip approval dialogs for READ-ONLY tools: prompting per
+        // call is what made Safe/Standard runs stall mid-task (and feel inconsistent across
+        // models). Destructive tools (see MutatingToolNames) and risky payloads (see
+        // IsRiskyRequest) still always prompt under Safe/Standard.
+        if (requiresApproval && AutoApproveReadOnlyTools && !isRisky && IsReadOnlyTool(canonicalName))
         {
             requiresApproval = false;
         }
@@ -3815,6 +3862,7 @@ public class ToolExecutor(
                 await TaskManager.SavePlanAsync(CurrentTaskId, json);
             }
             await EmitExecutionEventAsync(sessionId, "PlanCreated", CurrentTaskId, null, null);
+            PlanChanged?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
@@ -3861,6 +3909,7 @@ public class ToolExecutor(
                 }
                 await EmitExecutionEventAsync(sessionId, "PlanUpdated", CurrentTaskId, null, null).ConfigureAwait(false);
                 logger.LogInformation("Autonomous loop advanced plan item '{Title}' to completed for session {SessionId}.", stepTitle, sessionId);
+                PlanChanged?.Invoke(this, EventArgs.Empty);
             }
             catch (Exception ex)
             {
@@ -4226,6 +4275,7 @@ public class ToolExecutor(
                     planMutated = true;
                     break;
                 case "patch":
+                    ApplyBulkPlanPatch(request, plan);
                     ApplyPlanPatch(request, plan);
                     planMutated = true;
                     break;
@@ -4289,6 +4339,7 @@ public class ToolExecutor(
                 await TaskManager.SavePlanAsync(CurrentTaskId, json);
             }
             await EmitExecutionEventAsync(sessionId, "PlanUpdated", CurrentTaskId, null, null);
+            PlanChanged?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
@@ -4342,6 +4393,148 @@ public class ToolExecutor(
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies the documented BULK-JSON patch shape the model actually emits, e.g.
+    /// <c>{ "patch": { "tasks": { "completed": [1, 2, 3], "add": ["...", "..."],
+    /// "remove": [4] } } }</c>. Array members may be 1-based item indices (numbers or
+    /// numeric strings) or item text. Previously this shape silently succeeded and changed
+    /// NOTHING (qwen paid ~13s generations to complete items one at a time), because only
+    /// the legacy operation/item/task keys were honored.
+    /// </summary>
+    private static void ApplyBulkPlanPatch(ToolCallRequest request, List<SessionPlanTask> plan)
+    {
+        if (request.Arguments == null) return;
+        if (!request.Arguments.TryGetValue("patch", out var patchObj)) return;
+        string? patchJson = UnwrapJsonElement(patchObj)?.ToString();
+        if (string.IsNullOrWhiteSpace(patchJson)) return;
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(patchJson);
+            var root = doc.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+
+            if (root.TryGetProperty("tasks", out var tasks) && tasks.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                ApplyTaskBulkOps(tasks, plan);
+            }
+            else if (root.TryGetProperty("completed", out var completed) ||
+                     root.TryGetProperty("remove", out _) ||
+                     root.TryGetProperty("add", out _))
+            {
+                ApplyTaskBulkOps(root, plan);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Malformed patch payload — fall back to the legacy ApplyPlanPatch path.
+        }
+    }
+
+    /// <summary>Honors "completed" / "add" / "remove" arrays (indices OR text) inside a tasks object.</summary>
+    private static void ApplyTaskBulkOps(System.Text.Json.JsonElement tasks, List<SessionPlanTask> plan)
+    {
+        if (tasks.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+
+        if (tasks.TryGetProperty("completed", out var completed))
+        {
+            foreach (var id in EnumeratePatchTargets(completed))
+            {
+                MarkPlanTarget(plan, id, done: true, remove: false);
+            }
+        }
+        if (tasks.TryGetProperty("add", out var add))
+        {
+            if (add.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var item in add.EnumerateArray())
+                {
+                    string? text = item.ValueKind == System.Text.Json.JsonValueKind.String
+                        ? item.GetString()
+                        : (item.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                           item.TryGetProperty("text", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.String)
+                            ? t.GetString()
+                            : null;
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        plan.Add(new SessionPlanTask(text.Trim(), false));
+                    }
+                }
+            }
+            else if (add.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrWhiteSpace(add.GetString()))
+            {
+                plan.Add(new SessionPlanTask(add.GetString()!.Trim(), false));
+            }
+        }
+        if (tasks.TryGetProperty("remove", out var remove))
+        {
+            foreach (var index in EnumeratePatchTargets(remove))
+            {
+                MarkPlanTarget(plan, index, done: false, remove: true);
+            }
+        }
+    }
+
+    /// <summary>Yields numbers or strings from a JSON array/scalar as candidate targets.</summary>
+    private static IEnumerable<string> EnumeratePatchTargets(System.Text.Json.JsonElement element)
+    {
+        if (element.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind == System.Text.Json.JsonValueKind.Number)
+                {
+                    yield return item.GetRawText();
+                }
+                else if (item.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    yield return item.GetString() ?? string.Empty;
+                }
+            }
+        }
+        else if (element.ValueKind == System.Text.Json.JsonValueKind.Number)
+        {
+            yield return element.GetRawText();
+        }
+        else if (element.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrWhiteSpace(element.GetString()))
+        {
+            yield return element.GetString()!;
+        }
+    }
+
+    /// <summary>Completes/removes the plan item addressed by a 1-based index ("1" .. "15") or by text.</summary>
+    private static void MarkPlanTarget(List<SessionPlanTask> plan, string target, bool done, bool remove)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return;
+
+        if (int.TryParse(target, out int idx) && idx >= 1 && idx <= plan.Count)
+        {
+            var item = plan[idx - 1];
+            plan[idx - 1] = remove ? item : item with { Done = done };
+            if (remove) plan.RemoveAt(idx - 1);
+            return;
+        }
+
+        for (int i = 0; i < plan.Count; i++)
+        {
+            if (plan[i].Text.Equals(target, StringComparison.OrdinalIgnoreCase) ||
+                plan[i].Text.Contains(target, StringComparison.OrdinalIgnoreCase) ||
+                target.Contains(plan[i].Text, StringComparison.OrdinalIgnoreCase))
+            {
+                var item = plan[i];
+                if (remove)
+                {
+                    plan.RemoveAt(i);
+                }
+                else
+                {
+                    plan[i] = item with { Done = done };
+                }
+                return;
             }
         }
     }

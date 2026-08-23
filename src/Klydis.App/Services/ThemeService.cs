@@ -149,10 +149,52 @@ public class ThemeService
     public string CustomBackgroundColorHex { get; private set; } = string.Empty;
     public string CustomFontColorHex { get; private set; } = string.Empty;
 
+    public bool HasCustomAccent => !string.IsNullOrEmpty(CustomAccentColorHex);
+    public bool HasCustomBackground => !string.IsNullOrEmpty(CustomBackgroundColorHex);
+    public bool HasCustomFont => !string.IsNullOrEmpty(CustomFontColorHex);
+
     // ---- Typography ----
     public string FontFamilyName { get; private set; } = "Segoe UI Variable";
     public string FontWeightName { get; private set; } = "Normal";
     public string FontStyleName { get; private set; } = "Normal";
+
+    public static string GetDefaultAccentColorHex(AccentTheme accent)
+    {
+        return AccentColors.TryGetValue(accent, out var hex) ? hex : "#50E8F4";
+    }
+
+    public static string GetDefaultBackgroundColorHex(BackgroundTheme bg, ThemeMode effectiveMode)
+    {
+        if (effectiveMode == ThemeMode.Light)
+        {
+            return bg switch
+            {
+                BackgroundTheme.Obsidian => "#F3F4F6",
+                BackgroundTheme.Midnight => "#F0F4FA",
+                _ => "#EAF6F7" // Ocean
+            };
+        }
+        return BackgroundColors.TryGetValue(bg, out var hex) ? hex : "#001619";
+    }
+
+    public static string GetDefaultFontColorHex(BackgroundTheme bg, ThemeMode effectiveMode)
+    {
+        if (effectiveMode == ThemeMode.Light)
+        {
+            return bg switch
+            {
+                BackgroundTheme.Obsidian => "#111827",
+                BackgroundTheme.Midnight => "#001533",
+                _ => "#04262B" // Ocean
+            };
+        }
+        return bg switch
+        {
+            BackgroundTheme.Obsidian => "#E5E5E5",
+            BackgroundTheme.Midnight => "#E0F0FF",
+            _ => "#C7F8FE" // Ocean
+        };
+    }
 
     public ThemeService()
     {
@@ -211,9 +253,34 @@ public class ThemeService
 
     public void ApplyMode(ThemeMode mode) => Apply(mode, CurrentBackground, CurrentAccent, persist: true);
 
-    public void ApplyBackground(BackgroundTheme background) => Apply(CurrentMode, background, CurrentAccent, persist: true);
+    public void ApplyBackground(BackgroundTheme background)
+    {
+        // Explicit background selection clears any custom background override
+        CustomBackgroundColorHex = string.Empty;
+        Apply(CurrentMode, background, CurrentAccent, persist: true);
+    }
 
-    public void ApplyAccent(AccentTheme accent) => Apply(CurrentMode, CurrentBackground, accent, persist: true);
+    public void ApplyAccent(AccentTheme accent)
+    {
+        // Explicit accent selection clears any custom accent override
+        CustomAccentColorHex = string.Empty;
+        Apply(CurrentMode, CurrentBackground, accent, persist: true);
+    }
+
+    /// <summary>
+    /// Resets all appearance settings (mode, background, accent, custom colors, fonts)
+    /// to clean factory defaults (Dark mode, Ocean background, Fluorescent accent).
+    /// </summary>
+    public void ResetAllAppearanceToDefaults()
+    {
+        CustomAccentColorHex = string.Empty;
+        CustomBackgroundColorHex = string.Empty;
+        CustomFontColorHex = string.Empty;
+        FontFamilyName = "Segoe UI Variable";
+        FontWeightName = "Normal";
+        FontStyleName = "Normal";
+        Apply(ThemeMode.Dark, BackgroundTheme.Ocean, AccentTheme.Fluorescent, persist: true);
+    }
 
     /// <summary>
     /// Re-resolves and re-applies the palette if the current mode selection is
@@ -244,6 +311,10 @@ public class ThemeService
         CustomFontColorHex = NormalizeHex(hex);
         Apply(CurrentMode, CurrentBackground, CurrentAccent, persist: true);
     }
+
+    public void ClearCustomAccentColor() => ApplyCustomAccentColor(null);
+    public void ClearCustomBackgroundColor() => ApplyCustomBackgroundColor(null);
+    public void ClearCustomFontColor() => ApplyCustomFontColor(null);
 
     public void ApplyTypography(string fontFamily, string fontWeight, string fontStyle)
     {

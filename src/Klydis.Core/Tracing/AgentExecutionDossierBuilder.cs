@@ -382,13 +382,22 @@ public static class AgentExecutionDossierBuilder
         double userWaitMs = 0;
         double queueWaitMs = 0;
         double contextBuildMs = 0;
+        double promptConstructionMs = 0;
         double compactionMs = 0;
+        double schedulingMs = 0;
+        double persistenceMs = 0;
+        double recoveryMs = 0;
+        double claimValidationMs = 0;
 
         var genDurations = new List<double>();
         var ttftList = new List<double>();
         var toolDurations = new List<double>();
         int totalGeneratedTokens = 0;
         double totalStreamingSeconds = 0;
+
+        var seenGenDurationIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenGenTokenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenTtftIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var evt in events)
         {
@@ -416,20 +425,35 @@ public static class AgentExecutionDossierBuilder
                     case AgentTimingCategory.Parsing or AgentTimingCategory.Validation:
                         parsingMs += dur;
                         break;
-                    case AgentTimingCategory.Verification:
+                    case AgentTimingCategory.Verification or AgentTimingCategory.EvidenceProcessing:
                         verificationMs += dur;
                         break;
                     case AgentTimingCategory.UserWait:
                         userWaitMs += dur;
                         break;
-                    case AgentTimingCategory.QueueWait:
+                    case AgentTimingCategory.QueueWait or AgentTimingCategory.ModelQueueWait or AgentTimingCategory.ToolQueueWait:
                         queueWaitMs += dur;
                         break;
                     case AgentTimingCategory.ContextBuild:
                         contextBuildMs += dur;
                         break;
+                    case AgentTimingCategory.PromptConstruction or AgentTimingCategory.TemplateRendering or AgentTimingCategory.TokenCounting:
+                        promptConstructionMs += dur;
+                        break;
                     case AgentTimingCategory.Compaction:
                         compactionMs += dur;
+                        break;
+                    case AgentTimingCategory.Scheduling:
+                        schedulingMs += dur;
+                        break;
+                    case AgentTimingCategory.Persistence:
+                        persistenceMs += dur;
+                        break;
+                    case AgentTimingCategory.Recovery:
+                        recoveryMs += dur;
+                        break;
+                    case AgentTimingCategory.ClaimValidation:
+                        claimValidationMs += dur;
                         break;
                 }
             }
@@ -445,28 +469,75 @@ public static class AgentExecutionDossierBuilder
                     webOpsMs += dur;
                 else if (evt.Type is TraceEventType.VerificationCompleted)
                     verificationMs += dur;
+                else if (evt.Type is TraceEventType.CompactionCompleted)
+                    compactionMs += dur;
+                else if (evt.Type is TraceEventType.RepairCompleted)
+                    recoveryMs += dur;
             }
 
-            // Extract generation micro-metrics
-            if (evt.Type is TraceEventType.InferenceCompleted or TraceEventType.RawModelOutput)
+            // Extract TTFT from FirstTokenReceived events
+            if (evt.Type == TraceEventType.FirstTokenReceived)
             {
-                if (dur > 0) genDurations.Add(dur);
+                string genKey = evt.GenerationId ?? evt.EventId;
+                if (!seenTtftIds.Contains(genKey))
+                {
+                    seenTtftIds.Add(genKey);
+                    if (dur > 0)
+                    {
+                        ttftList.Add(dur);
+                    }
+                    if (evt.Data != null && (evt.Data.TryGetValue("ttft_ms", out var ttVal) || evt.Data.TryGetValue("time_to_first_token_ms", out ttVal)))
+                    {
+                        if (TryGetDouble(ttVal, out double tt) && tt > 0)
+                            ttftList.Add(tt);
+                    }
+                }
+            }
+
+            // Extract generation micro-metrics from InferenceCompleted or RawModelOutput
+            if (evt.Type is TraceEventType.InferenceCompleted or TraceEventType.RawModelOutput or TraceEventType.GenerationCompleted)
+            {
+                string genKey = evt.GenerationId ?? evt.EventId;
+
+                if (dur > 0 && !seenGenDurationIds.Contains(genKey))
+                {
+                    seenGenDurationIds.Add(genKey);
+                    genDurations.Add(dur);
+                }
+
                 if (evt.Data != null)
                 {
-                    if (evt.Data.TryGetValue("time_to_first_token_ms", out var ttftVal) && ttftVal != null)
+                    if (!seenTtftIds.Contains(genKey) && (evt.Data.TryGetValue("time_to_first_token_ms", out var ttftVal) || evt.Data.TryGetValue("ttft_ms", out ttftVal)))
                     {
-                        if (double.TryParse(ttftVal.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out double ttft))
+                        if (TryGetDouble(ttftVal, out double ttft) && ttft > 0)
+                        {
+                            seenTtftIds.Add(genKey);
                             ttftList.Add(ttft);
+                        }
                     }
-                    if (evt.Data.TryGetValue("output_tokens", out var otVal) && otVal != null)
+
+                    if (!seenGenTokenIds.Contains(genKey))
                     {
-                        if (int.TryParse(otVal.ToString(), out int ot))
-                            totalGeneratedTokens += ot;
+                        int tokensFound = 0;
+                        if (evt.Data.TryGetValue("output_tokens", out var otVal) && TryGetInt(otVal, out int ot) && ot > 0)
+                        {
+                            tokensFound = ot;
+                        }
+                        else if (evt.Data.TryGetValue("tokens", out var tVal) && TryGetInt(tVal, out int t) && t > 0)
+                        {
+                            tokensFound = t;
+                        }
+
+                        if (tokensFound > 0)
+                        {
+                            seenGenTokenIds.Add(genKey);
+                            totalGeneratedTokens += tokensFound;
+                        }
                     }
-                    if (evt.Data.TryGetValue("streaming_duration_ms", out var sdVal) && sdVal != null)
+
+                    if (evt.Data.TryGetValue("streaming_duration_ms", out var sdVal) && TryGetDouble(sdVal, out double sd) && sd > 0)
                     {
-                        if (double.TryParse(sdVal.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out double sd))
-                            totalStreamingSeconds += (sd / 1000.0);
+                        totalStreamingSeconds += (sd / 1000.0);
                     }
                 }
             }
@@ -477,7 +548,29 @@ public static class AgentExecutionDossierBuilder
             }
         }
 
-        double accountedActiveMs = modelInferenceMs + toolExecutionMs + skillExecutionMs + webOpsMs + planningMs + contextBuildMs + parsingMs + verificationMs + compactionMs;
+        // Fallback for token count if trace events did not contain token counts
+        if (totalGeneratedTokens == 0)
+        {
+            totalGeneratedTokens = messages.Where(m => m.Role == ChatRole.Assistant).Sum(m => m.TokenCount);
+        }
+
+        // Compute inter-turn user wait time if multiple user messages exist
+        var userTurnStarts = events.Where(e => e.Type == TraceEventType.TurnStarted).OrderBy(e => e.TimestampUtc).ToList();
+        var userTurnEnds = events.Where(e => e.Type == TraceEventType.TurnCompleted).OrderBy(e => e.TimestampUtc).ToList();
+        if (userTurnStarts.Count > 1 && userTurnEnds.Count > 0)
+        {
+            for (int i = 0; i < userTurnStarts.Count - 1; i++)
+            {
+                var endOfPrev = userTurnEnds.ElementAtOrDefault(i)?.TimestampUtc ?? userTurnStarts[i].TimestampUtc;
+                var startOfNext = userTurnStarts[i + 1].TimestampUtc;
+                if (startOfNext > endOfPrev)
+                {
+                    userWaitMs += (startOfNext - endOfPrev).TotalMilliseconds;
+                }
+            }
+        }
+
+        double accountedActiveMs = modelInferenceMs + toolExecutionMs + skillExecutionMs + webOpsMs + planningMs + contextBuildMs + promptConstructionMs + parsingMs + verificationMs + compactionMs + schedulingMs + persistenceMs + recoveryMs + claimValidationMs;
         double waitingMs = userWaitMs + queueWaitMs;
         double unattributedMs = Math.Max(0, totalWallMs - accountedActiveMs - waitingMs);
 
@@ -494,9 +587,12 @@ public static class AgentExecutionDossierBuilder
         sb.AppendLine($"  Skill execution:            {FormatDuration(skillExecutionMs)}");
         sb.AppendLine($"  Web operations:             {FormatDuration(webOpsMs)}");
         sb.AppendLine($"  Planning / state:           {FormatDuration(planningMs)}");
-        sb.AppendLine($"  Context construction:       {FormatDuration(contextBuildMs)}");
+        sb.AppendLine($"  Context construction:       {FormatDuration(contextBuildMs + promptConstructionMs)}");
         sb.AppendLine($"  Parsing / validation:       {FormatDuration(parsingMs)}");
-        sb.AppendLine($"  Verification / supervisor:  {FormatDuration(verificationMs)}");
+        sb.AppendLine($"  Verification / supervisor:  {FormatDuration(verificationMs + claimValidationMs)}");
+        sb.AppendLine($"  Scheduling / dispatch:      {FormatDuration(schedulingMs)}");
+        sb.AppendLine($"  Persistence / storage:      {FormatDuration(persistenceMs)}");
+        sb.AppendLine($"  Recovery / repair:          {FormatDuration(recoveryMs)}");
         sb.AppendLine($"  Context compaction:         {FormatDuration(compactionMs)}");
         sb.AppendLine();
 
@@ -505,7 +601,7 @@ public static class AgentExecutionDossierBuilder
         double avgGenMs = genCount > 0 ? genDurations.Average() : 0;
         double avgToolMs = toolCount > 0 ? toolDurations.Average() : 0;
         double avgTtftMs = ttftList.Count > 0 ? ttftList.Average() : 0;
-        double genSpeedTokPerSec = totalStreamingSeconds > 0 ? (totalGeneratedTokens / totalStreamingSeconds) : 0;
+        double genSpeedTokPerSec = totalStreamingSeconds > 0 ? (totalGeneratedTokens / totalStreamingSeconds) : (modelInferenceMs > 0 ? (totalGeneratedTokens / (modelInferenceMs / 1000.0)) : 0);
 
         sb.AppendLine("Operational Velocity:");
         sb.AppendLine($"  Generations:                {genCount}");
@@ -701,5 +797,51 @@ public static class AgentExecutionDossierBuilder
             return elem.GetRawText();
         }
         return value.ToString() ?? "";
+    }
+
+    public static bool TryGetDouble(object? value, out double result)
+    {
+        result = 0;
+        if (value == null) return false;
+        if (value is double d) { result = d; return true; }
+        if (value is float f) { result = f; return true; }
+        if (value is int i) { result = i; return true; }
+        if (value is long l) { result = l; return true; }
+        if (value is JsonElement elem)
+        {
+            if (elem.ValueKind == JsonValueKind.Number && elem.TryGetDouble(out var dVal))
+            {
+                result = dVal;
+                return true;
+            }
+            if (elem.ValueKind == JsonValueKind.String)
+            {
+                return double.TryParse(elem.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out result);
+            }
+            return false;
+        }
+        return double.TryParse(value.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out result);
+    }
+
+    public static bool TryGetInt(object? value, out int result)
+    {
+        result = 0;
+        if (value == null) return false;
+        if (value is int i) { result = i; return true; }
+        if (value is long l) { result = (int)l; return true; }
+        if (value is JsonElement elem)
+        {
+            if (elem.ValueKind == JsonValueKind.Number && elem.TryGetInt32(out var iVal))
+            {
+                result = iVal;
+                return true;
+            }
+            if (elem.ValueKind == JsonValueKind.String)
+            {
+                return int.TryParse(elem.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out result);
+            }
+            return false;
+        }
+        return int.TryParse(value.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out result);
     }
 }

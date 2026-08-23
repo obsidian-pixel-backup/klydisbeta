@@ -46,6 +46,28 @@ public sealed record ModelCapabilityProfile(
             _ => "tool-execution"
         };
 
+    /// <summary>Recommended tool projection surface size based on empirical tool reliability.</summary>
+    public int RecommendedToolSurfaceSize => ToolReliability switch
+    {
+        >= 0.80 => 10,
+        >= 0.60 => 6,
+        _ => 4
+    };
+
+    /// <summary>Maximum action batch size per generation.</summary>
+    public int MaxActionsPerGeneration => ToolReliability switch
+    {
+        >= 0.85 => 3,
+        >= 0.65 => 2,
+        _ => 1
+    };
+
+    /// <summary>Whether this model requires immediate verification after every action.</summary>
+    public bool RequiresFrequentVerification => VerificationReliability < 0.75;
+
+    /// <summary>Whether deterministic recovery should be executed aggressively before asking the model.</summary>
+    public bool AggressiveDeterministicRecovery => RepairAbility < 0.65;
+
     /// <summary>Short diagnostic line, e.g. "qwen3.6-14b | n=42 | reasoning .82 coding .71 tools .88".</summary>
     public override string ToString()
         => $"{ModelId} | n={SampleCount} | reasoning {Reasoning:0.00} coding {Coding:0.00} " +

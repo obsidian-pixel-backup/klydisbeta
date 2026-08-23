@@ -24,9 +24,36 @@ public partial class QueuedMessageViewModel : ObservableObject
 
     public bool HasAttachments => Attachments.Count > 0;
 
-    public string DisplayText => !string.IsNullOrWhiteSpace(Content) 
-        ? Content 
-        : (HasAttachments ? $"[Attached {Attachments.Count} item(s)]" : string.Empty);
+    /// <summary>
+    /// Text shown on the queue-item card: the message content when present, otherwise a
+    /// readable summary of what is attached (file names, not just a count).
+    /// </summary>
+    public string DisplayText
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(Content))
+            {
+                return Content;
+            }
+
+            if (!HasAttachments)
+            {
+                return string.Empty;
+            }
+
+            var names = Attachments.Take(3).Select(a => a.FileName).ToList();
+            string joined = string.Join(", ", names);
+            if (Attachments.Count > 3)
+            {
+                joined += $", +{Attachments.Count - 3} more";
+            }
+            return $"[{Attachments.Count} attached: {joined}]";
+        }
+    }
+
+    /// <summary>1-based position badge shown on the card (matches Manual processing order).</summary>
+    public string PositionLabel => $"#{Position + 1}";
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ModeBadgeText))]

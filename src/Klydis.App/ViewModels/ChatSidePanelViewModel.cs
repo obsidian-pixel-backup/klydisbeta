@@ -74,10 +74,14 @@ public partial class PlanItemVm : ObservableObject
     public string Text { get; init; } = string.Empty;
     public bool IsDone { get; init; }
 
-    public PlanItemVm(string text, bool isDone)
+    /// <summary>True for the first OPEN item — the agent's current step. Highlighted in the UI.</summary>
+    public bool IsCurrent { get; init; }
+
+    public PlanItemVm(string text, bool isDone, bool isCurrent = false)
     {
         Text = text;
         IsDone = isDone;
+        IsCurrent = isCurrent;
     }
 }
 
@@ -135,6 +139,9 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private int _queueBadge;
+
+    [ObservableProperty]
+    private int _planBadge;
 
     [ObservableProperty]
     private int _changesBadge;
@@ -233,11 +240,31 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _refreshTimer.Tick += (_, _) => Tick();
         _refreshTimer.Start();
+
+        // Event-driven plan sync: every durable plan mutation raises PlanChanged, so the Plan
+        // tab refreshes immediately instead of waiting for the next 2s poll. The poll stays
+        // as a fallback (e.g. plans mutated before this panel subscribed).
+        _toolExecutor.PlanChanged += OnPlanChanged;
     }
 
     public void Dispose()
     {
+        _toolExecutor.PlanChanged -= OnPlanChanged;
         _refreshTimer.Stop();
+    }
+
+    private void OnPlanChanged(object? sender, EventArgs e)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher == null)
+        {
+            RefreshPlan();
+            return;
+        }
+        dispatcher.InvokeAsync(() =>
+        {
+            try { RefreshPlan(); } catch { /* panel disposed mid-marshal */ }
+        });
     }
 
     private void Tick()
@@ -250,6 +277,13 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
             ? "Nothing queued."
             : $"{QueueBadge} pending message(s) for this chat — the model can incorporate them at an optimal point.";
 
+        // The plan is refreshed on EVERY tick regardless of the selected tab (it is a cheap
+        // in-memory read) so the Plan tab, its badge, and the status line are always current
+        // while the model works — the todo list no longer only updates when the Plan tab
+        // happens to be visible. The view's checkmarks update live via INotify collection
+        // rebuilds, and the badge alerts the user that the agent has (re)scoped its plan.
+        RefreshPlan();
+
         if (!IsPanelOpen) return;
         switch (SelectedTab)
         {
@@ -257,7 +291,6 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
                 RefreshTerminalFeed();
                 break;
             case SidePanelTab.Plan:
-                RefreshPlan();
                 break;
             case SidePanelTab.Files:
             case SidePanelTab.Changes:
@@ -365,19 +398,59 @@ public partial class ChatSidePanelViewModel : ObservableObject, IDisposable
         var entries = _toolExecutor.GetSessionPlanEntries(sessionId);
         int progress = _toolExecutor.GetSessionPlanProgress(sessionId);
 
-        PlanItems.Clear();
-        foreach (var e in entries)
+        // Diff into place instead of rebuilding: the Plan tab is refreshed on every 2s tick
+        // AND on PlanChanged events, and a full rebuild would reset the ListBox scroll
+        // position/selection while the user reads or scrolls the checklist. Same-length lists
+        // are diffed item-by-item; only a structural change (items added/removed) rebuilds.
+        // The first OPEN item is the agent's current step (highlighted in the view).
+        int firstOpenIndex = -1;
+        for (int i = 0; i < entries.Count; i++)
         {
-            PlanItems.Add(new PlanItemVm(e.Text, e.Done));
+            if (!entries[i].Done) { firstOpenIndex = i; break; }
+        }
+
+        if (entries.Count == PlanItems.Count)
+        {
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                var vm = PlanItems[i];
+                bool isCurrent = i == firstOpenIndex;
+                if (!string.Equals(vm.Text, e.Text, StringComparison.Ordinal) || vm.IsDone != e.Done || vm.IsCurrent != isCurrent)
+                {
+                    PlanItems[i] = new PlanItemVm(e.Text, e.Done, isCurrent);
+                }
+            }
+        }
+        else
+        {
+            PlanItems.Clear();
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                PlanItems.Add(new PlanItemVm(e.Text, e.Done, i == firstOpenIndex));
+            }
         }
 
         int doneCount = entries.Count(e => e.Done);
         double pct = progress >= 0 ? progress : (entries.Count > 0 ? doneCount * 100.0 / entries.Count : 0);
         PlanProgressPercent = pct;
+        int openCount = entries.Count - doneCount;
+        PlanBadge = openCount;
+
+        // First appearance of a plan while the user is idling on an empty Queue tab: surface
+        // the todo list automatically so the agent's checklist is immediately visible instead
+        // of silently living behind a manually-selected tab.
+        bool planAppeared = entries.Count > 0 && !HasPlan;
+        bool idleQueueTab = SelectedTab == SidePanelTab.Queue && QueueBadge == 0;
         HasPlan = entries.Count > 0;
         PlanStatusText = entries.Count == 0
             ? "No plan yet — the model generates an execution plan for the objective."
             : $"{doneCount} of {entries.Count} complete · {pct:F0}%";
+        if (IsPanelOpen && planAppeared && idleQueueTab)
+        {
+            SelectedTab = SidePanelTab.Plan;
+        }
 
         string? taskId = _owner?.CurrentTaskId;
         if (!string.IsNullOrEmpty(taskId))

@@ -286,7 +286,7 @@ public class SystemPromptManager
                 // executing work, not bantering. The warm/witty conversational personality is
                 // what the live export showed leaking into task turns as canned greetings.
                 sb.AppendLine("## OPERATING STYLE (AUTONOMOUS TASK MODE)");
-                sb.AppendLine("You are executing a task. Be professional, focused, and brief. Do not engage in conversational filler, greetings, or permission-seeking. Report progress factually and perform the next action.");
+                sb.AppendLine("You are executing a task. Be professional, focused, and brief. This goal run overrides the conversational persona described above: no warm-up, no recap, no filler between tool calls. Report progress factually and perform the next action.");
             }
             else
             {
@@ -368,7 +368,7 @@ public class SystemPromptManager
         sb.AppendLine("3. To use a tool, output a JSON block exactly like this: <tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>");
         sb.AppendLine("4. CRITICAL: When the CURRENT ACTION CONTRACT requires a tool, produce exactly ONE tool call from the current step's allowed tool set. When the contract permits text-only reasoning or design (e.g. a requirements/creative-direction step), produce the required text instead — do NOT force a tool call. Never ask clarifying questions or elicitation options before acting; take the action the current step requires.");
         sb.AppendLine("5. STRICT PROHIBITION AGAINST SIMULATION: NEVER simulate, mock, or fabricate tool execution outputs or results in plain text (e.g. NEVER write text like 'Input: {...}' or 'Output: {...}' pretending a tool ran). You MUST output a real <tool_call> tag and wait for the actual system execution result.");
-        sb.AppendLine("6. MULTI-TOOL EXECUTION: When asked to test or run multiple tools, execute them ONE AT A TIME using <tool_call>. Issue the first tool call, wait for the actual system output, then emit the next tool call in the subsequent turn.");
+        sb.AppendLine("6. MULTI-TOOL EXECUTION: Independent tools may be batched in ONE response (multiple <tool_call> blocks back to back). When the runtime enforces one-at-a-time, the harness will tell you; otherwise batching saves round trips. Dependent calls (the next call needs the previous result) must wait for the actual result.");
         sb.AppendLine("7. SKILLS: 'list_skills'/'search_skills' discover domain-instruction packs, 'get_skill_details'/'activate_skill' inspect/activate them, and 'learn_skill' saves a new one. Use these only when the current step actually requires skill work — relevant skills are activated for the task by the runtime.");
         sb.AppendLine("8. Examples of tool calls:");
         sb.AppendLine("   - Call tool with no arguments: <tool_call>{\"name\": \"get_system_info\", \"arguments\": {}}</tool_call>");
@@ -395,8 +395,9 @@ public class SystemPromptManager
         // turn into an agent turn when it was unconditional.
         if (interactionMode == Klydis.Core.Tasks.InteractionMode.Autonomous)
         {
-        sb.AppendLine();
-        sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
+            sb.AppendLine();
+            sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
+            sb.AppendLine("- RESPONSE DISCIPLINE: between tool calls keep visible prose to at most 1-2 short sentences (state intent or key findings only). Never restate the task, recap the plan, or narrate your thought process — the user watches the live panel for that. When the goal is done, 'task_complete' closes with one concise summary.");
         sb.AppendLine("- The runtime enforces the plan schema, execution state machine, and evidence verification; you own the substantive execution plan. Create the plan from scratch appropriate to the objective, required capabilities, and world state.");
         sb.AppendLine("- Execute tasks purposefully. Use the 'plan' tool to establish the initial execution plan or update tasks via plan operations when new evidence or observations warrant.");
         sb.AppendLine("- Only create tasks that materially contribute to achieving the objective. Avoid generic workflow templates (e.g. standard 'Analyze -> Research -> Implement -> Test').");
@@ -530,8 +531,9 @@ public class SystemPromptManager
         // The full goal-execution workflow is AUTONOMOUS-mode-only (see BuildCombinedPrompt).
         if (interactionMode == Klydis.Core.Tasks.InteractionMode.Autonomous)
         {
-        sb.AppendLine();
-        sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
+            sb.AppendLine();
+            sb.AppendLine("### TASK EXECUTION (AUTONOMOUS MODE)");
+            sb.AppendLine("- RESPONSE DISCIPLINE: between tool calls keep visible prose to at most 1-2 short sentences (state intent or key findings only). Never restate the task, recap the plan, or narrate your thought process — the user watches the live panel for that. When the goal is done, 'task_complete' closes with one concise summary.");
         sb.AppendLine("- The runtime enforces the plan schema, execution state machine, and evidence verification; you own the substantive execution plan. Create the plan from scratch appropriate to the objective, required capabilities, and world state.");
         sb.AppendLine("- Execute tasks purposefully. Use the 'plan' tool to establish the initial execution plan or update tasks via plan operations when new evidence or observations warrant.");
         sb.AppendLine("- Only create tasks that materially contribute to achieving the objective. Avoid generic workflow templates (e.g. standard 'Analyze -> Research -> Implement -> Test').");
@@ -576,7 +578,7 @@ public class SystemPromptManager
                 // executing work, not bantering — the warm/witty conversational personality is
                 // what the live export showed leaking into task turns as canned greetings.
                 sb.AppendLine("## OPERATING STYLE (AUTONOMOUS TASK MODE)");
-                sb.AppendLine("You are executing a task. Be professional, focused, and brief. Do not engage in conversational filler, greetings, or permission-seeking. Report progress factually and perform the next action.");
+                sb.AppendLine("You are executing a task. Be professional, focused, and brief. This goal run overrides the conversational persona described above: no warm-up, no recap, no filler between tool calls. Report progress factually and perform the next action.");
             }
             else
             {

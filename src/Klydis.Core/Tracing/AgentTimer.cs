@@ -150,6 +150,11 @@ public sealed class AgentOperationScope : IDisposable
         "compaction" => TraceEventType.CompactionStarted,
         "verification" or "verify" => TraceEventType.VerificationStarted,
         "planning" or "plan" => TraceEventType.PlanCreated,
+        "prompt" or "prompt_construction" => TraceEventType.ContextBuildStarted,
+        "template" or "template_rendering" => TraceEventType.ContextBuildStarted,
+        "persistence" or "save" => TraceEventType.TaskStateChanged,
+        "recovery" => TraceEventType.RepairStarted,
+        "claim" or "claim_validation" => TraceEventType.ClaimValidated,
         _ => TraceEventType.GenerationStarted
     };
 
@@ -168,6 +173,11 @@ public sealed class AgentOperationScope : IDisposable
         "compaction" => TraceEventType.CompactionCompleted,
         "verification" or "verify" => TraceEventType.VerificationCompleted,
         "planning" or "plan" => TraceEventType.PlanCreated,
+        "prompt" or "prompt_construction" => TraceEventType.ContextBuilt,
+        "template" or "template_rendering" => TraceEventType.ContextBuilt,
+        "persistence" or "save" => TraceEventType.TaskStateChanged,
+        "recovery" => TraceEventType.RepairCompleted,
+        "claim" or "claim_validation" => TraceEventType.ClaimValidated,
         _ => TraceEventType.GenerationCompleted
     };
 }

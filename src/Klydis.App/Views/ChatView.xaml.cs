@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using Klydis.App.ViewModels;
 using MdXaml;
 
@@ -574,30 +575,146 @@ public partial class ChatView : UserControl
         }
     }
 
-    private void InputTextBox_PreviewDragOver(object sender, DragEventArgs e)
+    // Drag & drop of files / folders / images from OUTSIDE the app onto the whole chat area.
+    // Files and folders come as FileDrop; images dragged from other apps (browser, image
+    // editor) often arrive as a bitmap instead of a path, which is handled separately below.
+    private int _dropEnterCounter;
+
+    private static bool IsSupportedDropPayload(IDataObject data)
     {
-        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        return data.GetDataPresent(DataFormats.FileDrop)
+               || data.GetDataPresent(DataFormats.Bitmap)
+               || data.GetDataPresent("System.Windows.Media.Imaging.BitmapSource")
+               || data.GetDataPresent(typeof(System.Windows.Media.Imaging.BitmapSource));
+    }
+
+    private void ChatAreaGrid_PreviewDragEnter(object sender, DragEventArgs e)
+    {
+        if (!IsSupportedDropPayload(e.Data))
+        {
+            e.Effects = DragDropEffects.None;
+            e.Handled = true;
+            return;
+        }
+
+        _dropEnterCounter++;
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true;
+        DropOverlay.Visibility = Visibility.Visible;
+        DropOverlay.Opacity = 0.0;
+        DropOverlay.BeginAnimation(OpacityProperty, null);
+        var fade = new DoubleAnimation(0.0, 0.9, TimeSpan.FromMilliseconds(120));
+        DropOverlay.BeginAnimation(OpacityProperty, fade);
+    }
+
+    private void ChatAreaGrid_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        if (IsSupportedDropPayload(e.Data))
         {
             e.Effects = DragDropEffects.Copy;
+            e.Handled = true;
+            DropOverlay.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            e.Effects = DragDropEffects.None;
             e.Handled = true;
         }
     }
 
-    private void InputTextBox_Drop(object sender, DragEventArgs e)
+    private void ChatAreaGrid_DragLeave(object sender, DragEventArgs e)
     {
+        // DragLeave fires on every element boundary while moving over children; only hide
+        // the overlay once the pointer truly left the chat area.
+        _dropEnterCounter = Math.Max(0, _dropEnterCounter - 1);
+        if (_dropEnterCounter == 0)
+        {
+            DropOverlay.BeginAnimation(OpacityProperty, new DoubleAnimation(0.9, 0.0, TimeSpan.FromMilliseconds(120)));
+            DropOverlay.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void ChatAreaGrid_PreviewDrop(object sender, DragEventArgs e)
+    {
+        _dropEnterCounter = 0;
+        DropOverlay.Visibility = Visibility.Collapsed;
+
+        if (DataContext is not ChatViewModel vm)
+        {
+            e.Handled = true;
+            return;
+        }
+
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
         {
-            var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-            if (files != null && DataContext is ChatViewModel vm)
+            var paths = (string[])e.Data.GetData(DataFormats.FileDrop);
+            if (paths != null && paths.Length > 0)
             {
-                foreach (var file in files)
-                {
-                    vm.AddAttachmentFromPath(file);
-                }
+                vm.AddAttachmentsFromPaths(paths);
             }
+            e.Handled = true;
+            return;
+        }
+
+        if (TryGetDroppedBitmap(e.Data, out var bitmapSource) && bitmapSource != null)
+        {
+            vm.AddAttachmentFromImage(bitmapSource, "Dropped_Image");
             e.Handled = true;
         }
     }
+
+    /// <summary>
+    /// Extracts an image dragged in from another app (browser tab, image editor, file
+    /// explorer thumbnail). Prefers a WPF BitmapSource and falls back to the OLE Bitmap
+    /// format (System.Drawing.Bitmap), converting it to a frozen BitmapSource.
+    /// </summary>
+    private static bool TryGetDroppedBitmap(IDataObject data, out System.Windows.Media.Imaging.BitmapSource? bitmapSource)
+    {
+        bitmapSource = null;
+        try
+        {
+            if (data.GetData("System.Windows.Media.Imaging.BitmapSource") is System.Windows.Media.Imaging.BitmapSource direct)
+            {
+                bitmapSource = direct;
+                return true;
+            }
+
+            if (data.GetDataPresent(DataFormats.Bitmap))
+            {
+                var raw = data.GetData(DataFormats.Bitmap);
+                if (raw is System.Drawing.Bitmap gdiBitmap)
+                {
+                    IntPtr hBitmap = gdiBitmap.GetHbitmap();
+                    try
+                    {
+                        bitmapSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                            hBitmap, IntPtr.Zero, Int32Rect.Empty,
+                            System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                        bitmapSource.Freeze();
+                    }
+                    finally
+                    {
+                        DeleteObject(hBitmap);
+                    }
+                    return true;
+                }
+
+                if (raw is System.Windows.Media.Imaging.BitmapSource source)
+                {
+                    bitmapSource = source;
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Extracting dropped image failed: {ex.Message}");
+        }
+        return false;
+    }
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr hObject);
 
     private void InputTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {

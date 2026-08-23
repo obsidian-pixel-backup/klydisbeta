@@ -584,6 +584,83 @@ public class ChatEngine(
     }
 
     /// <summary>
+    /// Maps a diagnostic tool name to the epistemic domain/property its result observes, so
+    /// successful metric calls seed the ClaimLedger as Level-1 observations (the compiler
+    /// then verifies matching claims in the final answer). Null for non-diagnostic tools.
+    /// </summary>
+    private static (string Domain, string? Property)? GetDiagnosticClaimMapping(string toolName)
+    {
+        switch (toolName.ToLowerInvariant())
+        {
+            case "system_cpu_usage": return ("cpu", "utilization");
+            case "system_cpu_info": return ("cpu", "model");
+            case "system_cpu_metrics": return ("cpu", null);
+            case "system_gpu_usage": return ("gpu", "utilization");
+            case "system_gpu_info": return ("gpu", "model");
+            case "system_gpu_metrics": return ("gpu", null);
+            case "system_gpu_processes": return ("gpu", "processes");
+            case "system_memory": return ("memory", "usage");
+            case "system_memory_metrics": return ("memory", "usage");
+            case "system_disk_metrics": return ("disk", null);
+            case "system_disks": return ("disk", null);
+            case "system_os": return ("os", null);
+            case "system_os_info": return ("os", null);
+            case "system_temperatures": return ("temperature", null);
+            case "system_processes": return ("processes", null);
+            case "system_uptime": return ("uptime", null);
+            case "system_hardware_report": return ("hardware", null);
+            case "system_software_report": return ("software", null);
+            case "system_report": return ("system", null);
+            case "system_top_processes": return ("processes", "top");
+            default: return null;
+        }
+    }
+
+    /// <summary>Flattens a tool result into a bounded single-line claim value (~160 chars).</summary>
+    private static string TruncateForClaim(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+        string flat = text.Replace("\r", " ").Replace("\n", " ");
+        while (flat.Contains("  ")) flat = flat.Replace("  ", " ");
+        return flat.Length > 160 ? flat.Substring(0, 160) + "…" : flat;
+    }
+
+    /// <summary>
+    /// Builds an honest completion message from AUTHORITATIVE runtime state (the sealed plan
+    /// checklist + the session's recorded tool activity) when the model's own task_complete
+    /// summary is empty or whitespace. Never invents numbers: the done/total counts and tool
+    /// counts come from durable state, and a task that sealed with zero executed tools is
+    /// reported as such (a signal to the user that the "completion" deserves scrutiny).
+    /// </summary>
+    private string SynthesizeCompletionSummary(string sessionId)
+    {
+        try
+        {
+            var entries = toolExecutor.GetSessionPlanEntries(sessionId);
+            int done = entries.Count(e => e.Done);
+            int total = entries.Count;
+
+            var activities = toolExecutor.GetSessionToolActivity(sessionId);
+            int tools = activities.Count(r => r.Success);
+            int failures = activities.Count - tools;
+
+            string body = total > 0
+                ? $"Goal completed — {done} of {total} plan item(s) checked off, {tools} tool execution(s) succeeded."
+                : $"Goal completed — no plan checklist was established; {tools} tool execution(s) succeeded.";
+            if (failures > 0)
+            {
+                body += $" {failures} tool execution(s) failed (non-blocking for this run).";
+            }
+            return body;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Failed to synthesize completion summary; falling back to generic message.");
+            return "Task completed.";
+        }
+    }
+
+    /// <summary>
     /// The task manager managing active tasks and plans.
     /// </summary>
     public Klydis.Core.Tasks.TaskManager? TaskManager => _taskManager;
@@ -1394,6 +1471,7 @@ public class ChatEngine(
         // P1.8: the FULL schema is kept for the qwen-prelude/grammar gate below; the schema the
         // model actually sees is sliced per-iteration to the current step's allowed set.
         var fullToolsSchema = toolsDisabled ? string.Empty : toolExecutor.FormatToolsForPrompt(tools);
+        var toolsUnderlyingCount = tools.Count;
 
         // Qwen3.5/Qwen3.6 thinking models: resolved AUTHORITATIVELY through the model profile's
         // ReasoningProtocol (set by ModelProfileFactory from template + architecture). The profile
@@ -1453,6 +1531,14 @@ public class ChatEngine(
 
         int iterationCount = 0;
         int maxIterations = (isGoalMode || mode == InteractionMode.Autonomous) ? 1000 : 100;
+
+        // Autonomous goal turns execute read-only inspection/control tools without approval
+        // dialogs (consistency fix: Safe/Standard risk modes used to prompt on EVERY tool,
+        // which stalled goal runs and made permission behavior differ between models). The
+        // flag is cleared when the turn ends (ChatViewModel.OnIsGeneratingChanged) —
+        // destructive tools are never covered.
+        bool autoApproveTurn = isGoalMode || mode == InteractionMode.Autonomous;
+        toolExecutor.AutoApproveReadOnlyTools = autoApproveTurn;
 
         // P1.12/review §3: the typed-step mirror is persisted only when the plan actually
         // changed (signature = text + done flags), so per-iteration step persistence never
@@ -1652,17 +1738,30 @@ public class ChatEngine(
             // happens BEFORE generation. The gate still backstops a premature claim (the
             // model can literally not call what it never saw).
             string toolsSchema = rescueTriggered ? string.Empty : fullToolsSchema;
-            if (!toolsDisabled && !rescueTriggered && currentStepForTurn?.AllowedTools != null && tools.Count > 0)
+            int toolsExposedCount = tools.Count;
+            if (!toolsDisabled && !rescueTriggered && currentStepForTurn?.AllowedTools != null && allAvailableTools.Count > 0)
             {
+                // P1.8-Fix: expose the step's ALLOWED set, built from the FULL registered
+                // surface — not from the globally scoped 'tools' list. The old path exposed at
+                // most MaxProjectedTools generic tools that never contained the diagnostics
+                // suite, so models "invented" system_* tools (real ones executed by luck;
+                // the rest were rejected). The step allowlist is the contract; surface it
+                // directly, capped by 24 so a diagnostics step's 25-tool suite is not the
+                // whole 80-tool universe.
                 var allowedForStep = currentStepForTurn.AllowedTools
                     .Where(n => !n.Equals("task_complete", StringComparison.OrdinalIgnoreCase));
-                var sliced = new List<ToolDefinition>(tools.Count);
-                foreach (var t in tools)
+                var sliced = new List<ToolDefinition>();
+                foreach (var t in allAvailableTools)
                 {
-                    if (allowedForStep.Contains(t.Name)) sliced.Add(t);
+                    if (allowedForStep.Contains(t.Name))
+                    {
+                        sliced.Add(t);
+                        if (sliced.Count >= 24) break;
+                    }
                 }
                 if (sliced.Count > 0)
                 {
+                    toolsUnderlyingCount = sliced.Count;
                     toolsSchema = toolExecutor.FormatToolsForPrompt(sliced);
                 }
             }
@@ -2472,7 +2571,7 @@ public class ChatEngine(
                 {
                     ["iteration"] = iterationCount,
                     ["step"] = currentStepForTurn?.Title,
-                    ["tools_exposed"] = tools.Count,
+                    ["tools_exposed"] = toolsUnderlyingCount,
                     ["prompt_tokens"] = finalPromptTokens
                 }
             ));
@@ -3425,6 +3524,42 @@ public class ChatEngine(
                                     runId: activeRunId, actionId: runActionId);
                             }
                         }
+                        // P0/P2: seed the ClaimLedger with Level-1 diagnostic observations from
+                        // successful metric tools. Without this the response compiler's ledger
+                        // is always empty, so EVERY hardware/metric claim in the final answer
+                        // gets flagged "unverified model estimate" — even the ones genuinely
+                        // backed by real tool output. Recording domain/property/value from the
+                        // actual result lets supported claims verify.
+                        if (result.Success && _runtime != null && !string.IsNullOrEmpty(CurrentTaskId))
+                        {
+                            var claimMapping = GetDiagnosticClaimMapping(req.Name);
+                            if (claimMapping != null)
+                            {
+                                try
+                                {
+                                    _runtime.ClaimLedger.RecordClaim(
+                                        claimText: string.IsNullOrWhiteSpace(result.Output)
+                                            ? $"{req.Name} succeeded"
+                                            : result.Output.Trim(),
+                                        level: Klydis.Core.Epistemic.EvidenceLevel.Level1_DirectObservation,
+                                        taskId: CurrentTaskId,
+                                        runId: toolExecutor.CurrentRunId,
+                                        stepId: currentStepForTurn?.StepId,
+                                        domain: claimMapping.Value.Domain,
+                                        property: claimMapping.Value.Property,
+                                        value: TruncateForClaim(result.Output),
+                                        sourceType: req.Name,
+                                        sourceId: req.Name,
+                                        confidence: 1.0,
+                                        workspaceVersion: _runtime.GetRunWorkspaceVersion(CurrentTaskId));
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogDebug(ex, "Failed to record diagnostic claim for {Tool}.", req.Name);
+                                }
+                            }
+                        }
+
                         // P1.12: a SUCCESSFUL side-effect-bearing action is now part of this
                         // run's executed set — the gate will reject a replay of the same
                         // action instead of duplicating its effects. Read-only tools are not
@@ -3492,11 +3627,43 @@ public class ChatEngine(
                                 logger.LogDebug(ex, "Failed to record the accepted completion decision for task {TaskId}.", CurrentTaskId);
                             }
                             logger.LogInformation("Supervisor accepted task_complete for task {TaskId}; task sealed Completed.", CurrentTaskId);
+                            // Final-response guarantee: the user must always get a real
+                            // completion message, even when the model's summary is empty (the
+                            // qwen failure mode — all its prose lives in think tags, so the
+                            // claim arrives with no usable text). Fall back to a summary
+                            // synthesized from AUTHORITATIVE runtime state (plan + executed
+                            // activity), never from model narration.
+                            string finalMessage = string.IsNullOrWhiteSpace(claimSummary)
+                                ? SynthesizeCompletionSummary(generatingSessionId)
+                                : claimSummary;
+                            // Evidence check on the FINAL user-visible message (P0/P2
+                            // ResponseCompiler): hardware/model claims inside the completion
+                            // text are matched against the run's actual tool evidence and
+                            // claim ledger. Unbacked hardware/spec claims get an explicit
+                            // "unverified model estimate" note instead of being presented
+                            // as fact — the hallucination containment layer for the
+                            // final answer.
+                            try
+                            {
+                                var compiled = Klydis.Core.Epistemic.ResponseCompiler.Compile(
+                                    finalMessage,
+                                    _runtime?.ClaimLedger,
+                                    _runtime?.EvidenceLedger,
+                                    CurrentTaskId);
+                                if (!string.IsNullOrWhiteSpace(compiled.CompiledText))
+                                {
+                                    finalMessage = compiled.CompiledText;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogDebug(ex, "Response compilation failed; emitting the raw completion message.");
+                            }
                             // CurrentTaskId is non-null here (guarded by the enclosing
                             // condition), but the compiler cannot narrow a field, so suppress
                             // the nullable-into-object assignment warning explicitly.
                             yield return new ChatStreamEvent(ChatStreamEventType.GoalComplete,
-                                claimSummary ?? "Task completed.",
+                                finalMessage,
                                 new Dictionary<string, object> { ["TaskId"] = CurrentTaskId! });
                             break; // exit the tool loop; the goalCompletedThisTurn check below ends the turn
                         }

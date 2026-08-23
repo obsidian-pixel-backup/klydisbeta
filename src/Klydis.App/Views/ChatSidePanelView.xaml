@@ -160,12 +160,12 @@
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
-            <!-- Tab strip (scrollable: seven tabs in a 360px panel) -->
+            <!-- Tab strip. A WrapPanel keeps all seven tabs visible at ANY panel width by
+                 flowing onto a second row when the panel is narrow — the old horizontal
+                 ScrollViewer clipped tabs (user-reported clipping when shrinking the panel). -->
             <Border Grid.Row="0" Background="{DynamicResource PanelBackgroundBrush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="6,6">
-                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
-                              PanningMode="HorizontalOnly" Focusable="False">
-                <StackPanel Orientation="Horizontal">
+                <WrapPanel Orientation="Horizontal">
                     <RadioButton Style="{StaticResource SidePanelTabStyle}" GroupName="SidePanelTabs"
                                  IsChecked="{Binding SidePanel.SelectedTab, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Queue}"
                                  ToolTip="Queued / steering messages for this chat">
@@ -191,7 +191,24 @@
                     <RadioButton Style="{StaticResource SidePanelTabStyle}" GroupName="SidePanelTabs"
                                  IsChecked="{Binding SidePanel.SelectedTab, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Plan}"
                                  ToolTip="The model's todo list for the current task (created with the plan tool)">
-                        <TextBlock Text="Plan"/>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Plan"/>
+                            <Border CornerRadius="8" Margin="5,0,0,0" Padding="5,0" VerticalAlignment="Center"
+                                    Background="{DynamicResource AccentSoftBrush}">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SidePanel.PlanBadge}" Value="0">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding SidePanel.PlanBadge}" FontSize="9.5" FontWeight="Bold"
+                                           Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                            </Border>
+                        </StackPanel>
                     </RadioButton>
                     <RadioButton Style="{StaticResource SidePanelTabStyle}" GroupName="SidePanelTabs"
                                  IsChecked="{Binding SidePanel.SelectedTab, Converter={StaticResource EnumToBooleanConverter}, ConverterParameter=Files}"
@@ -234,8 +251,7 @@
                                  ToolTip="Notes the model reads as part of its context">
                         <TextBlock Text="Notes"/>
                     </RadioButton>
-                </StackPanel>
-                </ScrollViewer>
+                </WrapPanel>
             </Border>
 
             <!-- ============ QUEUE ============ -->
@@ -258,8 +274,18 @@
                         </Grid.RowDefinitions>
                         <TextBlock Text="{Binding SidePanel.QueueSummaryText}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}"
                                    TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Margin="0,0,0,8"/>
-                        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                            <ComboBox MinWidth="150" MaxWidth="240" Height="26" FontSize="11" Margin="0,0,8,0" VerticalAlignment="Center"
+                        <!-- Controls on their own row. Star column + Auto columns instead of a
+                             horizontal StackPanel: the sort combo SHRINKS with the panel (its text
+                             ellipsizes) instead of overflowing, and the buttons always stay
+                             visible — nothing clips at any width the splitter allows. -->
+                        <Grid Grid.Row="1" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ComboBox Grid.Column="0" MinWidth="80" MaxWidth="220" Height="26" FontSize="11" Margin="0,0,8,0"
+                                      HorizontalAlignment="Right" VerticalAlignment="Center"
                                       ItemsSource="{Binding QueueSortOptions}" SelectedItem="{Binding SelectedQueueSortOption}"
                                       ToolTip="Sort the queued messages (display only — processing stays oldest-first)"
                                       Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
@@ -272,12 +298,12 @@
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
-                            <Button Style="{DynamicResource GhostButton}" Command="{Binding SendAllQueuedNowCommand}"
+                            <Button Grid.Column="1" Style="{DynamicResource GhostButton}" Command="{Binding SendAllQueuedNowCommand}"
                                     Content="Send all" FontSize="11" Padding="8,3" Height="26" Margin="0,0,8,0"
                                     ToolTip="Send ALL queued messages now, one after another (cancels any running generation)"/>
-                            <Button Style="{DynamicResource GhostButton}" Command="{Binding ClearQueueCommand}"
+                            <Button Grid.Column="2" Style="{DynamicResource GhostButton}" Command="{Binding ClearQueueCommand}"
                                     Content="Clear" FontSize="11" Padding="8,3" Height="26"/>
-                        </StackPanel>
+                        </Grid>
                     </Grid>
                 </Border>
 
@@ -290,6 +316,7 @@
                              AllowDrop="True"
                              Background="Transparent" BorderThickness="0" Padding="0"
                              ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              VirtualizingPanel.IsVirtualizing="False"
                              PreviewMouseLeftButtonDown="QueuedMessagesList_PreviewMouseLeftButtonDown"
                              PreviewMouseMove="QueuedMessagesList_PreviewMouseMove"
@@ -339,37 +366,54 @@
                                             BorderBrush="{DynamicResource BorderBrush}"
                                             BorderThickness="1" CornerRadius="6" Margin="0,0,0,6" Padding="6,5">
                                         <Grid>
-                                            <StackPanel Orientation="Vertical"
-                                                        Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
-                                                <DockPanel LastChildFill="True">
-                                                    <Button DockPanel.Dock="Left" Style="{DynamicResource GhostButton}"
+                                            <!-- Non-edit mode: badges | *message* | actions. Star column
+                                                 guarantees the text always gets the remaining width and the
+                                                 action buttons never get pushed out of the card. -->
+                                            <Grid Visibility="{Binding IsEditing, Converter={StaticResource InverseBoolToVisConverter}}">
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                </Grid.RowDefinitions>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Margin="0,0,6,0" VerticalAlignment="Center">
+                                                    <Border Background="{DynamicResource SurfaceElevatedBrush}" CornerRadius="4" Padding="4,1.5" Margin="0,0,4,0">
+                                                        <TextBlock Text="{Binding PositionLabel}" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                    </Border>
+                                                    <Button Style="{DynamicResource GhostButton}"
                                                             Command="{Binding DataContext.ToggleQueueItemModeCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                                             CommandParameter="{Binding}"
-                                                            ToolTip="Toggle between Steer and Direct Send" Margin="0,0,6,0" Padding="0">
+                                                            ToolTip="Switch to Steer and Direct Send" Margin="0" Padding="0">
                                                         <Border x:Name="ModeBadgeBorder" Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="5,1.5">
                                                             <TextBlock x:Name="ModeText" Text="{Binding ModeBadgeText}" FontSize="10" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
                                                         </Border>
                                                     </Button>
-                                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                                                        <Button Style="{DynamicResource GhostButton}"
-                                                                Command="{Binding DataContext.SendQueuedItemNowCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding}" ToolTip="Send now" Margin="4,0,0,0" Padding="2,0" VerticalAlignment="Center">
-                                                            <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
-                                                        </Button>
-                                                        <Button Style="{DynamicResource GhostButton}" Command="{Binding BeginEditCommand}"
-                                                                ToolTip="Edit queued message" Margin="4,0,0,0" Padding="2,0" VerticalAlignment="Center">
-                                                            <TextBlock Text="✎" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
-                                                        </Button>
-                                                        <Button Style="{DynamicResource QueueItemCloseButton}"
-                                                                Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                                CommandParameter="{Binding}" Margin="4,0,0,0" ToolTip="Cancel / remove" VerticalAlignment="Center"/>
-                                                    </StackPanel>
-                                                    <TextBlock Text="{Binding DisplayText}" TextTrimming="CharacterEllipsis" FontSize="11"
-                                                               Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding DisplayText}"/>
-                                                </DockPanel>
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="0" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0,0,0">
+                                                    <Button Style="{DynamicResource GhostButton}"
+                                                            Command="{Binding DataContext.SendQueuedItemNowCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                            CommandParameter="{Binding}" ToolTip="Send now" Margin="0" Padding="2,0" VerticalAlignment="Center">
+                                                        <TextBlock Text="▶" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                                    </Button>
+                                                    <Button Style="{DynamicResource GhostButton}" Command="{Binding BeginEditCommand}"
+                                                            ToolTip="Edit queued message" Margin="4,0,0,0" Padding="2,0" VerticalAlignment="Center">
+                                                        <TextBlock Text="✎" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                    </Button>
+                                                    <Button Style="{DynamicResource QueueItemCloseButton}"
+                                                            Command="{Binding DataContext.RemoveQueuedItemCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                            CommandParameter="{Binding}" Margin="4,0,0,0" ToolTip="Cancel / remove" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                                <!-- Message content: wraps to the width available, up to
+                                                     ~5 lines, ellipsis only past that. -->
+                                                <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding DisplayText}" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                                           MaxHeight="84" LineHeight="15" FontSize="11"
+                                                           Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" ToolTip="{Binding DisplayText}"/>
 
                                                 <!-- Attachment badges/chips if message has attachments -->
-                                                <ItemsControl ItemsSource="{Binding Attachments}" Margin="0,4,0,0"
+                                                <ItemsControl Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" ItemsSource="{Binding Attachments}" Margin="0,4,0,0"
                                                               Visibility="{Binding HasAttachments, Converter={StaticResource BoolToVisConverter}}">
                                                     <ItemsControl.ItemsPanel>
                                                         <ItemsPanelTemplate>
@@ -389,21 +433,28 @@
                                                         </DataTemplate>
                                                     </ItemsControl.ItemTemplate>
                                                 </ItemsControl>
-                                            </StackPanel>
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
-                                                        Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisConverter}}">
-                                                <TextBox Text="{Binding EditText, UpdateSourceTrigger=PropertyChanged}" Width="170" MaxHeight="60"
+                                            </Grid>
+                                            <!-- Edit mode: star-sized TextBox so it shrinks with the panel
+                                                 instead of overflowing (the old fixed 170px clipped at
+                                                 narrow widths). -->
+                                            <Grid Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisConverter}}" VerticalAlignment="Center">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBox Grid.Column="0" Text="{Binding EditText, UpdateSourceTrigger=PropertyChanged}" MinWidth="60" MaxHeight="60"
                                                          TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
                                                          Background="{DynamicResource PanelBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
                                                          BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1" Padding="4,2"/>
-                                                <Button Style="{DynamicResource GhostButton}"
+                                                <Button Grid.Column="1" Style="{DynamicResource GhostButton}"
                                                         Command="{Binding DataContext.SaveQueuedItemEditCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                                         CommandParameter="{Binding}" ToolTip="Save changes" Margin="6,0,0,0" Padding="2,0">
                                                     <TextBlock Text="✓" FontSize="12" FontWeight="Bold" Foreground="{DynamicResource SuccessBrush}"/>
                                                 </Button>
-                                                <Button Style="{DynamicResource QueueItemCloseButton}" Command="{Binding CancelEditCommand}"
+                                                <Button Grid.Column="2" Style="{DynamicResource QueueItemCloseButton}" Command="{Binding CancelEditCommand}"
                                                         Margin="4,0,0,0" ToolTip="Discard changes" VerticalAlignment="Center"/>
-                                            </StackPanel>
+                                            </Grid>
                                         </Grid>
                                     </Border>
                                     <DataTemplate.Triggers>
@@ -448,7 +499,7 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Text="TASK PLAN (TODO LIST)" Style="{StaticResource SidePanelSectionHeader}" Margin="0,0,0,2"/>
                             <TextBlock Grid.Column="1" Text="{Binding SidePanel.PlanStatusText}" FontSize="10"
-                                       Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="150"
+                                       Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="220"
                                        ToolTip="{Binding SidePanel.PlanStatusText}"/>
                         </Grid>
                         <ProgressBar Height="4" Minimum="0" Maximum="100" Margin="0,6,0,0" BorderThickness="0"
@@ -481,28 +532,40 @@
                     </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                         <DataTemplate>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <!-- Checkbox glyph: filled check when the item is done -->
-                                <Border x:Name="CheckBoxGlyph" Width="15" Height="15" CornerRadius="4"
-                                        BorderBrush="{DynamicResource BorderMidBrush}" BorderThickness="1.5"
-                                        VerticalAlignment="Center" Margin="0,0,8,0" Background="{DynamicResource InputBackgroundBrush}">
-                                    <Path x:Name="CheckMark" Data="M 2,5.5 L 6,9.5 L 12,2" Stroke="{DynamicResource AccentPrimaryBrush}"
-                                          StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                                          Width="11" Height="11" Stretch="Uniform" Visibility="Collapsed"/>
-                                </Border>
-                                <TextBlock Grid.Column="1" x:Name="PlanText" Text="{Binding Text}" FontSize="11.5"
-                                           Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
-                            </Grid>
+                            <Border x:Name="RowBackground" Background="Transparent" CornerRadius="6" Padding="4,3">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <!-- Checkbox glyph: filled check when the item is done -->
+                                    <Border x:Name="CheckBoxGlyph" Width="15" Height="15" CornerRadius="4"
+                                            BorderBrush="{DynamicResource BorderMidBrush}" BorderThickness="1.5"
+                                            VerticalAlignment="Center" Margin="0,0,8,0" Background="{DynamicResource InputBackgroundBrush}">
+                                        <Path x:Name="CheckMark" Data="M 2,5.5 L 6,9.5 L 12,2" Stroke="{DynamicResource AccentPrimaryBrush}"
+                                              StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Width="11" Height="11" Stretch="Uniform" Visibility="Collapsed"/>
+                                    </Border>
+                                    <TextBlock Grid.Column="1" x:Name="PlanText" Text="{Binding Text}" FontSize="11.5"
+                                               Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="2" x:Name="CurrentBadge" Text="CURRENT" FontSize="8.5" FontWeight="Bold"
+                                               Foreground="{DynamicResource AccentPrimaryBrush}" Margin="8,0,0,0"
+                                               VerticalAlignment="Center" Visibility="Collapsed"/>
+                                </Grid>
+                            </Border>
                             <DataTemplate.Triggers>
                                 <DataTrigger Binding="{Binding IsDone}" Value="True">
                                     <Setter TargetName="CheckBoxGlyph" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
                                     <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
                                     <Setter TargetName="PlanText" Property="TextDecorations" Value="Strikethrough"/>
                                     <Setter TargetName="PlanText" Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                    <Setter TargetName="RowBackground" Property="Background" Value="{DynamicResource InputBackgroundBrush}"/>
+                                    <Setter TargetName="CheckBoxGlyph" Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                                    <Setter TargetName="PlanText" Property="FontWeight" Value="SemiBold"/>
+                                    <Setter TargetName="CurrentBadge" Property="Visibility" Value="Visible"/>
                                 </DataTrigger>
                             </DataTemplate.Triggers>
                         </DataTemplate>
@@ -645,7 +708,7 @@
 
                         <TextBlock Text="DIFF" Style="{StaticResource SidePanelSectionHeader}"/>
                         <Border Background="{DynamicResource InputBackgroundBrush}" CornerRadius="6" Padding="8,6">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="220">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" MaxHeight="220">
                                 <TextBlock Text="{Binding SidePanel.SelectedChangeDiff}" FontFamily="Consolas" FontSize="10.5"
                                            Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="NoWrap">
                                     <TextBlock.Style>
@@ -665,7 +728,7 @@
                         <TextBlock Text="SESSION ACTIVITY" Style="{StaticResource SidePanelSectionHeader}"/>
                         <Border Background="{DynamicResource InputBackgroundBrush}" CornerRadius="6" Padding="8,6">
                             <TextBlock Text="{Binding SidePanel.ChangesSummary}" FontFamily="Consolas" FontSize="10.5"
-                                       Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="NoWrap"/>
+                                       Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap"/>
                         </Border>
 
                         <TextBlock Text="LATEST ACTIONS" Style="{StaticResource SidePanelSectionHeader}"/>
@@ -680,7 +743,7 @@
             <!-- ============ PREVIEW ============ -->
             <Grid Grid.Row="1" Style="{StaticResource SidePanelTabVisibilityPreview}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="150"/>
+                    <ColumnDefinition Width="130" MinWidth="90"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>

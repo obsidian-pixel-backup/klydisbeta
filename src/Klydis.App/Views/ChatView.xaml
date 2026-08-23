@@ -537,7 +537,14 @@
                                  Visibility="{Binding SidePanel.IsPanelOpen, Converter={StaticResource BoolToVisConverter}}"/>
 
         <!-- Chat Area -->
-        <Grid Grid.Column="1">
+        <!-- The whole chat area (header + transcript + composer) is a drop target for files,
+             folders and images dragged in from outside the app — they become context
+             attachments. A dashed overlay signals the gesture while dragging. -->
+        <Grid x:Name="ChatAreaGrid" Grid.Column="1" AllowDrop="True"
+              PreviewDragEnter="ChatAreaGrid_PreviewDragEnter"
+              PreviewDragOver="ChatAreaGrid_PreviewDragOver"
+              DragLeave="ChatAreaGrid_DragLeave"
+              PreviewDrop="ChatAreaGrid_PreviewDrop">
             <Grid.RowDefinitions>
                 <RowDefinition Height="50"/>
                 <RowDefinition Height="*"/>
@@ -1390,11 +1397,11 @@
                             </Popup>
                         </StackPanel>
 
-                        <Grid Grid.Column="1" AllowDrop="True" PreviewDragOver="InputTextBox_PreviewDragOver" Drop="InputTextBox_Drop">
+                        <Grid Grid.Column="1">
                             <TextBox x:Name="InputTextBox" Text="{Binding InputText, UpdateSourceTrigger=PropertyChanged}"
                                      MinLines="1" MaxLines="6" TextWrapping="Wrap" AcceptsReturn="True"
                                      PreviewKeyDown="InputTextBox_PreviewKeyDown"
-                                     AllowDrop="True"
+                                     AllowDrop="False"
                                      Background="{DynamicResource InputBackgroundBrush}"
                                      Foreground="{DynamicResource TextPrimaryBrush}"
                                      BorderThickness="1" BorderBrush="{DynamicResource BorderMidBrush}"
@@ -1651,6 +1658,28 @@
                     </StackPanel>
                 </Border>
             </Grid>
+
+            <!-- Drag & drop overlay: appears while files / folders / images are dragged over
+                 the chat area. Non-interactive (IsHitTestVisible=False) so it never steals
+                 input; the drop lands on the underlying ChatAreaGrid handlers. -->
+            <Border x:Name="DropOverlay" Grid.RowSpan="3" Panel.ZIndex="5000"
+                    IsHitTestVisible="False" Visibility="Collapsed"
+                    Background="{DynamicResource PanelBackgroundBrush}" Opacity="0.9">
+                <Border BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="2"
+                        CornerRadius="14" Padding="36,24" Margin="24"
+                        HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="📎" FontSize="34" Margin="0,0,18,0" VerticalAlignment="Center"/>
+                        <StackPanel VerticalAlignment="Center" MaxWidth="430">
+                            <TextBlock Text="Drop to attach as context" FontSize="17" FontWeight="Bold"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"/>
+                            <TextBlock Text="Files, folders and images are added as context attachments. Send them with your message, or queue them while the model is busy."
+                                       FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Border>
         </Grid>
     </Grid>
 </UserControl>

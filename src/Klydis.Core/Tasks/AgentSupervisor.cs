@@ -150,7 +150,19 @@ public static class AgentSupervisor
             }
         }
 
-        bool noFailures = !currentLedgerEvidence.Any(e => e.IsUnresolvedFailure);
+        // P0-Fix: a failed COMMAND is a completion blocker only when the run actually has
+        // verification obligations (build/test/preview steps). On a pure diagnostics run a
+        // probe that returns an error (e.g. no temperature sensors, permissions denied) is a
+        // FINDING, not an unresolved failure — the old rule rejected task_complete forever
+        // on read-only goals (the qwen run died on exactly this: 10× COMPLETION_NOT_ELIGIBLE
+        // then the app crashed mid-loop). Hard build/test/preview/assertion failures always
+        // block regardless.
+        var verificationStepsExist = steps.Any(s => s.ExpectedActionKind == StepActionKind.Verification);
+        bool noFailures = !currentLedgerEvidence.Any(e =>
+            e.IsUnresolvedFailure &&
+            (e.Evidence.Kind is EvidenceKind.BuildFailed or EvidenceKind.TestFailed or
+                 EvidenceKind.PreviewFailed or EvidenceKind.AssertionFailed ||
+             (e.Evidence.Kind == EvidenceKind.CommandFailed && verificationStepsExist)));
         return new CompletionEligibility(allComplete, unsatisfied.Count == 0, noFailures, unsatisfied, unsatisfiedCriteria);
     }
 
