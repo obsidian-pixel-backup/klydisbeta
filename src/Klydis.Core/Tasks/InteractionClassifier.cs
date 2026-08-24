@@ -160,13 +160,7 @@ public static class InteractionClassifier
     {
         if (string.IsNullOrWhiteSpace(message)) return InteractionMode.Conversation;
 
-        // Numbered/bulleted action lists (e.g. 1..15 tasks) are unambiguously executable tasks.
-        if (TaskDecomposer.ContainsDecomposableTasks(message))
-        {
-            return (message.Length >= 60 || ContainsAny(Tokenize(Normalize(message)), AutonomousVerbs))
-                ? InteractionMode.Autonomous
-                : InteractionMode.Task;
-        }
+
 
         string normalized = Normalize(message);
         string[] tokens = Tokenize(normalized);

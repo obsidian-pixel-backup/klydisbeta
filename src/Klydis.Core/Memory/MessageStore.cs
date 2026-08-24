@@ -470,6 +470,26 @@ public class MessageStore
                 invalidation_reason TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS agent_todos (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                dependencies_json TEXT,
+                related_files_json TEXT,
+                expected_outputs_json TEXT,
+                verification TEXT,
+                purpose TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                plan_task_id TEXT,
+                blocked_reason TEXT,
+                evidence_json TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS agent_trace_events (
                 event_id TEXT PRIMARY KEY,
                 session_id TEXT,
@@ -858,8 +878,67 @@ public class MessageStore
     }
 
     /// <summary>
-    /// The most recent task for a session (the current task), or null when the session has
-    /// no tasks yet. "Most recent" by creation time; superseded tasks remain queryable via
+    /// Upserts a model-generated TODO item. The TODO is first-class model state: created via
+    /// the structured <c>todo.create</c> tool, mutated via <c>todo.update</c>/<c>todo.complete</c>,
+    /// and rendered by the right-side TODO tab. JSON list columns (dependencies, related files,
+    /// expected outputs, evidence) are serialized as JSON text so the lifecycle survives restarts.
+    /// </summary>
+    public async Task SaveAgentTodoAsync(AgentTodo todo)
+    {
+        await using var connection = await CreateConnectionAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            INSERT OR REPLACE INTO agent_todos (
+                id, session_id, title, description, status, dependencies_json, related_files_json,
+                expected_outputs_json, verification, purpose, created_at, started_at, completed_at,
+                plan_task_id, blocked_reason, evidence_json
+            ) VALUES (
+                @id, @sessionId, @title, @description, @status, @deps, @related, @outputs,
+                @verification, @purpose, @createdAt, @startedAt, @completedAt,
+                @planTaskId, @blockedReason, @evidence
+            );";
+        command.Parameters.AddWithValue("@id", todo.Id);
+        command.Parameters.AddWithValue("@sessionId", todo.SessionId);
+        command.Parameters.AddWithValue("@title", todo.Title);
+        command.Parameters.AddWithValue("@description", todo.Description ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@status", todo.Status.ToString());
+        command.Parameters.AddWithValue("@deps", todo.Dependencies.Count == 0 ? (object)DBNull.Value : JsonSerializer.Serialize(todo.Dependencies));
+        command.Parameters.AddWithValue("@related", todo.RelatedFiles.Count == 0 ? (object)DBNull.Value : JsonSerializer.Serialize(todo.RelatedFiles));
+        command.Parameters.AddWithValue("@outputs", todo.ExpectedOutputs.Count == 0 ? (object)DBNull.Value : JsonSerializer.Serialize(todo.ExpectedOutputs));
+        command.Parameters.AddWithValue("@verification", todo.Verification ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@purpose", todo.Purpose ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@createdAt", todo.CreatedAt.ToString("o"));
+        command.Parameters.AddWithValue("@startedAt", todo.StartedAt?.ToString("o") ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@completedAt", todo.CompletedAt?.ToString("o") ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@planTaskId", todo.PlanTaskId ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@blockedReason", todo.BlockedReason ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("@evidence", todo.Evidence.Count == 0 ? (object)DBNull.Value : JsonSerializer.Serialize(todo.Evidence));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// Loads all durable TODO items for a session, oldest first.
+    /// </summary>
+    public async Task<List<AgentTodo>> GetSessionAgentTodosAsync(string sessionId)
+    {
+        await using var connection = await CreateConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT * FROM agent_todos WHERE session_id = @sessionId ORDER BY created_at ASC, id ASC";
+        command.Parameters.AddWithValue("@sessionId", sessionId);
+
+        var todos = new List<AgentTodo>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            todos.Add(ReadAgentTodo(reader));
+        }
+        return todos;
+    }
+
+    /// <summary>
+    /// The most recent task for a session (the most recent task), or null when the session has
+    /// no tasks yet. "Most recent" by creation time; resumed tasks remain queryable via
     /// <see cref="GetTaskAsync"/> so a task can be reopened later.
     /// </summary>
     public async Task<AgentTask?> GetLatestTaskAsync(string sessionId)
@@ -986,7 +1065,96 @@ public class MessageStore
     }
 
     /// <summary>
-    /// Upserts a run record (start and end of one execution attempt at a task).
+    /// Maps an <c>agent_todos</c> row back to an <see cref="AgentTodo"/> record. JSON list
+    /// columns are parsed defensively; malformed rows degrade to empty lists rather than
+    /// breaking the whole session's TODO read.
+    /// </summary>
+    private static AgentTodo ReadAgentTodo(System.Data.Common.DbDataReader reader)
+    {
+        int ordId = reader.GetOrdinal("id");
+        int ordSessionId = reader.GetOrdinal("session_id");
+        int ordTitle = reader.GetOrdinal("title");
+        int ordDescription = reader.GetOrdinal("description");
+        int ordStatus = reader.GetOrdinal("status");
+        int ordDeps = reader.GetOrdinal("dependencies_json");
+        int ordRelated = reader.GetOrdinal("related_files_json");
+        int ordOutputs = reader.GetOrdinal("expected_outputs_json");
+        int ordVerification = reader.GetOrdinal("verification");
+        int ordPurpose = reader.GetOrdinal("purpose");
+        int ordCreatedAt = reader.GetOrdinal("created_at");
+        int ordStartedAt = reader.GetOrdinal("started_at");
+        int ordCompletedAt = reader.GetOrdinal("completed_at");
+        int ordPlanTaskId = reader.GetOrdinal("plan_task_id");
+        int ordBlockedReason = reader.GetOrdinal("blocked_reason");
+        int ordEvidence = reader.GetOrdinal("evidence_json");
+
+        string? ReadJson(int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+
+        IReadOnlyList<string> ReadStringList(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return Array.Empty<string>();
+            try
+            {
+                return JsonSerializer.Deserialize<List<string>>(json!) ?? new List<string>();
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
+        }
+
+        IReadOnlyList<TodoEvidence> ReadEvidence(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return Array.Empty<TodoEvidence>();
+            try
+            {
+                return JsonSerializer.Deserialize<List<TodoEvidence>>(json!) ?? new List<TodoEvidence>();
+            }
+            catch
+            {
+                return Array.Empty<TodoEvidence>();
+            }
+        }
+
+        var status = Enum.TryParse<TodoStatus>(reader.GetString(ordStatus), out var parsed) ? parsed : TodoStatus.Pending;
+
+        return new AgentTodo
+        {
+            Id = reader.GetString(ordId),
+            SessionId = reader.GetString(ordSessionId),
+            Title = reader.GetString(ordTitle),
+            Description = ReadJson(ordDescription),
+            Status = status,
+            Dependencies = ReadStringList(ReadJson(ordDeps)),
+            RelatedFiles = ReadStringList(ReadJson(ordRelated)),
+            ExpectedOutputs = ReadStringList(ReadJson(ordOutputs)),
+            Verification = ReadJson(ordVerification),
+            Purpose = ReadJson(ordPurpose),
+            CreatedAt = DateTimeOffset.Parse(reader.GetString(ordCreatedAt), null, System.Globalization.DateTimeStyles.RoundtripKind),
+            StartedAt = ParseOffset(ReadJson(ordStartedAt)),
+            CompletedAt = ParseOffset(ReadJson(ordCompletedAt)),
+            PlanTaskId = ReadJson(ordPlanTaskId),
+            BlockedReason = ReadJson(ordBlockedReason),
+            Evidence = ReadEvidence(ReadJson(ordEvidence))
+        };
+    }
+
+    /// <summary>Parses a nullable ISO-8601 offset timestamp from a database column.</summary>
+    private static System.DateTimeOffset? ParseOffset(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        try
+        {
+            return System.DateTimeOffset.Parse(value!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Upserts a run record (progress, start and end of one execution attempt at a task).
     /// </summary>
     public async Task SaveRunAsync(TaskRun run)
     {

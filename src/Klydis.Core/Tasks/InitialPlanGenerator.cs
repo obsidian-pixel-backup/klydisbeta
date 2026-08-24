@@ -18,11 +18,6 @@ public static class InitialPlanGenerator
     /// </summary>
     public static IReadOnlyList<string> Generate(string userMessage)
     {
-        var decomposed = TaskDecomposer.Decompose(userMessage);
-        if (decomposed.Count >= 2)
-        {
-            return decomposed;
-        }
         return Array.Empty<string>();
     }
 
@@ -32,21 +27,6 @@ public static class InitialPlanGenerator
     /// </summary>
     public static ExecutionPlan CreateInitialPlan(string objective)
     {
-        var decomposed = TaskDecomposer.Decompose(objective);
-        if (decomposed.Count >= 2)
-        {
-            var tasks = decomposed.Select((desc, idx) => new PlanTask(
-                id: (idx + 1).ToString(),
-                description: desc,
-                status: TaskStepStatus.Pending
-            )).ToList();
-
-            return new ExecutionPlan(
-                objective: objective ?? string.Empty,
-                tasks: tasks,
-                completion: new CompletionCriteria(decomposed));
-        }
-
         return new ExecutionPlan(
             objective: objective ?? string.Empty,
             tasks: Array.Empty<PlanTask>(),

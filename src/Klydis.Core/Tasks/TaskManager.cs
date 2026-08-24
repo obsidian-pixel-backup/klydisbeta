@@ -212,12 +212,11 @@ public class TaskManager(
             return TaskResolutionKind.SteerTask;
         }
 
-        bool hasDecomposedTasks = TaskDecomposer.ContainsDecomposableTasks(userMessage);
-        bool substantial = (lower.Length >= 40 || hasDecomposedTasks)
+        bool substantial = lower.Length >= 40
             && TaskActionVerbs.Any(v => lower.Contains(v, StringComparison.OrdinalIgnoreCase));
         bool echoesObjective = Overlaps(userMessage, current.Objective);
 
-        if ((substantial || hasDecomposedTasks) && !echoesObjective)
+        if (substantial && !echoesObjective)
         {
             return TaskResolutionKind.NewTask;
         }

@@ -14,6 +14,9 @@ namespace Klydis.Core.Tasks;
 /// </summary>
 public enum StepActionKind
 {
+    /// <summary>Default for model-generated tasks.</summary>
+    General,
+
     /// <summary>No specific action expected (reasoning/analysis only).</summary>
     None,
 

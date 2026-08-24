@@ -128,30 +128,54 @@ public static class AgentExecutionDossierBuilder
         int generations = distinctGenerations > 0 ? distinctGenerations : events.Count(e => e.Type is TraceEventType.GenerationStarted or TraceEventType.InferenceStarted);
         if (generations == 0) generations = messages.Count(m => m.Role == ChatRole.Assistant);
 
+        // Single-layer tool accounting (P0): every number comes from ONE authoritative event
+        // layer and is labeled with what it counts, so exports can never silently mix layers
+        // (the observed "26 calls / 13 successes / 16 failures" where the two layers
+        // disagreed).
+        //   Tool calls (proposed) = ToolCallProposed events        (logical model actions)
+        //   Tool executions       = ToolExecutionStarted events    (physical execution attempts)
+        //   Tool successes        = ToolExecutionCompleted events  (terminal: succeeded)
+        //   Tool failures         = ToolExecutionFailed events     (terminal: failed)
+        //   Tool rejections       = ToolCallRejected events        (gate-blocked, never executed)
+        // Invariant: successes + failures == executions. If the trace disagrees, the
+        // mismatch is surfaced explicitly rather than folded into one number.
+        int toolCallsProposed = events.Count(e => e.Type == TraceEventType.ToolCallProposed);
+        int toolExecutionsStarted = events.Count(e => e.Type == TraceEventType.ToolExecutionStarted);
         int toolSuccesses = events.Count(e => e.Type == TraceEventType.ToolExecutionCompleted);
         int toolFailures = events.Count(e => e.Type == TraceEventType.ToolExecutionFailed);
         int toolRejections = events.Count(e => e.Type == TraceEventType.ToolCallRejected);
 
-        if (toolSuccesses == 0 && toolFailures == 0)
+        // Fallback for sparse traces (no executor-level events persisted): derive executions
+        // from ToolResultDelivered rows so the report never shows empty when work actually ran.
+        if (toolExecutionsStarted == 0 && toolSuccesses == 0 && toolFailures == 0)
         {
             toolSuccesses = events.Count(e => e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s) == true && true.Equals(s)));
             toolFailures = events.Count(e => e.Type == TraceEventType.ToolResultDelivered && (e.Data?.TryGetValue("success", out var s2) == true && false.Equals(s2)));
+            toolExecutionsStarted = toolSuccesses + toolFailures;
+            if (toolCallsProposed == 0) toolCallsProposed = toolExecutionsStarted + toolRejections;
         }
 
-        int totalPhysicalExecutions = toolSuccesses + toolFailures;
-        var distinctTools = events.Where(e => !string.IsNullOrEmpty(e.ToolExecutionId)).Select(e => e.ToolExecutionId!).Distinct().Count();
-        int toolCallsProposed = distinctTools > 0 ? distinctTools : (totalPhysicalExecutions + toolRejections);
-
-        if (toolCallsProposed == 0 && toolActivities.Count > 0)
+        if (toolExecutionsStarted == 0 && toolActivities.Count > 0)
         {
-            toolCallsProposed = toolActivities.Count;
+            toolExecutionsStarted = toolActivities.Count;
             toolSuccesses = toolActivities.Count(a => a.Success);
             toolFailures = toolActivities.Count(a => !a.Success);
+            if (toolCallsProposed == 0) toolCallsProposed = toolExecutionsStarted;
         }
+
+        bool toolCountsReconcile = toolSuccesses + toolFailures == toolExecutionsStarted;
 
         int retries = events.Count(e => e.Type == TraceEventType.RetryStarted);
         int repairs = events.Count(e => e.Type == TraceEventType.RepairStarted);
-        int skills = events.Count(e => e.Type == TraceEventType.SkillInvoked || e.Type == TraceEventType.SkillInvocationStarted || e.Type == TraceEventType.SkillCompleted);
+        // Skills counts the events the skill subsystem actually emits — including
+        // SkillInvocationCompleted, which ChatViewModel records after every non-conversational
+        // skill-selection pass (previously only SkillInvoked/Started/Completed were counted,
+        // so a run that DID select skills reported "Skills: 0" while the timing summary
+        // showed the elapsed skill-execution time).
+        int skills = events.Count(e => e.Type is TraceEventType.SkillInvoked
+            or TraceEventType.SkillInvocationStarted
+            or TraceEventType.SkillInvocationCompleted
+            or TraceEventType.SkillCompleted);
         int webOps = events.Count(e => e.Type is TraceEventType.WebSearchStarted or TraceEventType.PageOpened or TraceEventType.PageFetched or TraceEventType.ScrapeStarted);
         int artifactCount = artifacts.Count + events.Count(e => e.Type == TraceEventType.ArtifactCreated);
         int totalTokens = messages.Sum(m => m.TokenCount);
@@ -159,9 +183,15 @@ public static class AgentExecutionDossierBuilder
         sb.AppendLine($"Task status: {taskStatusDisplay}");
         sb.AppendLine($"Turns: {totalTurns}");
         sb.AppendLine($"Generations: {generations}");
-        sb.AppendLine($"Tool calls: {toolCallsProposed}");
+        sb.AppendLine($"Tool calls (proposed): {toolCallsProposed}");
+        sb.AppendLine($"Tool executions: {toolExecutionsStarted}");
         sb.AppendLine($"Tool successes: {toolSuccesses}");
         sb.AppendLine($"Tool failures: {toolFailures}");
+        sb.AppendLine($"Tool rejections: {toolRejections}");
+        if (!toolCountsReconcile)
+        {
+            sb.AppendLine($"  ⚠ NOTE: successes+failures ({toolSuccesses + toolFailures}) ≠ executions ({toolExecutionsStarted}) — the trace contains unmatched terminal events; counts are per-event-layer and may double-count a retry.");
+        }
         sb.AppendLine($"Retries: {retries}");
         sb.AppendLine($"Repairs: {repairs}");
         sb.AppendLine($"Skills: {skills}");

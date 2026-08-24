@@ -183,21 +183,8 @@ public sealed class TaskObjectiveGraph
     /// </summary>
     public static TaskObjectiveGraph CreateFromPrompt(string goalId, string prompt)
     {
-        var rawItems = TaskDecomposer.Decompose(prompt);
         var objectives = new List<TaskObjective>();
-
-        if (rawItems.Count >= 2)
-        {
-            for (int i = 0; i < rawItems.Count; i++)
-            {
-                string id = $"T{(i + 1):D2}";
-                objectives.Add(new TaskObjective(id, rawItems[i]));
-            }
-        }
-        else
-        {
-            objectives.Add(new TaskObjective("T01", prompt));
-        }
+        objectives.Add(new TaskObjective("T01", prompt));
 
         return new TaskObjectiveGraph(goalId, prompt, objectives);
     }

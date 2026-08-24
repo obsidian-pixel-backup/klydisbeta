@@ -361,7 +361,7 @@ public sealed class PlanEngine
                     Order: i,
                     Title: pt.Description,
                     Status: pt.Status,
-                    ExpectedActionKind: StepActionKind.FileMutation, // default unless overridden
+                    ExpectedActionKind: pt.ExpectedActionKind,
                     AllowedTools: resolution.AllowedToolNames,
                     RequiredSkills: Array.Empty<string>(),
                     ExpectedArtifacts: pt.Outputs,

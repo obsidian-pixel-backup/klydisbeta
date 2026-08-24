@@ -1142,25 +1142,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             {
                 if (att.Type == AttachmentType.TextContext || (att.Type == AttachmentType.File && !string.IsNullOrEmpty(att.Content)))
                 {
-                    var decomTasks = Klydis.Core.Tasks.TaskDecomposer.Decompose(att.Content);
-                    if (decomTasks.Count >= 3 || (att.Content.Length > 2000 && decomTasks.Count >= 2))
-                    {
-                        sb.AppendLine($"[Attached Workload / Test Suite: {att.FileName} ({decomTasks.Count} decomposed work items loaded into Plan)]");
-                        sb.AppendLine("Instruction: Execute the active work items systematically according to the Plan.");
-                        sb.AppendLine();
-
-                        if (_chatEngine != null && !string.IsNullOrEmpty(SelectedSession?.Id))
-                        {
-                            _ = _chatEngine.ToolExecutor.SeedSessionPlanAsync(SelectedSession.Id, decomTasks);
-                        }
-                    }
-                    else
-                    {
-                        sb.AppendLine($"--- Attached Context: {att.FileName} ---");
-                        sb.AppendLine(att.Content);
-                        sb.AppendLine("----------------------------------------");
-                        sb.AppendLine();
-                    }
+                    sb.AppendLine($"--- Attached Context: {att.FileName} ---");
+                    sb.AppendLine(att.Content);
+                    sb.AppendLine("----------------------------------------");
+                    sb.AppendLine();
                 }
                 else if (att.Type == AttachmentType.Image || att.Type == AttachmentType.Screenshot)
                 {

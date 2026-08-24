@@ -56,7 +56,19 @@ public enum EvidenceKind
     HardwareSpecificationVerified,
 
     /// <summary>An observed process or system runtime state verified via OS process APIs.</summary>
-    ProcessStateObserved
+    ProcessStateObserved,
+    
+    // NEW values from Phase 3:
+    FileCreated,
+    FileModified,
+    FileDeleted,
+    DiffGenerated,
+    CommandExecuted,
+    BuildSucceeded,
+    ArtifactProduced,
+    VerificationPassed,
+    VerificationFailed,
+    Observation
 }
 
 /// <summary>

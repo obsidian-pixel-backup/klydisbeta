@@ -41,7 +41,17 @@ public enum ExecutionEventCategory
     RunContinued,
     RunCompleted,
     Stalled,
-    TaskCompleted
+    TaskCompleted,
+    TodoCreated,
+    TodoUpdated,
+    PlanRevised,
+    RunStarted,
+    RunPaused,
+    RunResumed,
+    RunFailed,
+    CompletionRejected,
+    CompletionAccepted,
+    EvidenceRecorded
 }
 
 /// <summary>

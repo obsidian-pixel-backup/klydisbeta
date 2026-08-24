@@ -40,6 +40,7 @@ public sealed record ExecutionPlan
 public sealed record PlanTask
 {
     public string Id { get; init; } = string.Empty;
+    public string Title { get; init; } = string.Empty;
     public string Description { get; init; } = string.Empty;
     public string? Purpose { get; init; }
     public string? Reason { get; init; }
@@ -48,6 +49,7 @@ public sealed record PlanTask
     public VerificationCriteria Verification { get; init; } = new();
     public IReadOnlyList<string> Outputs { get; init; } = Array.Empty<string>();
     public TaskStepStatus Status { get; init; } = TaskStepStatus.Pending;
+    public StepActionKind ExpectedActionKind { get; init; } = StepActionKind.General;
 
     public PlanTask() { }
 
@@ -60,9 +62,12 @@ public sealed record PlanTask
         IReadOnlyList<string>? outputs = null,
         TaskStepStatus status = TaskStepStatus.Pending,
         string? purpose = null,
-        string? reason = null)
+        string? reason = null,
+        string? title = null,
+        StepActionKind expectedActionKind = StepActionKind.General)
     {
         Id = id ?? string.Empty;
+        Title = title ?? string.Empty;
         Description = description ?? string.Empty;
         Dependencies = dependencies ?? Array.Empty<string>();
         RequiredCapabilities = requiredCapabilities ?? Array.Empty<string>();
@@ -71,6 +76,7 @@ public sealed record PlanTask
         Status = status;
         Purpose = purpose;
         Reason = reason;
+        ExpectedActionKind = expectedActionKind;
     }
 
     public bool IsOpen => Status is not (TaskStepStatus.Completed or TaskStepStatus.Skipped);

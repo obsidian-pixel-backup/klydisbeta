@@ -24,6 +24,7 @@ public static class TaskDecomposer
     /// <summary>
     /// Checks if a user message contains explicit multi-part or numbered action tasks.
     /// </summary>
+    [Obsolete("Do not use for autonomous plan generation. The model owns planning via structured plan tools.")]
     public static bool ContainsDecomposableTasks(string? message)
     {
         if (string.IsNullOrWhiteSpace(message)) return false;
@@ -34,6 +35,7 @@ public static class TaskDecomposer
     /// <summary>
     /// Decomposes a user message into a list of concrete task descriptions.
     /// </summary>
+    [Obsolete("Do not use for autonomous plan generation. The model owns planning via structured plan tools.")]
     public static IReadOnlyList<string> Decompose(string? message)
     {
         if (string.IsNullOrWhiteSpace(message)) return Array.Empty<string>();
@@ -110,6 +112,7 @@ public static class TaskDecomposer
     /// <summary>
     /// Decomposes a user message directly into durable <see cref="TaskStep"/> records.
     /// </summary>
+    [Obsolete("Do not use for autonomous plan generation. The model owns planning via structured plan tools.")]
     public static IReadOnlyList<TaskStep> DecomposeToSteps(string message, string? taskId = null)
     {
         var items = Decompose(message);

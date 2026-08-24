@@ -794,13 +794,12 @@ public class ChatEngine(
 
     /// <summary>
     /// True when the message reads as a substantive, actionable task (long enough to be a
-    /// real request AND contains a task verb, or contains explicit decomposed tasks). Trivial questions and one-liners skip the
+    /// real request AND contains a task verb). Trivial questions and one-liners skip the
     /// scaffolding ceremony entirely.
     /// </summary>
     private static bool IsActionableTaskRequest(string message)
     {
         if (string.IsNullOrWhiteSpace(message)) return false;
-        if (TaskDecomposer.ContainsDecomposableTasks(message)) return true;
         if (message.Length < 40) return false;
         string lower = message.ToLowerInvariant();
         return TaskActionVerbs.Any(v => lower.Contains(v, StringComparison.OrdinalIgnoreCase));
@@ -808,55 +807,11 @@ public class ChatEngine(
 
     /// <summary>
     /// Ensures plan state is properly initialized for a new user message.
-    /// Explicit decomposed tasks from the user message are seeded into the plan.
     /// </summary>
     private async Task SeedInitialPlanIfNeededAsync(string sessionId, string userMessage)
     {
-        try
-        {
-            if (!IsActionableTaskRequest(userMessage)) return;
-
-            var existing = toolExecutor.GetSessionPlanEntries(sessionId);
-            string? owner = toolExecutor.GetSessionPlanOwner(sessionId);
-            var initialTasks = InitialPlanGenerator.Generate(userMessage);
-
-            if (existing.Count == 0)
-            {
-                if (initialTasks.Count > 0)
-                {
-                    logger.LogInformation("Seeding {Count} initial decomposed task steps from user message.", initialTasks.Count);
-                    await toolExecutor.SeedSessionPlanAsync(sessionId, initialTasks);
-                    if (_taskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
-                    {
-                        var planEntries = initialTasks.Select(t => new ToolExecutor.PlanEntry(t, false)).ToList();
-                        await _taskManager.SavePlanAsync(CurrentTaskId, AgentRuntime.SerializePlanEntries(planEntries));
-                    }
-                }
-            }
-            else if (!string.IsNullOrEmpty(owner) && owner != userMessage)
-            {
-                bool hasUnfinishedItems = existing.Any(e => !e.Done);
-                if (!hasUnfinishedItems)
-                {
-                    logger.LogInformation(
-                        "Clearing completed plan from a previous task; fresh task begins with {Count} decomposed tasks.", initialTasks.Count);
-                    await toolExecutor.SeedSessionPlanAsync(sessionId, initialTasks);
-                    if (_taskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
-                    {
-                        var planEntries = initialTasks.Select(t => new ToolExecutor.PlanEntry(t, false)).ToList();
-                        await _taskManager.SavePlanAsync(CurrentTaskId, AgentRuntime.SerializePlanEntries(planEntries));
-                    }
-                }
-                else
-                {
-                    logger.LogInformation("Continuing active plan with updated user steering: '{Message}'.", userMessage);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogDebug(ex, "Failed to initialize plan state for session {SessionId}.", sessionId);
-        }
+        // No-op. The model owns planning via structured plan tools.
+        await Task.CompletedTask;
     }
 
     public bool IsGenerating { get; private set; }
@@ -2301,17 +2256,69 @@ public class ChatEngine(
             }
             else if (isGoalMode && !toolsDisabled && currentPlan.Count == 0)
             {
-                var availableCapabilities = Klydis.Core.Capabilities.CapabilityBootstrapper.CreateDefaultRegistry().GetAll().Select(c => c.Id).ToList();
-                var planningDirective = PromptInvariantEngine.BuildPlanningPromptDirective(
-                    objective: currentUserMessage ?? "Current Goal",
-                    availableCapabilities: availableCapabilities,
-                    worldState: null);
-                sysPrompt = sysPrompt.TrimEnd() + "\n\n" + planningDirective;
+                // Planning requirement is a RUNTIME POLICY decision (PlanningPolicy), not a
+                // blanket rule: a trivial autonomous request ("what is the CPU usage?") must
+                // NOT be forced through a plan ceremony — the model should call the
+                // diagnostic tool directly. Multi-step / build work is Required. This
+                // directly implements "do not force a plan for trivial requests": the
+                // decision belongs to policy, never to a prose-derived task list.
+                var planningRequirement = Klydis.Core.Tasks.PlanningPolicy.Evaluate(
+                    mode,
+                    currentUserMessage,
+                    userExplicitlyRequestedPlan: currentUserMessage?.Contains("plan", StringComparison.OrdinalIgnoreCase) == true);
+
+                if (planningRequirement == Klydis.Core.Tasks.PlanningRequirement.Required)
+                {
+                    var availableCapabilities = Klydis.Core.Capabilities.CapabilityBootstrapper.CreateDefaultRegistry().GetAll().Select(c => c.Id).ToList();
+                    var planningDirective = PromptInvariantEngine.BuildPlanningPromptDirective(
+                        objective: currentUserMessage ?? "Current Goal",
+                        availableCapabilities: availableCapabilities,
+                        worldState: null);
+                    sysPrompt = sysPrompt.TrimEnd() + "\n\n" + planningDirective;
+                }
+                else
+                {
+                    // Optional/None: the request is simple or bounded — execute directly
+                    // instead of manufacturing a plan. Tells the model a plan is allowed but
+                    // not required, so it never stalls waiting for one.
+                    sysPrompt = sysPrompt.TrimEnd() +
+                        "\n\n<planning_instruction>OBJECTIVE: " + (currentUserMessage ?? "Current Goal") +
+                        "\nINSTRUCTION: This request does not require a full execution plan. You MAY create a plan with the 'plan' tool if it genuinely helps, but you are NOT required to — for simple or bounded requests, execute directly with the appropriate tool and report the result.</planning_instruction>";
+                }
             }
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "Failed to load current task plan for prompt context.");
+        }
+
+        // AGENT STATE — compact projection of the runtime's authoritative state (model-owned
+        // plan + evidence ledger + workspace). This is the ONLY state block the model needs by
+        // default: a small, stable [AGENT STATE] summary instead of re-serializing the whole
+        // execution history every generation. The full state stays in the store and is
+        // retrieved on demand. Injected for autonomous goal turns only (never conversation).
+        if (isGoalMode && !toolsDisabled)
+        {
+            try
+            {
+                var snapshot = AgentContextSnapshotBuilder.Build(
+                    objective: !string.IsNullOrWhiteSpace(CurrentTaskObjective) ? CurrentTaskObjective : currentUserMessage,
+                    planEntries: toolExecutor.GetSessionPlanEntries(generatingSessionId),
+                    workspaceRoot: toolExecutor.WorkspaceRoot,
+                    artifactPaths: toolExecutor.GetSessionArtifactPaths(generatingSessionId),
+                    evidence: !string.IsNullOrEmpty(CurrentTaskId) ? _runtime?.GetRunEvidence(CurrentTaskId) : null,
+                    currentTaskId: CurrentTaskId,
+                    currentStep: currentObligationForTurn?.Title);
+                string snapshotText = snapshot.Format();
+                if (!string.IsNullOrWhiteSpace(snapshotText))
+                {
+                    sysPrompt = sysPrompt.TrimEnd() + "\n\n" + snapshotText;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Failed to build agent state snapshot for prompt context.");
+            }
         }
 
         // P0 Epistemic Context: Inject authoritative verified facts so models know what is proven

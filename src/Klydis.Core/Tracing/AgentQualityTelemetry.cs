@@ -13,6 +13,7 @@ public sealed record ExecutionMetricsReport(
     double ProductiveActionRatio,
     int ToolSuccesses,
     int ToolFailures,
+    int ToolRejections,
     double ToolSuccessRate,
     int CompletedObjectives,
     int TotalObjectives,
@@ -41,12 +42,18 @@ public static class AgentQualityTelemetry
 
         int generations = events.Count(e => e.Type is TraceEventType.GenerationStarted or TraceEventType.GenerationCompleted or TraceEventType.RawModelOutput);
 
+        // Single-layer tool accounting (P0): successes/failures count only PHYSICAL terminal
+        // events (ToolExecutionCompleted/Failed); gate rejections (ToolCallRejected) are a
+        // separate logical layer and are NEVER folded into failures — mixing them produced
+        // ambiguous "13 successes / 16 failures" reports where the two layers disagreed.
         var toolStarts = events.Where(e => e.Type == TraceEventType.ToolExecutionStarted).ToList();
         var toolSuccessEvents = events.Where(e => e.Type == TraceEventType.ToolExecutionCompleted).ToList();
-        var toolFailEvents = events.Where(e => e.Type is TraceEventType.ToolExecutionFailed or TraceEventType.ToolCallRejected).ToList();
+        var toolFailEvents = events.Where(e => e.Type == TraceEventType.ToolExecutionFailed).ToList();
+        var toolRejectionEvents = events.Where(e => e.Type == TraceEventType.ToolCallRejected).ToList();
 
         int toolSuccesses = toolSuccessEvents.Count;
         int toolFailures = toolFailEvents.Count;
+        int toolRejections = toolRejectionEvents.Count;
         int totalActions = Math.Max(toolStarts.Count, toolSuccesses + toolFailures);
 
         // Productive action estimation:
@@ -146,6 +153,7 @@ public static class AgentQualityTelemetry
             ProductiveActionRatio: Math.Round(productiveRatio, 2),
             ToolSuccesses: toolSuccesses,
             ToolFailures: toolFailures,
+            ToolRejections: toolRejections,
             ToolSuccessRate: Math.Round(toolSuccessRate, 2),
             CompletedObjectives: completedObjectives,
             TotalObjectives: totalObjectives,

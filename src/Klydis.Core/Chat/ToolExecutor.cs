@@ -235,6 +235,17 @@ public class ToolExecutor(
         set => _terminalService = value;
     }
 
+    private Klydis.Core.Tasks.AgentTodoManager? _todoManager;
+    /// <summary>
+    /// Session-scoped TODO state manager backing the structured <c>todo.*</c> tools. Every
+    /// mutation is mirrored durably to the message store so TODO state survives restarts.
+    /// </summary>
+    public Klydis.Core.Tasks.AgentTodoManager TodoManager
+    {
+        get => _todoManager ??= new Klydis.Core.Tasks.AgentTodoManager(messageStore);
+        set => _todoManager = value;
+    }
+
     public Klydis.Core.Tasks.TaskManager? TaskManager { get; set; } = taskManager;
     
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
@@ -560,7 +571,99 @@ public class ToolExecutor(
             new("process_id", "string", "ID of the managed process (required for status, input, kill, remove)", false),
             new("input", "string", "Input text to send to the process's standard input (for action=input)", false),
             new("working_directory", "string", "Optional working directory for the process (for action=start)", false)
-        }, false)
+        }, false),
+        // ---- Model-owned structured plan tools (backed by PlanEngine) ----
+        // These expose the ExecutionPlan/PlanEngine model directly to the model: a plan is a
+        // first-class object with an objective, strategy, typed tasks (dependencies,
+        // capabilities, outputs, verification) and completion criteria — NOT a flat list of
+        // strings. Each mutation is validated, revisioned, persisted, and projected back onto
+        // the flat checklist the UI and completion gate consume.
+        new ToolDefinition("plan.create", "Creates a fresh structured execution plan for the current goal. Replaces any existing plan. Provide an objective, an array of concrete tasks (each with id/title/description/dependencies/required_capabilities/outputs/verification), and optional completion criteria. Only create tasks that materially contribute to the objective — never generic Analyze/Implement/Test boilerplate.", new List<ToolParameter>
+        {
+            new("objective", "string", "The goal this plan accomplishes", true),
+            new("strategy", "string", "Optional high-level strategy", false),
+            new("tasks", "object", "JSON array of tasks: [{id, title, description, purpose?, dependencies?, required_capabilities?, outputs?, verification?}]", true),
+            new("completion", "object", "Optional completion criteria: {description?, conditions?}", false),
+            new("reason", "string", "Optional reason for creating/replacing the plan", false)
+        }, false),
+        new ToolDefinition("plan.add_task", "Adds a single task to the active structured plan.", new List<ToolParameter>
+        {
+            new("id", "string", "Stable task id (e.g. task-4)", true),
+            new("title", "string", "Short display title", true),
+            new("description", "string", "Concrete work description", true),
+            new("purpose", "string", "Why this task is needed", false),
+            new("dependencies", "string", "Comma-separated task ids this depends on", false),
+            new("required_capabilities", "string", "Comma-separated capability ids (e.g. filesystem.edit)", false),
+            new("outputs", "string", "Comma-separated expected outputs", false),
+            new("verification", "string", "Comma-separated verification criteria", false),
+            new("after_task_id", "string", "Optional task id to insert after", false),
+            new("reason", "string", "Optional reason", false)
+        }, false),
+        new ToolDefinition("plan.update_task", "Updates a task's description, status, or dependencies in the active structured plan.", new List<ToolParameter>
+        {
+            new("task_id", "string", "Task id to update", true),
+            new("description", "string", "New description", false),
+            new("status", "string", "New status: pending/ready/running/completed/blocked/failed", false),
+            new("dependencies", "string", "Comma-separated replacement dependencies", false),
+            new("reason", "string", "Optional reason for the update", false)
+        }, false),
+        new ToolDefinition("plan.remove_task", "Removes a task from the active structured plan and its dependency edges.", new List<ToolParameter>
+        {
+            new("task_id", "string", "Task id to remove", true),
+            new("reason", "string", "Optional reason", false)
+        }, false),
+        new ToolDefinition("plan.complete_task", "Marks a task completed in the active structured plan.", new List<ToolParameter>
+        {
+            new("task_id", "string", "Task id to complete", true),
+            new("reason", "string", "Optional reason", false)
+        }, false),
+        new ToolDefinition("plan.block_task", "Marks a task blocked with a reason.", new List<ToolParameter>
+        {
+            new("task_id", "string", "Task id to block", true),
+            new("reason", "string", "Why it is blocked", false)
+        }, false),
+        new ToolDefinition("plan.replan", "Replaces the active plan with a revised one (new tasks array) while preserving completed-task history in revisions.", new List<ToolParameter>
+        {
+            new("reason", "string", "Why the plan is being revised", true),
+            new("tasks", "object", "JSON array of revised tasks", true),
+            new("objective", "string", "Optional revised objective", false),
+            new("completion", "object", "Optional revised completion criteria", false)
+        }, false),
+        // ---- Model-owned TODO tools ----
+        // TODOs are atomic units of work with a lifecycle (pending/ready/running/completed/
+        // blocked/failed/skipped/cancelled), linked to plan tasks, persisted per session.
+        new ToolDefinition("todo.create", "Creates a TODO item — an atomic unit of work. Optionally link it to a plan task via plan_task_id.", new List<ToolParameter>
+        {
+            new("title", "string", "Short title of the work item", true),
+            new("description", "string", "Detailed description", false),
+            new("purpose", "string", "Why this work matters", false),
+            new("related_files", "string", "Comma-separated file paths", false),
+            new("expected_outputs", "string", "Comma-separated expected outputs", false),
+            new("verification", "string", "How completion is verified", false),
+            new("plan_task_id", "string", "Optional linked plan task id", false)
+        }, false),
+        new ToolDefinition("todo.update", "Updates a TODO's status (pending/ready/running/completed/blocked/failed/skipped/cancelled).", new List<ToolParameter>
+        {
+            new("todo_id", "string", "TODO id to update", true),
+            new("status", "string", "New status", true),
+            new("reason", "string", "Optional reason (required for blocked/failed)", false)
+        }, false),
+        new ToolDefinition("todo.complete", "Marks a TODO completed.", new List<ToolParameter>
+        {
+            new("todo_id", "string", "TODO id to complete", true),
+            new("evidence", "string", "Optional evidence summary of what was done", false)
+        }, false),
+        new ToolDefinition("todo.block", "Marks a TODO blocked with a reason.", new List<ToolParameter>
+        {
+            new("todo_id", "string", "TODO id to block", true),
+            new("reason", "string", "Why it is blocked", true)
+        }, false),
+        new ToolDefinition("todo.reopen", "Reopens a completed/blocked TODO to pending.", new List<ToolParameter>
+        {
+            new("todo_id", "string", "TODO id to reopen", true),
+            new("reason", "string", "Optional reason", false)
+        }, false),
+        new ToolDefinition("todo.list", "Lists all TODOs for the current session with status, plan-task link, and evidence.", new List<ToolParameter>(), false)
     };
 
     /// <summary>
@@ -936,6 +1039,12 @@ public class ToolExecutor(
                 "task_complete" => ExecuteTaskComplete(request),
                 "task_progress" => ExecuteTaskProgress(request),
                 "plan" => await ExecutePlanAsync(request, sessionId),
+                "plan.create" or "plan.add_task" or "plan.update_task" or "plan.remove_task"
+                    or "plan.complete_task" or "plan.block_task" or "plan.replan" =>
+                    await ExecuteStructuredPlanAsync(request, sessionId),
+                "todo.create" or "todo.update" or "todo.complete" or "todo.block"
+                    or "todo.reopen" or "todo.list" =>
+                    await ExecuteTodoToolAsync(request, sessionId),
                 "system_report" => await GetSystemReportAsync(toolCt),
                 "system_cpu_info" => await GetSystemCpuInfoAsync(toolCt),
                 "system_cpu_usage" => await GetSystemCpuUsageAsync(toolCt),
@@ -3733,6 +3842,14 @@ public class ToolExecutor(
     // per session per process (the getters below are called on the UI thread every 2s).
     private readonly HashSet<string> _planLoadAttempted = new();
 
+    // Session-scoped PlanEngine instances backing the structured plan tools (plan.create /
+    // plan.add_task / ...). The ENGINE is the authoritative structured plan state; the flat
+    // _sessionPlans checklist is kept in sync as its projection so the UI, prompt injection,
+    // and completion gate keep working unchanged. Created lazily from the flat checklist on
+    // first structured-plan-tool use, and rebuilt from the flat list whenever the legacy
+    // 'plan' tool mutates it (so both views never diverge).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Klydis.Core.Tasks.PlanEngine> _sessionPlanEngines = new();
+
     /// <summary>
     /// The user message whose turn is currently executing. Set by ChatEngine at the start of
     /// each StreamResponseAsync call and cleared when the turn ends. When the model mutates
@@ -3768,42 +3885,10 @@ public class ToolExecutor(
     /// to replace it with a task-specific checklist via 'plan' (action=create) when it has
     /// one.
     /// </summary>
+    [Obsolete("Do not use for autonomous plan generation. The model owns planning via structured plan tools.")]
     public async Task SeedSessionPlanAsync(string sessionId, IReadOnlyList<string> items)
     {
-        string key = sessionId ?? string.Empty;
-        EnsureSessionPlanLoaded(key);
-        var plan = _sessionPlans.GetOrAdd(key, _ => new List<SessionPlanTask>());
-        // P1: guard the mutation — the UI and prompt builds read this list concurrently.
-        lock (_sessionPlanLock)
-        {
-            plan.Clear();
-            foreach (var item in items)
-            {
-                if (!string.IsNullOrWhiteSpace(item))
-                {
-                    plan.Add(new SessionPlanTask(item.Trim(), false));
-                }
-            }
-        }
-        _sessionPlanOwner[key] = CurrentTaskUserMessage ?? string.Empty;
-        _sessionPlanProgress.TryRemove(key, out _);
-        try
-        {
-            var snapshot = new PlanSnapshot(plan.ToList(), -1, GetSessionPlanOwner(key));
-            string json = System.Text.Json.JsonSerializer.Serialize(snapshot);
-            await messageStore.SaveSessionPlanAsync(key, json);
-            if (TaskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
-            {
-                await TaskManager.SavePlanAsync(CurrentTaskId, json);
-            }
-            await EmitExecutionEventAsync(sessionId, "PlanCreated", CurrentTaskId, null, null);
-            PlanChanged?.Invoke(this, EventArgs.Empty);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to persist harness-seeded plan for {SessionId}.", sessionId);
-        }
-        logger.LogInformation("Harness seeded initial plan ({Count} items) for session {SessionId}.", plan.Count, sessionId);
+        await Task.CompletedTask;
     }
 
     /// <summary>
@@ -4252,6 +4337,13 @@ public class ToolExecutor(
             snapshot = new PlanSnapshot(plan.ToList(), GetSessionPlanProgress(key), GetSessionPlanOwner(key));
         }
 
+        // Keep the structured PlanEngine view coherent with the legacy flat checklist:
+        // the legacy tool just mutated the flat list, so rebuild the engine from it.
+        if (planMutated)
+        {
+            RebuildSessionPlanEngineFromFlatList(key);
+        }
+
         if (planMutated && plan.Count > 0 && (action == "create" || action == "set_plan"))
         {
             try
@@ -4290,6 +4382,595 @@ public class ToolExecutor(
         int progress = GetSessionPlanProgress(sessionId ?? string.Empty);
         string progressLine = progress >= 0 ? $"\nOverall progress: {progress}%" : string.Empty;
         return new ToolResult("plan", true, $"[PLAN {action.ToUpperInvariant()} — current todo list:]\n{body}{progressLine}{qualityNotice}", null);
+    }
+
+    // ---- Structured plan tools (backed by PlanEngine) ----
+    // plan.create / plan.add_task / plan.update_task / plan.remove_task / plan.complete_task /
+    // plan.block_task / plan.replan. Each mutation is validated and revisioned by PlanEngine,
+    // then projected back onto the flat checklist so the UI/plan-gate consumers stay in sync.
+    private async Task<ToolResult> ExecuteStructuredPlanAsync(ToolCallRequest request, string sessionId)
+    {
+        string tool = request.Name.ToLowerInvariant();
+        string key = sessionId ?? string.Empty;
+        var engine = GetOrCreateSessionPlanEngine(key);
+
+        Klydis.Core.Tasks.PlanEngineResult result;
+        switch (tool)
+        {
+            case "plan.create":
+            case "plan.replan":
+            {
+                var plan = BuildPlanFromArgs(request.Arguments);
+                if (plan == null)
+                {
+                    return new ToolResult(request.Name, false, "",
+                        "Invalid plan payload: 'tasks' must be a JSON array of task objects " +
+                        "(id, title, description, dependencies?, required_capabilities?, outputs?, verification?).");
+                }
+                string? reason = GetStringArg(request.Arguments, "reason")
+                    ?? (tool == "plan.replan" ? "Model revised the plan" : "Model created the plan");
+                result = engine.SetPlan(plan, reason);
+                break;
+            }
+            case "plan.add_task":
+            {
+                var task = BuildPlanTaskFromArgs(request.Arguments);
+                if (task == null)
+                {
+                    return new ToolResult(request.Name, false, "", "plan.add_task requires id, title, and description.");
+                }
+                result = engine.ApplyPatch(new Klydis.Core.Tasks.PlanPatch(
+                    Klydis.Core.Tasks.PlanPatchOperation.AddTask,
+                    task: task,
+                    afterTaskId: GetStringArg(request.Arguments, "after_task_id"),
+                    reason: GetStringArg(request.Arguments, "reason") ?? "Added task"));
+                break;
+            }
+            case "plan.update_task":
+            {
+                string? taskId = GetStringArg(request.Arguments, "task_id");
+                if (string.IsNullOrWhiteSpace(taskId))
+                {
+                    return new ToolResult(request.Name, false, "", "plan.update_task requires 'task_id'.");
+                }
+                result = engine.ApplyPatch(new Klydis.Core.Tasks.PlanPatch(
+                    Klydis.Core.Tasks.PlanPatchOperation.UpdateTask,
+                    targetTaskId: taskId,
+                    reason: GetStringArg(request.Arguments, "reason"),
+                    statusUpdate: ParseTaskStatus(GetStringArg(request.Arguments, "status")),
+                    updatedDescription: GetStringArg(request.Arguments, "description"),
+                    updatedDependencies: ParseStringListArg(request.Arguments, "dependencies")));
+                break;
+            }
+            case "plan.remove_task":
+            {
+                string? taskId = GetStringArg(request.Arguments, "task_id");
+                if (string.IsNullOrWhiteSpace(taskId))
+                {
+                    return new ToolResult(request.Name, false, "", "plan.remove_task requires 'task_id'.");
+                }
+                result = engine.ApplyPatch(new Klydis.Core.Tasks.PlanPatch(
+                    Klydis.Core.Tasks.PlanPatchOperation.RemoveTask,
+                    targetTaskId: taskId,
+                    reason: GetStringArg(request.Arguments, "reason") ?? "Removed task"));
+                break;
+            }
+            case "plan.complete_task":
+            {
+                string? taskId = GetStringArg(request.Arguments, "task_id");
+                if (string.IsNullOrWhiteSpace(taskId))
+                {
+                    return new ToolResult(request.Name, false, "", "plan.complete_task requires 'task_id'.");
+                }
+                result = engine.ApplyPatch(new Klydis.Core.Tasks.PlanPatch(
+                    Klydis.Core.Tasks.PlanPatchOperation.CompleteTask,
+                    targetTaskId: taskId,
+                    reason: GetStringArg(request.Arguments, "reason") ?? "Task completed"));
+                break;
+            }
+            case "plan.block_task":
+            {
+                string? taskId = GetStringArg(request.Arguments, "task_id");
+                if (string.IsNullOrWhiteSpace(taskId))
+                {
+                    return new ToolResult(request.Name, false, "", "plan.block_task requires 'task_id'.");
+                }
+                result = engine.ApplyPatch(new Klydis.Core.Tasks.PlanPatch(
+                    Klydis.Core.Tasks.PlanPatchOperation.BlockTask,
+                    targetTaskId: taskId,
+                    reason: GetStringArg(request.Arguments, "reason") ?? "Task blocked"));
+                break;
+            }
+            default:
+                return new ToolResult(request.Name, false, "", $"Unknown structured plan tool '{tool}'.");
+        }
+
+        if (!result.Success)
+        {
+            return new ToolResult(request.Name, false, "",
+                $"PLAN REJECTED: {result.ErrorMessage ?? "invalid plan mutation"}");
+        }
+
+        SyncFlatChecklistFromEngine(key);
+        await PersistStructuredPlanAsync(sessionId);
+
+        return new ToolResult(request.Name, true, FormatStructuredPlan(engine.CurrentPlan), null);
+    }
+
+    /// <summary>
+    /// Structured TODO tools: todo.create / todo.update / todo.complete / todo.block /
+    /// todo.reopen / todo.list. Backed by the session-scoped AgentTodoManager, which persists
+    /// every mutation durably.
+    /// </summary>
+    private async Task<ToolResult> ExecuteTodoToolAsync(ToolCallRequest request, string sessionId)
+    {
+        string tool = request.Name.ToLowerInvariant();
+        string key = sessionId ?? string.Empty;
+        var manager = TodoManager;
+
+        switch (tool)
+        {
+            case "todo.create":
+            {
+                string? title = GetStringArg(request.Arguments, "title");
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    return new ToolResult(request.Name, false, "", "todo.create requires 'title'.");
+                }
+                var created = await manager.CreateAsync(key, new Klydis.Core.Tasks.AgentTodo
+                {
+                    Title = title!,
+                    Description = GetStringArg(request.Arguments, "description"),
+                    Purpose = GetStringArg(request.Arguments, "purpose"),
+                    RelatedFiles = ParseStringListArg(request.Arguments, "related_files"),
+                    ExpectedOutputs = ParseStringListArg(request.Arguments, "expected_outputs"),
+                    Verification = GetStringArg(request.Arguments, "verification"),
+                    PlanTaskId = GetStringArg(request.Arguments, "plan_task_id")
+                });
+                await EmitExecutionEventAsync(sessionId, "TodoCreated", CurrentTaskId, "todo.create", null,
+                    System.Text.Json.JsonSerializer.Serialize(created));
+                return new ToolResult(request.Name, true, $"TODO created: {created.Id} — {created.Title}", null);
+            }
+            case "todo.update":
+            {
+                string? id = GetStringArg(request.Arguments, "todo_id");
+                string? rawStatus = GetStringArg(request.Arguments, "status");
+                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(rawStatus))
+                {
+                    return new ToolResult(request.Name, false, "", "todo.update requires 'todo_id' and a valid 'status' (pending/ready/running/completed/blocked/failed/skipped/cancelled).");
+                }
+                var status = ParseTodoStatus(rawStatus);
+                if (status == null)
+                {
+                    return new ToolResult(request.Name, false, "", "todo.update requires a valid 'status' (pending/ready/running/completed/blocked/failed/skipped/cancelled).");
+                }
+                var updated = await manager.UpdateStatusAsync(key, id!, status.Value, GetStringArg(request.Arguments, "reason"));
+                if (updated == null)
+                {
+                    return new ToolResult(request.Name, false, "", $"TODO '{id}' not found in this session.");
+                }
+                await EmitExecutionEventAsync(sessionId, "TodoUpdated", CurrentTaskId, "todo.update", null,
+                    System.Text.Json.JsonSerializer.Serialize(updated));
+                return new ToolResult(request.Name, true, $"TODO {updated.Id} → {updated.Status}", null);
+            }
+            case "todo.complete":
+            {
+                string? id = GetStringArg(request.Arguments, "todo_id");
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    return new ToolResult(request.Name, false, "", "todo.complete requires 'todo_id'.");
+                }
+                var updated = await manager.UpdateStatusAsync(key, id!, Klydis.Core.Tasks.TodoStatus.Completed);
+                if (updated == null)
+                {
+                    return new ToolResult(request.Name, false, "", $"TODO '{id}' not found in this session.");
+                }
+                string? evidence = GetStringArg(request.Arguments, "evidence");
+                if (!string.IsNullOrWhiteSpace(evidence))
+                {
+                    await manager.AddEvidenceAsync(key, id!, new Klydis.Core.Tasks.TodoEvidence
+                    {
+                        Id = $"evt-{Guid.NewGuid().ToString("N").Substring(0, 8)}",
+                        TodoId = id!,
+                        Kind = Klydis.Core.Tasks.EvidenceKind.RequirementSatisfied,
+                        Subject = "model-reported",
+                        Detail = evidence,
+                        Passed = true
+                    });
+                }
+                await EmitExecutionEventAsync(sessionId, "TodoUpdated", CurrentTaskId, "todo.complete", null,
+                    System.Text.Json.JsonSerializer.Serialize(updated));
+                return new ToolResult(request.Name, true, $"TODO completed: {updated.Id} — {updated.Title}", null);
+            }
+            case "todo.block":
+            {
+                string? id = GetStringArg(request.Arguments, "todo_id");
+                string? reason = GetStringArg(request.Arguments, "reason");
+                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(reason))
+                {
+                    return new ToolResult(request.Name, false, "", "todo.block requires 'todo_id' and 'reason'.");
+                }
+                var updated = await manager.UpdateStatusAsync(key, id!, Klydis.Core.Tasks.TodoStatus.Blocked, reason);
+                if (updated == null)
+                {
+                    return new ToolResult(request.Name, false, "", $"TODO '{id}' not found in this session.");
+                }
+                await EmitExecutionEventAsync(sessionId, "TodoUpdated", CurrentTaskId, "todo.block", null,
+                    System.Text.Json.JsonSerializer.Serialize(updated));
+                return new ToolResult(request.Name, true, $"TODO blocked: {updated.Id} — {updated.BlockedReason ?? reason!}", null);
+            }
+            case "todo.reopen":
+            {
+                string? id = GetStringArg(request.Arguments, "todo_id");
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    return new ToolResult(request.Name, false, "", "todo.reopen requires 'todo_id'.");
+                }
+                var updated = await manager.UpdateStatusAsync(key, id!, Klydis.Core.Tasks.TodoStatus.Pending, GetStringArg(request.Arguments, "reason"));
+                if (updated == null)
+                {
+                    return new ToolResult(request.Name, false, "", $"TODO '{id}' not found in this session.");
+                }
+                await EmitExecutionEventAsync(sessionId, "TodoUpdated", CurrentTaskId, "todo.reopen", null,
+                    System.Text.Json.JsonSerializer.Serialize(updated));
+                return new ToolResult(request.Name, true, $"TODO reopened: {updated.Id} — {updated.Title}", null);
+            }
+            case "todo.list":
+            default:
+            {
+                var todos = await manager.GetSessionTodosAsync(key);
+                if (todos.Count == 0)
+                {
+                    return new ToolResult(request.Name, true, "(no TODOs yet for this session)", null);
+                }
+                var lines = new List<string>();
+                foreach (var t in todos)
+                {
+                    string link = string.IsNullOrWhiteSpace(t.PlanTaskId) ? "" : $" [plan task: {t.PlanTaskId}]";
+                    string evidence = t.Evidence.Count > 0 ? $" ({t.Evidence.Count} evidence)" : string.Empty;
+                    lines.Add($"{t.Id} [{t.Status}]{link} {t.Title}{evidence}");
+                }
+                return new ToolResult(request.Name, true, string.Join("\n", lines), null);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets (or lazily builds) the session's PlanEngine. When the engine does not exist yet it
+    /// is seeded from the flat checklist, so a session that used the legacy 'plan' tool keeps
+    /// its items visible to the structured tools.
+    /// </summary>
+    private Klydis.Core.Tasks.PlanEngine GetOrCreateSessionPlanEngine(string sessionId)
+    {
+        EnsureSessionPlanLoaded(sessionId);
+        string key = sessionId ?? string.Empty;
+        var engine = _sessionPlanEngines.TryGetValue(key, out var existing) ? existing : null;
+        if (engine == null)
+        {
+            lock (_sessionPlanLock)
+            {
+                engine = _sessionPlanEngines.TryGetValue(key, out var existing2) ? existing2 : null;
+                if (engine == null)
+                {
+                    var flat = _sessionPlans.TryGetValue(key, out var list) ? list : new List<SessionPlanTask>();
+                    var tasks = flat.Select((p, idx) => new Klydis.Core.Tasks.PlanTask(
+                        $"T{idx + 1}",
+                        p.Text,
+                        status: p.Done ? Klydis.Core.Tasks.TaskStepStatus.Completed : Klydis.Core.Tasks.TaskStepStatus.Pending)).ToList();
+                    engine = new Klydis.Core.Tasks.PlanEngine(CurrentTaskUserMessage ?? "Current Goal",
+                        new Klydis.Core.Tasks.ExecutionPlan(CurrentTaskUserMessage ?? "Current Goal", tasks));
+                    _sessionPlanEngines[key] = engine;
+                }
+            }
+        }
+        return engine;
+    }
+
+    /// <summary>
+    /// Rebuilds the session's PlanEngine from the flat checklist. Called after the legacy
+    /// 'plan' tool mutates the flat list so the structured tools never read stale state.
+    /// </summary>
+    private void RebuildSessionPlanEngineFromFlatList(string sessionId)
+    {
+        string key = sessionId ?? string.Empty;
+        EnsureSessionPlanLoaded(key);
+        lock (_sessionPlanLock)
+        {
+            var flat = _sessionPlans.TryGetValue(key, out var list) ? list : new List<SessionPlanTask>();
+            var tasks = flat.Select((p, idx) => new Klydis.Core.Tasks.PlanTask(
+                $"T{idx + 1}",
+                p.Text,
+                status: p.Done ? Klydis.Core.Tasks.TaskStepStatus.Completed : Klydis.Core.Tasks.TaskStepStatus.Pending)).ToList();
+            _sessionPlanEngines[key] = new Klydis.Core.Tasks.PlanEngine(CurrentTaskUserMessage ?? "Current Goal",
+                new Klydis.Core.Tasks.ExecutionPlan(CurrentTaskUserMessage ?? "Current Goal", tasks));
+        }
+    }
+
+    /// <summary>Projects the authoritative PlanEngine state onto the flat checklist.</summary>
+    private void SyncFlatChecklistFromEngine(string sessionId)
+    {
+        string key = sessionId ?? string.Empty;
+        var engine = _sessionPlanEngines.TryGetValue(key, out var e) ? e : null;
+        if (engine == null) return;
+        lock (_sessionPlanLock)
+        {
+            _sessionPlans[key] = engine.ProjectToPlanEntries().Select(e => new SessionPlanTask(e.Text, e.Done)).ToList();
+        }
+    }
+
+    /// <summary>Persists the structured plan's flat projection and notifies the UI.</summary>
+    private async Task PersistStructuredPlanAsync(string? sessionId)
+    {
+        string key = sessionId ?? string.Empty;
+        EnsureSessionPlanLoaded(key);
+        lock (_sessionPlanLock)
+        {
+            _sessionPlanOwner[key] = CurrentTaskUserMessage ?? string.Empty;
+        }
+        var snapshot = new PlanSnapshot(
+            _sessionPlans.TryGetValue(key, out var list) ? list.ToList() : new List<SessionPlanTask>(),
+            GetSessionPlanProgress(key),
+            GetSessionPlanOwner(key));
+        string json = System.Text.Json.JsonSerializer.Serialize(snapshot);
+        await messageStore.SaveSessionPlanAsync(key, json);
+        if (TaskManager != null && !string.IsNullOrEmpty(CurrentTaskId))
+        {
+            await TaskManager.SavePlanAsync(CurrentTaskId, json);
+        }
+        await EmitExecutionEventAsync(sessionId, "PlanUpdated", CurrentTaskId, null, null);
+        PlanChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static string FormatStructuredPlan(Klydis.Core.Tasks.ExecutionPlan plan)
+    {
+        var lines = new List<string>
+        {
+            $"OBJECTIVE: {plan.Objective}"
+        };
+        if (!string.IsNullOrWhiteSpace(plan.Strategy))
+        {
+            lines.Add($"STRATEGY: {plan.Strategy}");
+        }
+        for (int i = 0; i < plan.Tasks.Count; i++)
+        {
+            var t = plan.Tasks[i];
+            string status = t.Status.ToString().ToLowerInvariant();
+            string deps = t.Dependencies.Count > 0 ? $" (depends on: {string.Join(", ", t.Dependencies)})" : string.Empty;
+            lines.Add($"{i + 1}. [{status}] {t.Id} — {(string.IsNullOrWhiteSpace(t.Title) ? t.Description : t.Title)}{deps}");
+        }
+        if (!plan.Completion.IsEmpty)
+        {
+            lines.Add($"COMPLETION: {plan.Completion.Description ?? string.Join("; ", plan.Completion.Conditions)}");
+        }
+        return lines.Count > 1 ? string.Join("\n", lines) : "(plan is empty)";
+    }
+
+    private static Klydis.Core.Tasks.ExecutionPlan? BuildPlanFromArgs(IDictionary<string, object>? args)
+    {
+        string? objective = GetStringArg(args, "objective");
+        var rawTasks = GetJsonElementArg(args, "tasks");
+        if (rawTasks is not System.Text.Json.JsonElement tasksElem) return null;
+
+        var tasks = new List<Klydis.Core.Tasks.PlanTask>();
+        if (tasksElem.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var item in tasksElem.EnumerateArray())
+            {
+                if (item.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                var task = BuildPlanTaskFromJsonObject(item);
+                if (task != null) tasks.Add(task);
+            }
+        }
+        else if (tasksElem.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                 tasksElem.TryGetProperty("tasks", out var inner) && inner.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var item in inner.EnumerateArray())
+            {
+                if (item.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+                var task = BuildPlanTaskFromJsonObject(item);
+                if (task != null) tasks.Add(task);
+            }
+        }
+
+        Klydis.Core.Tasks.CompletionCriteria? completion = null;
+        var completionElem = GetJsonElementArg(args, "completion");
+        if (completionElem is System.Text.Json.JsonElement completionObj &&
+            completionObj.ValueKind == System.Text.Json.JsonValueKind.Object)
+        {
+            string? desc = null;
+            if (completionObj.TryGetProperty("description", out var d) && d.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                desc = d.GetString();
+            }
+            var conditions = new List<string>();
+            if (completionObj.TryGetProperty("conditions", out var c))
+            {
+                if (c.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var cond in c.EnumerateArray())
+                    {
+                        if (cond.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrWhiteSpace(cond.GetString()))
+                        {
+                            conditions.Add(cond.GetString()!.Trim());
+                        }
+                    }
+                }
+                else if (c.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    conditions.AddRange(ParseCommaList(c.GetString()));
+                }
+            }
+            completion = new Klydis.Core.Tasks.CompletionCriteria(conditions, desc);
+        }
+
+        return new Klydis.Core.Tasks.ExecutionPlan(
+            objective ?? "Current Goal",
+            tasks,
+            completion,
+            strategy: GetStringArg(args, "strategy"));
+    }
+
+    private static Klydis.Core.Tasks.PlanTask? BuildPlanTaskFromArgs(IDictionary<string, object>? args)
+    {
+        string? id = GetStringArg(args, "id");
+        string? title = GetStringArg(args, "title");
+        string? description = GetStringArg(args, "description") ?? title;
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            return null;
+        }
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            id = $"task-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+        }
+        return new Klydis.Core.Tasks.PlanTask(
+            id!,
+            description!,
+            dependencies: ParseStringListArg(args, "dependencies"),
+            requiredCapabilities: ParseStringListArg(args, "required_capabilities"),
+            verification: new Klydis.Core.Tasks.VerificationCriteria(ParseStringListArg(args, "verification")),
+            outputs: ParseStringListArg(args, "outputs"),
+            status: ParseTaskStatus(GetStringArg(args, "status")) ?? Klydis.Core.Tasks.TaskStepStatus.Pending,
+            purpose: GetStringArg(args, "purpose"),
+            title: title);
+    }
+
+    private static Klydis.Core.Tasks.PlanTask? BuildPlanTaskFromJsonObject(System.Text.Json.JsonElement obj)
+    {
+        string? id = ReadJsonString(obj, "id");
+        string? title = ReadJsonString(obj, "title");
+        string? description = ReadJsonString(obj, "description") ?? title;
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            return null;
+        }
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            id = $"task-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+        }
+        return new Klydis.Core.Tasks.PlanTask(
+            id!,
+            description!,
+            dependencies: ReadJsonStringList(obj, "dependencies"),
+            requiredCapabilities: ReadJsonStringList(obj, "required_capabilities"),
+            verification: new Klydis.Core.Tasks.VerificationCriteria(ReadJsonStringList(obj, "verification")),
+            outputs: ReadJsonStringList(obj, "outputs"),
+            status: ParseTaskStatus(ReadJsonString(obj, "status")) ?? Klydis.Core.Tasks.TaskStepStatus.Pending,
+            purpose: ReadJsonString(obj, "purpose"),
+            title: title);
+    }
+
+    private static Klydis.Core.Tasks.TaskStepStatus? ParseTaskStatus(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        return raw!.Trim().ToLowerInvariant() switch
+        {
+            "pending" => Klydis.Core.Tasks.TaskStepStatus.Pending,
+            "ready" => Klydis.Core.Tasks.TaskStepStatus.Ready,
+            "running" => Klydis.Core.Tasks.TaskStepStatus.Running,
+            "completed" or "done" or "complete" => Klydis.Core.Tasks.TaskStepStatus.Completed,
+            "blocked" => Klydis.Core.Tasks.TaskStepStatus.Blocked,
+            "failed" => Klydis.Core.Tasks.TaskStepStatus.Failed,
+            "skipped" => Klydis.Core.Tasks.TaskStepStatus.Skipped,
+            _ => null
+        };
+    }
+
+    private static Klydis.Core.Tasks.TodoStatus? ParseTodoStatus(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        return raw!.Trim().ToLowerInvariant() switch
+        {
+            "pending" => Klydis.Core.Tasks.TodoStatus.Pending,
+            "ready" => Klydis.Core.Tasks.TodoStatus.Ready,
+            "running" => Klydis.Core.Tasks.TodoStatus.Running,
+            "completed" or "done" => Klydis.Core.Tasks.TodoStatus.Completed,
+            "blocked" => Klydis.Core.Tasks.TodoStatus.Blocked,
+            "failed" => Klydis.Core.Tasks.TodoStatus.Failed,
+            "skipped" => Klydis.Core.Tasks.TodoStatus.Skipped,
+            "cancelled" or "canceled" => Klydis.Core.Tasks.TodoStatus.Cancelled,
+            _ => null
+        };
+    }
+
+    /// <summary>Reads an argument that may arrive as a JSON array or a comma-separated string.</summary>
+    private static IReadOnlyList<string> ParseStringListArg(IDictionary<string, object>? args, string key)
+    {
+        var raw = GetJsonElementArg(args, key);
+        if (raw is not System.Text.Json.JsonElement elem) return Array.Empty<string>();
+        if (elem.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            var result = new List<string>();
+            foreach (var item in elem.EnumerateArray())
+            {
+                if (item.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                {
+                    result.Add(item.GetString()!.Trim());
+                }
+            }
+            return result;
+        }
+        if (elem.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            return ParseCommaList(elem.GetString());
+        }
+        return Array.Empty<string>();
+    }
+
+    private static System.Text.Json.JsonElement? GetJsonElementArg(IDictionary<string, object>? args, string key)
+    {
+        if (args == null || !args.TryGetValue(key, out var val) || val == null) return null;
+        if (val is System.Text.Json.JsonElement elem) return elem;
+        string? text = val as string;
+        if (text == null)
+        {
+            // A caller (or test) passed a plain object graph instead of a JsonElement/string:
+            // serialize it so nested task/completion objects parse identically.
+            try { text = System.Text.Json.JsonSerializer.Serialize(val); }
+            catch { return null; }
+        }
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        try
+        {
+            return System.Text.Json.JsonDocument.Parse(text!).RootElement;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static IReadOnlyList<string> ParseCommaList(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return Array.Empty<string>();
+        return raw!.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+    }
+
+    private static string? ReadJsonString(System.Text.Json.JsonElement obj, string key)
+    {
+        return obj.TryGetProperty(key, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
+    }
+
+    private static IReadOnlyList<string> ReadJsonStringList(System.Text.Json.JsonElement obj, string key)
+    {
+        if (!obj.TryGetProperty(key, out var elem)) return Array.Empty<string>();
+        if (elem.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            var result = new List<string>();
+            foreach (var item in elem.EnumerateArray())
+            {
+                if (item.ValueKind == System.Text.Json.JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                {
+                    result.Add(item.GetString()!.Trim());
+                }
+            }
+            return result;
+        }
+        if (elem.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            return ParseCommaList(elem.GetString());
+        }
+        return Array.Empty<string>();
     }
 
     private static void ApplyPlanPatch(ToolCallRequest request, List<SessionPlanTask> plan)

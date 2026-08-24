@@ -283,9 +283,13 @@ public static class ActionGate
             !string.Equals(request.Name, "task_progress", StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(request.Name, "check_message_queue", StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(request.Name, "incorporate_queued_message", StringComparison.OrdinalIgnoreCase) &&
-            Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(request.Name) !=
+            // Args are passed so run_command is classified by its COMMAND TEXT: a read-only
+            // diagnostic (Get-*, systeminfo, git status, ...) is exempt from replay (safe to
+            // re-run for a fresh reading — the observed 9x REPLAY_DETECTED loop on read-only
+            // commands), while a mutating command stays ExternalSideEffect and is blocked.
+            Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(request.Name, request.Arguments) !=
                 Klydis.Core.Tasks.ToolSideEffectLevel.ReadOnly &&
-            Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(request.Name) !=
+            Klydis.Core.Tasks.ToolSideEffectClassifier.Classify(request.Name, request.Arguments) !=
                 Klydis.Core.Tasks.ToolSideEffectLevel.Idempotent)
         {
             return new ActionGateVerdict(false, ActionGateError.ReplayDetected,
@@ -359,7 +363,7 @@ public static class ActionGate
             "system_mem" or "system_ram" or "system_memory_metrics" or "ram_info" or "memory_info" => "system_memory",
             "system_disk" or "system_disk_metrics" or "disk_info" or "disk_space" => "system_disks",
             "system_os_info" or "os_info" or "windows_info" => "system_os",
-            "system_proc" or "process_list" => "system_processes",
+            "system_proc" or "system_process" or "process_list" => "system_processes",
             "top_processes" or "processes_top" or "system_cpu_processes" or "cpu_processes" or "system_cpu_procs" or "system_top_processes" => "system_top_processes",
             "find_process" or "search_processes" or "get_process" => "process_find",
             "system_temp" or "system_temperature" => "system_temperatures",
