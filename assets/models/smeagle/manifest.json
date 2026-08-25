@@ -1,15 +1,27 @@
 {
   "id": "smeagle-4b",
   "displayName": "Smeagle 4B",
+  "version": "0.1",
   "architecture": "qwen35",
   "protocol": "qwen-native",
   "adapter": "qwen-native",
   "quantization": "Q8_0",
-  "context": 131072,
+  "context": 262144,
   "default": true,
   "bundled": true,
   "fileName": "smeagle-4b-v0.1-Q8_0.gguf",
+  "sizeBytes": 4610580256,
+  "sha256": "0bf49de687650b76d4280425741c69fc59da0949c9cc616abc2f238f96ec5e53",
   "role": "Agent",
   "parameterSize": "4B",
-  "description": "Klydis Reference Agent Model with Qwen-native tool calling, native thinking, and high action fidelity."
+  "source": "https://huggingface.co/Hob-forge/smeagle-4b",
+  "upstream": "Hob-forge/smeagle-4b",
+  "baseModel": "Qwen/Qwen3.5-4B-Base",
+  "license": {
+    "id": "hobforge-community-1.0",
+    "name": "Hob Forge Community License v1.0",
+    "url": "https://huggingface.co/Hob-forge/smeagle-4b/blob/main/LICENSE.md"
+  },
+  "attribution": "Hob Forge — smeagle",
+  "description": "Klydis Reference Agent Model with Qwen-native tool calling, native thinking, and high action fidelity. Fine-tuned by Hob Forge from Qwen/Qwen3.5-4B-Base (Apache-2.0); redistributed under the Hob Forge Community License v1.0."
 }
