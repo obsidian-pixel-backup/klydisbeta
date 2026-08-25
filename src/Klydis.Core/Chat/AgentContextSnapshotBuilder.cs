@@ -29,6 +29,7 @@ public static class AgentContextSnapshotBuilder
         string? workspaceRoot,
         IReadOnlyList<string>? artifactPaths,
         IReadOnlyList<EvidenceLedgerEntry>? evidence,
+        IReadOnlyList<AgentTodo>? todos = null,
         string? currentTaskId = null,
         string? currentStep = null)
     {
@@ -77,11 +78,65 @@ public static class AgentContextSnapshotBuilder
         {
             Objective = objective ?? string.Empty,
             Plan = planSummary,
-            Todos = null,
+            Todos = BuildTodoSummary(todos),
             Workspace = workspaceSummary,
             CurrentTask = currentTaskSummary,
             RecentEvidence = evidenceList,
             OpenIssues = Array.Empty<string>()
         };
+    }
+
+    /// <summary>
+    /// Projects model-generated TODOs into the compact <see cref="TodoSummary"/> the model
+    /// sees after context reconstruction/compaction. Only the current TODO (running, else
+    /// ready, else first open), the next 3 pending TODOs, and blocked TODOs are injected —
+    /// never the entire TODO database. This closes the "the model created the TODO but then
+    /// forgot it" gap: TODO state is now part of the compact snapshot, not just the store.
+    /// </summary>
+    private static TodoSummary? BuildTodoSummary(IReadOnlyList<AgentTodo>? todos)
+    {
+        if (todos is null || todos.Count == 0) return null;
+
+        var open = todos.Where(t => t.IsOpen).ToList();
+        if (open.Count == 0 && todos.All(t => t.Status == TodoStatus.Completed))
+        {
+            // Nothing left to do — still surface the completed/remaining counts.
+            return new TodoSummary(
+                Completed: todos.Count(t => t.Status == TodoStatus.Completed),
+                Remaining: 0,
+                Blocked: 0,
+                CurrentTodoTitle: null,
+                NextPending: Array.Empty<string>(),
+                BlockedTodos: Array.Empty<string>(),
+                CurrentTodoDependencies: null,
+                CurrentTodoVerification: null);
+        }
+
+        var current = open.FirstOrDefault(t => t.Status == TodoStatus.Running)
+            ?? open.FirstOrDefault(t => t.Status == TodoStatus.Ready)
+            ?? open.FirstOrDefault();
+
+        var nextPending = open
+            .Where(t => t.Status != TodoStatus.Blocked && !ReferenceEquals(t, current))
+            .Take(3)
+            .Select(t => t.Title)
+            .ToList();
+
+        var blockedTodos = todos
+            .Where(t => t.Status == TodoStatus.Blocked)
+            .Select(t => string.IsNullOrWhiteSpace(t.BlockedReason) ? t.Title : $"{t.Title} ({t.BlockedReason})")
+            .ToList();
+
+        return new TodoSummary(
+            Completed: todos.Count(t => t.Status == TodoStatus.Completed),
+            Remaining: open.Count,
+            Blocked: blockedTodos.Count,
+            CurrentTodoTitle: current?.Title,
+            NextPending: nextPending,
+            BlockedTodos: blockedTodos,
+            CurrentTodoDependencies: current is { Dependencies.Count: > 0 }
+                ? string.Join(", ", current.Dependencies)
+                : null,
+            CurrentTodoVerification: current?.Verification);
     }
 }

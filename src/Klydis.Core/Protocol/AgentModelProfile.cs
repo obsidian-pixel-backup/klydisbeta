@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace Klydis.Core.Protocol;
 
@@ -117,14 +119,17 @@ public sealed record AgentModelProfile
         string idLower = (modelId ?? string.Empty).ToLowerInvariant();
         string archLower = (architecture ?? string.Empty).ToLowerInvariant();
 
-        if (idLower.Contains("smeagle") || (archLower.Contains("qwen") && (idLower.Contains("4b") || idLower.Contains("3b"))))
+        // Exact-identity matching: the Smeagle profile (smeagle-action-first prompt,
+        // small-model execution mode, 16K/24K context budgets, 1 decisive tool per
+        // generation) applies ONLY to actual Smeagle models. The previous classifier
+        // treated any Qwen 3B/4B model as Smeagle, corrupting unrelated small Qwen
+        // models with Smeagle's sampling, prompt profile, and execution policy.
+        if (idLower.Contains("smeagle"))
         {
             return Smeagle4B;
         }
 
-        bool isSmall = idLower.Contains("0.5b") || idLower.Contains("1b") || idLower.Contains("1.5b") ||
-                       idLower.Contains("2b") || idLower.Contains("3b") || idLower.Contains("4b") ||
-                       idLower.Contains("mini") || idLower.Contains("small");
+        bool isSmall = IsSmallModel(idLower);
 
         bool isQwen = archLower.Contains("qwen");
 
@@ -137,7 +142,9 @@ public sealed record AgentModelProfile
             ToolCallingMode = profile?.ToolProtocol ?? (isQwen ? ToolProtocol.QwenNative : ToolProtocol.GenericJson),
             AllowParallelTools = !isSmall,
             MaxToolCallsPerGeneration = isSmall ? 1 : 4,
-            PromptProfile = isSmall ? "smeagle-action-first" : "standard-agentic",
+            // Generic (non-Smeagle) models never use the Smeagle-specific action-first
+            // prompt profile, even when they are small enough to get small-model mode.
+            PromptProfile = "standard-agentic",
             DefaultTemperature = 0.7,
             DefaultTopP = 0.9,
             RecommendedContextBudget = isSmall ? 16384 : 32768,
@@ -149,5 +156,26 @@ public sealed record AgentModelProfile
             SupportsGrammar = profile?.SupportsGrammar ?? true,
             SupportsContinuation = profile?.SupportsToolContinuation ?? true
         };
+    }
+
+    /// <summary>
+    /// True when the model id names a small (~4B or fewer) model. The parameter size is
+    /// parsed numerically so larger sizes are never misclassified: the old substring check
+    /// treated "qwen3.5-32b" as small because "32b" contains "2b" (likewise "13b"/"14b"
+    /// and friends), silently applying small-model mode — 1 tool per generation and a 16K
+    /// context budget — to large models.
+    /// </summary>
+    private static bool IsSmallModel(string idLower)
+    {
+        if (idLower.Contains("mini") || idLower.Contains("small")) return true;
+
+        var match = Regex.Match(idLower, @"(\d+(?:\.\d+)?)\s*b");
+        if (!match.Success) return false;
+
+        return double.TryParse(
+            match.Groups[1].Value,
+            NumberStyles.Float,
+            CultureInfo.InvariantCulture,
+            out double size) && size <= 4.0;
     }
 }

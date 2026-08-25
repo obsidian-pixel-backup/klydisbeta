@@ -169,6 +169,9 @@ public partial class App : Application
         services.AddSingleton<Klydis.Core.Chat.IInferenceEngine>(sp => sp.GetRequiredService<InferenceEngine>());
         services.AddSingleton<ModelRegistry>();
         services.AddSingleton<ModelDiscoveryService>();
+        // Reassembles split GGUF part files into the full model binary on every launch, so a
+        // fresh clone (or a deleted/corrupt .gguf) self-heals before the model library scan.
+        services.AddSingleton<SplitModelRestorer>();
         services.AddSingleton<ModelQuantizerService>();
         services.AddSingleton<System.Net.Http.HttpClient>();
         services.AddSingleton<HuggingFaceClient>();

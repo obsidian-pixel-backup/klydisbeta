@@ -37,8 +37,22 @@ public sealed record AgentContextSnapshot
                 + (Plan.CurrentTaskTitle != null ? $" - current: '{Plan.CurrentTaskTitle}'" : ""));
 
         if (Todos != null)
+        {
             sb.AppendLine($"  TODO: {Todos.Completed} completed, {Todos.Remaining} remaining"
                 + (Todos.Blocked > 0 ? $", {Todos.Blocked} blocked" : ""));
+            if (!string.IsNullOrWhiteSpace(Todos.CurrentTodoTitle))
+            {
+                string deps = string.IsNullOrWhiteSpace(Todos.CurrentTodoDependencies)
+                    ? string.Empty : $" (deps: {Todos.CurrentTodoDependencies})";
+                string verify = string.IsNullOrWhiteSpace(Todos.CurrentTodoVerification)
+                    ? string.Empty : $" [verify: {Todos.CurrentTodoVerification}]";
+                sb.AppendLine($"    current: {Todos.CurrentTodoTitle}{deps}{verify}");
+            }
+            if (Todos.NextPending.Count > 0)
+                sb.AppendLine($"    next: {string.Join("; ", Todos.NextPending)}");
+            if (Todos.BlockedTodos.Count > 0)
+                sb.AppendLine($"    blocked: {string.Join("; ", Todos.BlockedTodos)}");
+        }
 
         if (Workspace != null)
         {
@@ -74,12 +88,20 @@ public sealed record PlanSummary(
     string? CurrentTaskTitle,
     IReadOnlyList<string> NextTaskIds);
 
-/// <summary>Compact TODO state for model context.</summary>
+/// <summary>
+/// Compact TODO state for model context. Carries only the slices the model needs to keep
+/// working — the current TODO (with its dependencies and verification requirement), the
+/// next few pending TODOs, and blocked TODOs — never the entire TODO database.
+/// </summary>
 public sealed record TodoSummary(
     int Completed,
     int Remaining,
     int Blocked,
-    string? CurrentTodoTitle);
+    string? CurrentTodoTitle,
+    IReadOnlyList<string> NextPending,
+    IReadOnlyList<string> BlockedTodos,
+    string? CurrentTodoDependencies,
+    string? CurrentTodoVerification);
 
 /// <summary>Compact current task state for model context.</summary>
 public sealed record CurrentTaskSummary(

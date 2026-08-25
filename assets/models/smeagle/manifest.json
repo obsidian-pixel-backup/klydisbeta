@@ -8,7 +8,7 @@
   "quantization": "Q8_0",
   "context": 262144,
   "default": true,
-  "bundled": true,
+  "bundled": false,
   "fileName": "smeagle-4b-v0.1-Q8_0.gguf",
   "sizeBytes": 4610580256,
   "sha256": "0bf49de687650b76d4280425741c69fc59da0949c9cc616abc2f238f96ec5e53",

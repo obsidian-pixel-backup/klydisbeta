@@ -496,6 +496,9 @@ public class ModelRegistry
 
             // Check for manifest.json in the same directory or parent directory
             string? manifestPath = Path.Combine(fileInfo.DirectoryName ?? "", "manifest.json");
+            string? manifestSha256 = null;
+            long? manifestSizeBytes = null;
+            string? manifestArchitecture = null;
             if (File.Exists(manifestPath))
             {
                 try
@@ -514,6 +517,18 @@ public class ModelRegistry
                     {
                         role = roleProp.GetString();
                     }
+                    if (root.TryGetProperty("sha256", out var shaProp) && !string.IsNullOrWhiteSpace(shaProp.GetString()))
+                    {
+                        manifestSha256 = shaProp.GetString()!;
+                    }
+                    if (root.TryGetProperty("sizeBytes", out var sizeProp) && sizeProp.TryGetInt64(out long declaredSize))
+                    {
+                        manifestSizeBytes = declaredSize;
+                    }
+                    if (root.TryGetProperty("architecture", out var archProp) && !string.IsNullOrWhiteSpace(archProp.GetString()))
+                    {
+                        manifestArchitecture = archProp.GetString()!;
+                    }
                 }
                 catch (Exception mex)
                 {
@@ -524,6 +539,25 @@ public class ModelRegistry
             {
                 displayName = "Smeagle 4B";
                 role = "Agent";
+            }
+
+            // Cheap manifest cross-checks — never trust the manifest blindly. A size or
+            // architecture mismatch flags a corrupt/truncated file or the wrong artifact at
+            // registration time without hashing the whole file (SHA-256 is left to the
+            // install/startup verifier, where multi-GB hashing is acceptable).
+            if (manifestSizeBytes is > 0 && manifestSizeBytes.Value != fileInfo.Length)
+            {
+                _logger?.LogWarning(
+                    "Model {File} is {Actual} bytes but its manifest declares {Expected} bytes; the file may be corrupt, truncated, or a different artifact.",
+                    filePath, fileInfo.Length, manifestSizeBytes.Value);
+            }
+            if (!string.IsNullOrWhiteSpace(manifestArchitecture) &&
+                metadata?.Architecture != null &&
+                !manifestArchitecture.Equals(metadata.Architecture, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger?.LogWarning(
+                    "Model {File} reports architecture '{Actual}' but its manifest declares '{Expected}'; the wrong artifact may be installed.",
+                    filePath, metadata.Architecture, manifestArchitecture);
             }
             
             var model = new ModelInfo(
@@ -541,7 +575,7 @@ public class ModelRegistry
                 Source: source,
                 InstalledAt: DateTime.UtcNow,
                 LastUsedAt: DateTime.UtcNow,
-                ChecksumSha256: null,
+                ChecksumSha256: manifestSha256,
                 Role: role,
                 RawChatTemplate: metadata?.RawChatTemplate
             );

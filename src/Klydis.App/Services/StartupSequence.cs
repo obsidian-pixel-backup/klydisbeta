@@ -35,6 +35,7 @@ public sealed class StartupSequence
         var phases = new (string Name, Func<Task> Work)[]
         {
             ("Preparing native engine", PrepareNativeEngineAsync),
+            ("Restoring bundled models", RestoreBundledModelsAsync),
             ("Scanning model library", ScanModelLibraryAsync),
             ("Initializing message store", InitMessageStoreAsync),
             ("Initializing RAG index", InitVectorStoreAsync),
@@ -116,6 +117,26 @@ public sealed class StartupSequence
                 try { NativeEngineManager.EnsureNativeLibraryConfigured(); } catch { }
             }
         }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reassembles split GGUF part files into the full model binary (e.g. Smeagle Q8_0, stored
+    /// as ~47 parts because GitHub rejects single files over 100 MB) before the model library
+    /// scan so the restored .gguf is discoverable. Idempotent: an existing valid model is left
+    /// untouched (cheap header-only check, no multi-GB hashing on the startup path); a missing
+    /// or corrupt model is rebuilt from its parts and verified against the manifest's pinned
+    /// SHA-256 before use. Runs off the UI thread with a watchdog so a slow disk can never
+    /// strand the splash.
+    /// </summary>
+    private async Task RestoreBundledModelsAsync()
+    {
+        var restorer = _services.GetRequiredService<SplitModelRestorer>();
+
+        // Reassembling ~4.3 GiB from parts is disk-bound; on a slow disk this can take a
+        // while, so budget the whole step. If it does not finish, the scan simply sees the
+        // model as missing and the next launch retries the restore.
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        await Task.Run(() => restorer.RestoreAsync(cts.Token)).ConfigureAwait(false);
     }
 
     private async Task ScanModelLibraryAsync()

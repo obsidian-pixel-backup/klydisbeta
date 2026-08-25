@@ -434,6 +434,29 @@ public class ChatEngine(
     public Klydis.Core.Tasks.AgentRuntime? AgentRuntime => _runtime;
 
     /// <summary>
+    /// The effective working-context budget for prompt construction: the loaded model
+    /// profile's <see cref="AgentModelProfile.HardContextBudget"/> when a profile is
+    /// declared, otherwise the raw model context size. The profile budget is what the
+    /// execution model is tuned for (Smeagle: 24,576); raw GGUF capacity (up to 262K) is
+    /// headroom, not a prompt budget. Returns the raw size when no model/profile is active
+    /// so tests and fallback paths keep the legacy behavior.
+    /// </summary>
+    private int GetEffectiveContextBudget()
+    {
+        int raw = (int)inferenceEngine.ContextSize;
+        int profileHard = CurrentModelProfile?.AgentProfile?.HardContextBudget ?? 0;
+        return ComputeEffectiveContextBudget(raw, profileHard);
+    }
+
+    /// <summary>
+    /// Pure budget math: the effective working context is the smaller of the raw model
+    /// context and the profile's declared hard budget (0 = no profile constraint). Exposed
+    /// for direct regression testing of the profile-budget enforcement.
+    /// </summary>
+    internal static int ComputeEffectiveContextBudget(int rawContext, int profileHardBudget)
+        => profileHardBudget > 0 ? Math.Min(rawContext, profileHardBudget) : rawContext;
+
+    /// <summary>
     /// Calculates the rolling compression threshold: when HISTORY tokens reach this, older
     /// context is summarized into WorldState. The threshold is a fraction of the budget that
     /// is actually AVAILABLE for history — total context minus the response headroom, the
@@ -450,7 +473,10 @@ public class ChatEngine(
     /// </summary>
     private int GetRollingCompressionThreshold()
     {
-        int contextSize = (int)inferenceEngine.ContextSize;
+        // Budget against the same effective context the prompt builder uses, so rolling
+        // compression fires inside the profile's working budget instead of the raw context
+        // (otherwise it would never engage before the strict truncation loop on large windows).
+        int contextSize = GetEffectiveContextBudget();
         // Mirror the response-headroom + safety-margin reservation the prompt builder uses
         // (see maxTotalPromptTokens below), so the budget math stays consistent.
         int reservedForResponse = contextSize switch
@@ -1962,7 +1988,13 @@ public class ChatEngine(
         var sysPromptManager = new SystemPromptManager();
 
         // Dynamic sliding context window calculation reserving response headroom and safety margin.
-        int totalContext = (int)inferenceEngine.ContextSize;
+        // The budget basis is the model profile's declared working context (Smeagle: 24,576)
+        // rather than the raw GGUF context capacity (up to 262K). Raw capacity is NOT a
+        // license to inject tokens — the observed 47K–61K prompts happened precisely because
+        // the loop budgeted against raw context and never consulted the profile's
+        // Recommended/HardContextBudget. Capping here makes the existing enforcement machinery
+        // (compact-prompt fallback, history trimming, strict truncation) honor the profile.
+        int totalContext = GetEffectiveContextBudget();
         int reservedForResponse = totalContext switch
         {
             <= 4096 => 1024,
@@ -2307,6 +2339,7 @@ public class ChatEngine(
                     workspaceRoot: toolExecutor.WorkspaceRoot,
                     artifactPaths: toolExecutor.GetSessionArtifactPaths(generatingSessionId),
                     evidence: !string.IsNullOrEmpty(CurrentTaskId) ? _runtime?.GetRunEvidence(CurrentTaskId) : null,
+                    todos: await toolExecutor.TodoManager.GetSessionTodosAsync(generatingSessionId),
                     currentTaskId: CurrentTaskId,
                     currentStep: currentObligationForTurn?.Title);
                 string snapshotText = snapshot.Format();
@@ -2622,6 +2655,22 @@ public class ChatEngine(
                 finalPromptTokens = inferenceEngine.IsModelLoaded ? inferenceEngine.GetTokenCount(prompt) : contextOrchestrator.EstimateTokens(prompt);
             }
         }
+
+        // Per-generation context accounting (P0 audit): every generation reports exactly where
+        // its tokens came from, so a 47K–61K prompt is explainable instead of a mystery. The
+        // system/history split mirrors the budget math above; dropped=true means the strict
+        // truncation loop had to evict history to fit the budget (and rolling compression
+        // follows).
+        logger.LogInformation(
+            "ContextCompiled: total={TotalTokens} system={SystemTokens} history={HistoryTokens} " +
+            "budget={PromptBudget} rawContext={RawContext} profileHardBudget={ProfileHardBudget} dropped={DroppedMessages}",
+            finalPromptTokens,
+            sysPromptTokens,
+            Math.Max(0, finalPromptTokens - sysPromptTokens),
+            maxTotalPromptTokens,
+            (int)inferenceEngine.ContextSize,
+            GetEffectiveContextBudget(),
+            hasDroppedMessages);
 
         // LONG-HORIZON CONTEXT BUDGET RECOVERY: the backward budget pass and/or the strict
         // truncation loop evicted history messages because prompt + history exceeded
