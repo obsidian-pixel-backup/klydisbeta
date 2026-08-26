@@ -83,10 +83,11 @@
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <!-- Bundled models: ships default/flagship models (e.g. Smeagle) directly with the
-       application distribution so Klydis works completely self-contained out-of-the-box. -->
+  <!-- Bundled model manifests: SplitModelRestorer and ModelDiscoveryService locate
+       the model binaries from dev repository root (FindDevRoot) and %USERPROFILE%\.klydis\models.
+       Only copy manifest.json metadata to avoid copying 15+ GB of GGUF/part binaries on build. -->
   <ItemGroup>
-    <Content Include="..\..\assets\models\**\*"
+    <Content Include="..\..\assets\models\**\manifest.json"
              Link="assets\models\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

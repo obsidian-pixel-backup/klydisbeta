@@ -233,17 +233,34 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
                 if (isHttps)
                 {
                     var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
-                    await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                    try
                     {
-                        TargetHost = host,
-                        EnabledSslProtocols = SslProtocols.None, // OS default policy
-                        ApplicationProtocols = new List<SslApplicationProtocol>
+                        await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
                         {
-                            SslApplicationProtocol.Http2,
-                            SslApplicationProtocol.Http11
-                        }
-                    }, ct).ConfigureAwait(false);
-                    return ssl;
+                            TargetHost = host,
+                            EnabledSslProtocols = SslProtocols.None, // OS default policy
+                            ApplicationProtocols = new List<SslApplicationProtocol>
+                            {
+                                SslApplicationProtocol.Http2,
+                                SslApplicationProtocol.Http11
+                            }
+                        }, ct).ConfigureAwait(false);
+                        return ssl;
+                    }
+                    catch
+                    {
+                        try { ssl.Dispose(); } catch { }
+                        var retrySocket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                        await retrySocket.ConnectAsync(ip, context.DnsEndPoint.Port, ct).ConfigureAwait(false);
+                        var retryStream = new NetworkStream(retrySocket, ownsSocket: true);
+                        var retrySsl = new SslStream(retryStream, leaveInnerStreamOpen: false);
+                        await retrySsl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                        {
+                            TargetHost = host,
+                            EnabledSslProtocols = SslProtocols.None
+                        }, ct).ConfigureAwait(false);
+                        return retrySsl;
+                    }
                 }
 
                 return stream;

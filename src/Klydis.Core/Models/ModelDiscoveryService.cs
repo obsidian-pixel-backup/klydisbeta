@@ -45,7 +45,22 @@ public class ModelDiscoveryService : IDisposable
         
         // Setup default scan paths
         ScanPaths.Add(_defaultModelsPath);
-        ScanPaths.Add(userHome); // Implicitly covers Documents, Downloads, Desktop when scanned recursively
+
+        // Targeted user model directories (avoid scanning entire user home root to prevent massive directory walks)
+        var userModelsDir = Path.Combine(userHome, "models");
+        if (Directory.Exists(userModelsDir)) ScanPaths.Add(userModelsDir);
+
+        var downloadsDir = Path.Combine(userHome, "Downloads");
+        if (Directory.Exists(downloadsDir)) ScanPaths.Add(downloadsDir);
+
+        var documentsModelsDir = Path.Combine(userHome, "Documents", "models");
+        if (Directory.Exists(documentsModelsDir)) ScanPaths.Add(documentsModelsDir);
+
+        var lmStudioDir = Path.Combine(userHome, ".cache", "lm-studio", "models");
+        if (Directory.Exists(lmStudioDir)) ScanPaths.Add(lmStudioDir);
+
+        var ollamaDir = Path.Combine(userHome, ".ollama", "models");
+        if (Directory.Exists(ollamaDir)) ScanPaths.Add(ollamaDir);
 
         // Bundled model paths next to application binary or in dev repository
         string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -138,10 +153,21 @@ public class ModelDiscoveryService : IDisposable
             var directories = Directory.EnumerateDirectories(path);
             foreach (var dir in directories)
             {
-                // Skip common system or hidden directories to avoid UnauthAccessException and loops
+                // Skip common system, hidden, cache, and build directories
                 var dirInfo = new DirectoryInfo(dir);
                 if (dirInfo.Attributes.HasFlag(FileAttributes.Hidden) || dirInfo.Attributes.HasFlag(FileAttributes.System))
                     continue;
+
+                var name = dirInfo.Name;
+                if (name.StartsWith(".") ||
+                    name.Equals("AppData", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("obj", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("$Recycle.Bin", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
                 ScanDirectoryRecursive(dir, maxDepth, currentDepth + 1, discoveredFiles);
             }

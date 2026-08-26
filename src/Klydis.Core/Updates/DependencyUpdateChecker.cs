@@ -77,7 +77,7 @@ public static class DependencyUpdateChecker
     private static readonly (string Id, string Version)[] Manifest =
     {
         // Klydis.Core
-        ("HtmlAgilityPack", "1.12.4"),
+        ("HtmlAgilityPack", "1.13.0"),
         ("ReverseMarkdown", "6.2.1"),
         ("LLamaSharp.Backend.Cpu", "0.27.0"),
         ("LLamaSharp.Backend.Cuda12", "0.27.0"),
@@ -100,7 +100,7 @@ public static class DependencyUpdateChecker
         // Tests
         ("Microsoft.NET.Test.Sdk", "18.9.0"),
         ("NUnit", "4.6.1"),
-        ("NUnit3TestAdapter", "6.2.0")
+        ("NUnit3TestAdapter", "6.3.0")
     };
 
     private static readonly string UpdatesStateDir = Path.Combine(

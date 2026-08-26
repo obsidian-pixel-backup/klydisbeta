@@ -135,6 +135,13 @@ public static class WorkspaceBoundaryValidator
         string rootName = Path.GetFileName(cleanRoot);
         if (string.IsNullOrEmpty(rootName)) return requestedPath;
 
+        if (requestedPath.Contains("session-default", StringComparison.OrdinalIgnoreCase))
+        {
+            int idx = requestedPath.IndexOf("session-default", StringComparison.OrdinalIgnoreCase);
+            string rel = requestedPath.Substring(idx + "session-default".Length).TrimStart('/', '\\');
+            return Path.Combine(cleanRoot, rel);
+        }
+
         if (requestedPath.Contains("DEVELOPER Project", StringComparison.OrdinalIgnoreCase))
         {
             int idx = requestedPath.IndexOf(rootName, StringComparison.OrdinalIgnoreCase);

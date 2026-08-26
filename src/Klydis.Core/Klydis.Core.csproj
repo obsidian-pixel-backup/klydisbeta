@@ -18,7 +18,7 @@
          llama.dll to the latest llama.cpp release (e.g. minicpm5 tokenizer support).
          The backend packages below are the bundled baseline; the app's native
          auto-updater (NativeEngineManager) overrides them from %USERPROFILE%\.klydis\native\. -->
-    <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.13.0" />
     <ProjectReference Include="..\..\third_party\LLamaSharp\LLama\LLamaSharp.csproj" />
     <PackageReference Include="LLamaSharp.Backend.Cuda12" Version="0.27.0" />
     <PackageReference Include="LLamaSharp.Backend.Vulkan" Version="0.27.0" />

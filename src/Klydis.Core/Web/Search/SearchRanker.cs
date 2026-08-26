@@ -56,14 +56,15 @@ public static class SearchRanker
 
         foreach (var term in terms)
         {
-            if (titleLower.Contains(term)) score += 5.0;
-            if (snippetLower.Contains(term)) score += 2.0;
-            if (domainLower.Contains(term)) score += 3.0;
+            if (term.Length <= 2) continue; // skip short stop words
+            if (titleLower.Contains(term)) score += 8.0;
+            if (snippetLower.Contains(term)) score += 4.0;
+            if (domainLower.Contains(term)) score += 5.0;
         }
 
         if (HighAuthorityDomains.Contains(result.Domain))
         {
-            score += 4.0;
+            score += 1.0;
         }
 
         if (!string.IsNullOrEmpty(result.Snippet) && result.Snippet != "No Snippet" && result.Snippet.Length > 40)

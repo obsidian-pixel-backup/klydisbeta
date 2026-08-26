@@ -3420,17 +3420,32 @@ public class ChatEngine(
                     var matches = _recentTools.Where(x => x.ToolName == req.Name && x.ArgsHash == argsHash).ToList();
                     var matchCount = matches.Count;
 
-                    // Differentiate thresholds for chunking/read tools vs state-modifying tools
+                    // Differentiate thresholds for chunking/read/search/telemetry tools vs state-modifying tools
                     bool isReadTool = req.Name.Equals("read_file", StringComparison.OrdinalIgnoreCase) ||
                                      req.Name.Equals("view_file", StringComparison.OrdinalIgnoreCase) ||
                                      req.Name.Equals("list_directory", StringComparison.OrdinalIgnoreCase) ||
                                      req.Name.Equals("list_dir", StringComparison.OrdinalIgnoreCase) ||
                                      req.Name.Equals("grep_search", StringComparison.OrdinalIgnoreCase) ||
-                                     req.Name.Equals("search_files", StringComparison.OrdinalIgnoreCase);
+                                     req.Name.Equals("search_files", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("search_web", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("crawl_url", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("find_on_page", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("get_section", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("get_links", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("get_table", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("get_metadata", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("get_system_info", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("system_report", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.Equals("task_progress", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.StartsWith("system_", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.StartsWith("hardware.", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.StartsWith("os.", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.StartsWith("git.", StringComparison.OrdinalIgnoreCase) ||
+                                     req.Name.StartsWith("ai.", StringComparison.OrdinalIgnoreCase);
 
-                    int tier1Threshold = isReadTool ? 5 : 2;   // Warning on 6th call for read tools, 3rd for others
-                    int tier2Threshold = isReadTool ? 8 : 3;   // Hard block on 9th call for read tools, 4th for others
-                    int tier3Threshold = isReadTool ? 12 : 5;  // Override on 13th call for read tools, 6th for others
+                    int tier1Threshold = isReadTool ? 6 : 3;   // Warning on 7th call for read tools, 4th for others
+                    int tier2Threshold = isReadTool ? 10 : 5;  // Hard block on 11th call for read tools, 6th for others
+                    int tier3Threshold = isReadTool ? 15 : 8;  // Override on 16th call for read tools, 9th for others
 
                     if (matchCount >= tier1Threshold)
                     {

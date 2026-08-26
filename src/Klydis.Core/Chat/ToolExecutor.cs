@@ -506,8 +506,8 @@ public class ToolExecutor(
         }, false),
         new ToolDefinition("task_progress", "Reports intermediate progress toward the current goal during autonomous multi-turn execution.", new List<ToolParameter>
         {
-            new("percent", "integer", "Estimated percentage of goal completion (0-100)", true),
-            new("status", "string", "Brief description of current progress and next steps", true)
+            new("percent", "integer", "Estimated percentage of goal completion (0-100)", false),
+            new("status", "string", "Brief description of current progress and next steps", false)
         }, false),
         new ToolDefinition("plan", "Maintains the agent's execution plan and todo list for the current goal. The plan is governed by the runtime schema, persisted, and re-injected into your context every turn. Use action 'create'/'set_plan' with 'items' or 'tasks' to establish the concrete plan from scratch, 'add' to append tasks, 'patch' to mutate tasks/dependencies/revisions, 'complete' to mark a task done (match by number, ID, or text), 'remove' to delete a task, 'show' to review the current plan, and 'clear' to reset it.", new List<ToolParameter>
         {

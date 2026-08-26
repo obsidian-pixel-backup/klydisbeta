@@ -241,7 +241,7 @@ public static class ActionGate
             var val = FindArgumentValue(request.Arguments, p.Name);
             if (val == null) continue;
 
-            if (val is string strVal && ((strVal.StartsWith("<") && strVal.EndsWith(">")) || (strVal.StartsWith("[") && strVal.EndsWith("]"))) && strVal.Length > 2)
+            if (val is string strVal && IsPlaceholderTemplate(strVal))
             {
                 typeErrors.Add($"{p.Name} (received placeholder template '{strVal}' — provide a real resolved value)");
             }
@@ -386,6 +386,51 @@ public static class ActionGate
     /// </summary>
     private static readonly Dictionary<string, Dictionary<string, string[]>> ArgumentAliases = new(StringComparer.OrdinalIgnoreCase)
     {
+        ["plan"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["items"] = new[] { "tasks", "task", "plan", "todo", "list", "content", "steps" },
+            ["item"] = new[] { "task", "id", "task_id", "number", "index" },
+            ["action"] = new[] { "operation", "type", "mode" }
+        },
+        ["task_progress"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["status"] = new[] { "message", "summary", "progress", "note", "details", "description" },
+            ["percent"] = new[] { "percentage", "progress", "pct" }
+        },
+        ["task_complete"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["summary"] = new[] { "message", "result", "status", "notes", "description" }
+        },
+        ["read_file"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["path"] = new[] { "file", "file_path", "filename", "filepath", "target" }
+        },
+        ["write_file"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["path"] = new[] { "file", "file_path", "filename", "filepath", "target" },
+            ["content"] = new[] { "text", "body", "code", "data" }
+        },
+        ["edit_file"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["path"] = new[] { "file", "file_path", "filename", "filepath", "target" }
+        },
+        ["list_directory"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["path"] = new[] { "directory", "dir", "folder", "target", "path_to_dir" }
+        },
+        ["run_command"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["command"] = new[] { "cmd", "script", "code", "exec", "terminal_command" },
+            ["shell"] = new[] { "terminal", "interpreter" }
+        },
+        ["search_web"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["query"] = new[] { "q", "search", "term", "pattern", "keywords" }
+        },
+        ["crawl_url"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["url"] = new[] { "link", "uri", "target", "address", "document" }
+        },
         ["search_files"] = new(StringComparer.OrdinalIgnoreCase)
         {
             ["pattern"] = new[] { "query", "text", "term" }
@@ -615,5 +660,40 @@ public static class ActionGate
             System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(sorted))))
             [..12].ToLowerInvariant();
+    }
+
+    private static bool IsPlaceholderTemplate(string strVal)
+    {
+        if (string.IsNullOrWhiteSpace(strVal) || strVal.Length < 3) return false;
+        var trimmed = strVal.Trim();
+
+        // 1. Valid JSON arrays or objects are real structured values, NEVER placeholders
+        if ((trimmed.StartsWith('[') && trimmed.EndsWith(']')) || (trimmed.StartsWith('{') && trimmed.EndsWith('}')))
+        {
+            if (trimmed.Contains(':') || trimmed.Contains(',') || trimmed.Contains('"'))
+            {
+                return false;
+            }
+        }
+
+        // 2. Angle-bracket placeholders like <drive_path>, <file>, <query>, <your_key>
+        if (trimmed.StartsWith('<') && trimmed.EndsWith('>') && !trimmed.Contains('\n') && !trimmed.Contains(' ') && !trimmed.Contains('/'))
+        {
+            return true;
+        }
+
+        // 3. Square-bracket placeholders like [drive_path], [insert_query], [TODO], [path]
+        if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+        {
+            var inner = trimmed.Substring(1, trimmed.Length - 2).Trim();
+            if (inner.Length > 0 && !inner.Contains('\n') && !inner.Contains('"') && !inner.Contains('{') && !inner.Contains('}') && !inner.Contains(','))
+            {
+                if (!inner.Contains(' ') || inner.StartsWith("your_", StringComparison.OrdinalIgnoreCase) || inner.StartsWith("insert_", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

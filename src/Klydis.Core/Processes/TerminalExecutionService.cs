@@ -331,6 +331,11 @@ public sealed class TerminalExecutionService
             string rawArgs = matchStartFlags.Groups[2].Value;
             sanitizedCmd = $"Start-Process -FilePath \"{appName}\" -ArgumentList {rawArgs}";
         }
+
+        // De-conflict common PowerShell built-in aliases (curl, wget, r) so CLI utilities execute natively
+        var prelude = "if (Test-Path Alias:curl) { Remove-Item Alias:curl -Force -ErrorAction SilentlyContinue }; if (Test-Path Alias:wget) { Remove-Item Alias:wget -Force -ErrorAction SilentlyContinue }; if (Test-Path Alias:r) { Remove-Item Alias:r -Force -ErrorAction SilentlyContinue };\n";
+        sanitizedCmd = prelude + sanitizedCmd;
+
         var encodedCmd = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitizedCmd));
 
         return new ProcessStartInfo
