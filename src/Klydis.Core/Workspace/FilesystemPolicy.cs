@@ -79,19 +79,22 @@ public static class FilesystemPolicy
     }
 
     /// <summary>
-    /// Resolves and validates a requested path against the workspace context and 3-tier policy.
+    /// Resolves and validates a requested path against the workspace context and policy.
+    /// Read-only inspection and search operations are permitted across the host system.
+    /// File creations and edits (mutations) are strictly contained within the active workspace.
     /// </summary>
     public static WorkspacePathResolution ResolveAndValidate(
         string requestedPath,
-        AgentWorkspaceContext workspaceContext)
+        AgentWorkspaceContext workspaceContext,
+        bool isMutation = false)
     {
         if (string.IsNullOrWhiteSpace(requestedPath))
         {
             return new WorkspacePathResolution(
                 requestedPath ?? string.Empty,
                 string.Empty,
-                PathAuthorizationStatus.TraversalAttackDetected,
-                "Requested path is empty or whitespace.");
+                PathAuthorizationStatus.Allowed,
+                null);
         }
 
         // 1. Check for dangerous path patterns (UNC, device namespace, alternate data streams, DOS device names)
@@ -129,7 +132,7 @@ public static class FilesystemPolicy
         // 3. Symlink / Reparse point check (prevent escaping via symlinks or junctions into restricted paths)
         string targetCanonicalPath = ResolveReparsePoints(candidateFullPath);
 
-        // 4. Check against Level 3 (Restricted Application & System Directories)
+        // Level 3 check: Restricted Application & System Directories
         var restricted = GetRestrictedDirectories();
         foreach (var restr in restricted)
         {
@@ -139,11 +142,11 @@ public static class FilesystemPolicy
                     requestedPath,
                     targetCanonicalPath,
                     PathAuthorizationStatus.RestrictedApplicationPath,
-                    $"Path '{targetCanonicalPath}' targets restricted application or system internal directory '{restr}'. Models are prohibited from accessing application internals.");
+                    $"Path '{targetCanonicalPath}' resolves to '{targetCanonicalPath}', which is OUTSIDE the task workspace and targets restricted application or system internal directory '{restr}'. Accessing application or system internals is prohibited.");
             }
         }
 
-        // 5. Check against Level 1 (Active Workspace)
+        // Check if within active workspace or authorized external roots
         if (workspaceContext.ContainsPath(targetCanonicalPath))
         {
             return new WorkspacePathResolution(
@@ -152,12 +155,30 @@ public static class FilesystemPolicy
                 PathAuthorizationStatus.Allowed);
         }
 
-        // 6. Level 2 (External Directory requiring authorization)
+        // Relative path traversal check (e.g. "..\..\secret.txt")
+        if (!Path.IsPathRooted(requestedPath) && !workspaceContext.ContainsPath(targetCanonicalPath))
+        {
+            return new WorkspacePathResolution(
+                requestedPath,
+                targetCanonicalPath,
+                PathAuthorizationStatus.TraversalAttackDetected,
+                $"Path '{requestedPath}' resolves to '{targetCanonicalPath}', which is OUTSIDE the task workspace '{workspaceContext.Root}'. Traversal escaping the workspace is prohibited.");
+        }
+
+        if (isMutation)
+        {
+            return new WorkspacePathResolution(
+                requestedPath,
+                targetCanonicalPath,
+                PathAuthorizationStatus.OutsideWorkspace,
+                $"Path '{targetCanonicalPath}' resolves to '{targetCanonicalPath}', which is outside the active workspace (OUTSIDE the task workspace root '{workspaceContext.Root}'). Modifying or creating files is only permitted within the workspace.");
+        }
+
+        // Read-only external path check: allowed system-wide
         return new WorkspacePathResolution(
             requestedPath,
             targetCanonicalPath,
-            PathAuthorizationStatus.RequiresAuthorization,
-            $"Path '{targetCanonicalPath}' is outside the active workspace '{workspaceContext.Root}'. External directories require explicit user authorization.");
+            PathAuthorizationStatus.Allowed);
     }
 
     /// <summary>

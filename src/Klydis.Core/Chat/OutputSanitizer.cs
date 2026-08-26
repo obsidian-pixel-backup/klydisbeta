@@ -29,6 +29,20 @@ public static class OutputSanitizer
         @"<\|?tool_call\|?>[\s\S]*?(?:</\|?tool_call\|?>|<\|/tool_call\|>|$)|\[TOOL_CALLS\][\s\S]*?(?:\[/TOOL_CALLS\]|$)",
         RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private static readonly string[] ThinkCloseTags = new[]
+    {
+        "</think>", "</|think|>", "<|/think|>", "</thought>", "</|thought|>", "<|/thought|>",
+        "[/THINK]", "[/THOUGHT]", "</antml:thinking>", "{/antml:thinking}", "</antml:thinking_mode>",
+        "{/antml:thinking_mode}", "</thinking_mode>", "{/thinking_mode}", "</thinking>"
+    };
+
+    private static readonly string[] ThinkOpenTags = new[]
+    {
+        "<think>", "<|think|>", "<thought>", "<|thought|>",
+        "[THINK]", "[THOUGHT]", "<antml:thinking>", "{antml:thinking}", "<antml:thinking_mode>",
+        "{antml:thinking_mode}", "<thinking_mode>", "{thinking_mode}", "<thinking>"
+    };
+
     /// <summary>
     /// Strips antml system markup, special prompt tokens, and raw system tags from text.
     /// </summary>
@@ -64,7 +78,39 @@ public static class OutputSanitizer
     {
         if (string.IsNullOrEmpty(text)) return string.Empty;
 
-        string clean = ThinkingBlockRegex.Replace(text, "");
+        string current = text;
+        // Check for prompt-opened thinking block (close tag with no prior open tag)
+        int earliestClose = -1;
+        int closeLen = 0;
+        foreach (var close in ThinkCloseTags)
+        {
+            int idx = current.IndexOf(close, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0 && (earliestClose < 0 || idx < earliestClose))
+            {
+                earliestClose = idx;
+                closeLen = close.Length;
+            }
+        }
+
+        if (earliestClose >= 0)
+        {
+            bool hasOpenBefore = false;
+            foreach (var open in ThinkOpenTags)
+            {
+                int openIdx = current.IndexOf(open, StringComparison.OrdinalIgnoreCase);
+                if (openIdx >= 0 && openIdx < earliestClose)
+                {
+                    hasOpenBefore = true;
+                    break;
+                }
+            }
+            if (!hasOpenBefore)
+            {
+                current = current.Substring(earliestClose + closeLen);
+            }
+        }
+
+        string clean = ThinkingBlockRegex.Replace(current, "");
         clean = RawThinkingTagsRegex.Replace(clean, "");
         return clean.Trim();
     }
@@ -76,8 +122,7 @@ public static class OutputSanitizer
     {
         if (string.IsNullOrEmpty(text)) return string.Empty;
 
-        string clean = ThinkingBlockRegex.Replace(text, "");
-        clean = RawThinkingTagsRegex.Replace(clean, "");
+        string clean = StripThinkingBlocks(text);
         clean = AntmlTagRegex.Replace(clean, "");
         clean = SpecialTokenRegex.Replace(clean, "");
         return clean.Trim();
@@ -105,6 +150,43 @@ public static class OutputSanitizer
             thinking = SpecialTokenRegex.Replace(thinking, "").Trim();
 
             remaining = text.Remove(match.Index, match.Length).Trim();
+        }
+        else
+        {
+            // Prompt-opened thinking block check (close tag with no prior open tag)
+            int earliestClose = -1;
+            int closeLen = 0;
+            foreach (var close in ThinkCloseTags)
+            {
+                int idx = text.IndexOf(close, StringComparison.OrdinalIgnoreCase);
+                if (idx >= 0 && (earliestClose < 0 || idx < earliestClose))
+                {
+                    earliestClose = idx;
+                    closeLen = close.Length;
+                }
+            }
+
+            if (earliestClose >= 0)
+            {
+                bool hasOpenBefore = false;
+                foreach (var open in ThinkOpenTags)
+                {
+                    int openIdx = text.IndexOf(open, StringComparison.OrdinalIgnoreCase);
+                    if (openIdx >= 0 && openIdx < earliestClose)
+                    {
+                        hasOpenBefore = true;
+                        break;
+                    }
+                }
+
+                if (!hasOpenBefore)
+                {
+                    thinking = text.Substring(0, earliestClose).Trim();
+                    thinking = AntmlTagRegex.Replace(thinking, "").Trim();
+                    thinking = SpecialTokenRegex.Replace(thinking, "").Trim();
+                    remaining = text.Substring(earliestClose + closeLen).Trim();
+                }
+            }
         }
 
         string cleanRemaining = AntmlTagRegex.Replace(remaining, "");

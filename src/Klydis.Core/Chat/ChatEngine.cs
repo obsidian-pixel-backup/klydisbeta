@@ -454,7 +454,10 @@ public class ChatEngine(
     /// for direct regression testing of the profile-budget enforcement.
     /// </summary>
     internal static int ComputeEffectiveContextBudget(int rawContext, int profileHardBudget)
-        => profileHardBudget > 0 ? Math.Min(rawContext, profileHardBudget) : rawContext;
+    {
+        int effectiveLimit = profileHardBudget > 0 ? profileHardBudget : 32768;
+        return Math.Min(rawContext, effectiveLimit);
+    }
 
     /// <summary>
     /// Calculates the rolling compression threshold: when HISTORY tokens reach this, older
@@ -471,14 +474,14 @@ public class ChatEngine(
     /// assumed. Fires when history fills ~75% of its budget — early enough that truncation
     /// (which drops history without summarizing) rarely has to engage.
     /// </summary>
-    private int GetRollingCompressionThreshold()
+    /// <summary>
+    /// Computes the rolling compression threshold and the recent tokens to preserve.
+    /// Fires when history approaches the working history budget and preserves a smaller recent tail
+    /// so that compression consistently has real overflow messages to summarize.
+    /// </summary>
+    private (int RollingThreshold, int KeepRecentTokens) GetRollingCompressionBudgets()
     {
-        // Budget against the same effective context the prompt builder uses, so rolling
-        // compression fires inside the profile's working budget instead of the raw context
-        // (otherwise it would never engage before the strict truncation loop on large windows).
         int contextSize = GetEffectiveContextBudget();
-        // Mirror the response-headroom + safety-margin reservation the prompt builder uses
-        // (see maxTotalPromptTokens below), so the budget math stays consistent.
         int reservedForResponse = contextSize switch
         {
             <= 4096 => 1024,
@@ -491,13 +494,26 @@ public class ChatEngine(
         long sysTokens = Interlocked.Read(ref _lastSystemPromptTokens);
         if (sysTokens <= 0)
         {
-            // No prompt has been built yet this process; assume a typical system prompt size.
             sysTokens = Math.Max(512, (int)(contextSize * 0.25));
         }
 
         int historyBudget = Math.Max(1024, contextSize - reservedForResponse - safetyMargin - (int)sysTokens);
-        return Math.Clamp((int)(historyBudget * 0.75), 2048, 1000000);
+
+        // Fire when history fills ~80% of budget
+        int threshold = Math.Max(1024, (int)(historyBudget * 0.80));
+
+        // Keep ~40% of the history budget as recent tail so there is always compressible overflow
+        int keepRecent = Math.Max(512, (int)(historyBudget * 0.40));
+
+        if (threshold <= keepRecent + 256)
+        {
+            threshold = keepRecent + 512;
+        }
+
+        return (threshold, keepRecent);
     }
+
+    private int GetRollingCompressionThreshold() => GetRollingCompressionBudgets().RollingThreshold;
 
     public ModelMessageQueue? MessageQueue { get; set; } = messageQueue;
     public string SelectedPersonality { get; set; } = "Default";
@@ -1867,16 +1883,17 @@ public class ChatEngine(
             }
 
             // Execute automated rolling compression when history tokens reach the threshold.
-            int rollingThreshold = GetRollingCompressionThreshold();
+            var (rollingThreshold, rollingKeepRecent) = GetRollingCompressionBudgets();
             int estimatedHistoryTokens = activeHistory.Sum(TokensOf);
-            if (estimatedHistoryTokens >= rollingThreshold)
+            if (activeHistory.Count > 2 && estimatedHistoryTokens >= rollingThreshold && contextOrchestrator.HasCompressibleOverflow(activeHistory, rollingThreshold, rollingKeepRecent))
             {
                 lastTurnActivityUtc = DateTime.UtcNow;
                 yield return new ChatStreamEvent(ChatStreamEventType.MemorySummarizing, "🧠 Summarizing conversation context and saving to memory...");
-                int keepRecent = Math.Clamp((int)(inferenceEngine.ContextSize * 0.25), 2048, 262144);
                 logger.LogInformation("Active history tokens ({Tokens}) reached rolling compression threshold ({Threshold}). Compressing older context into WorldState. Keeping {KeepRecent} recent tokens.",
-                    estimatedHistoryTokens, rollingThreshold, keepRecent);
-                bool compressed = await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, rollingThreshold, keepRecent);
+                    estimatedHistoryTokens, rollingThreshold, rollingKeepRecent);
+
+                // Fully block execution until the background context summarization and WorldState persistence finish
+                bool compressed = await contextOrchestrator.PerformRollingCompressionAsync(activeHistory, generatingSessionId, rollingThreshold, rollingKeepRecent);
                 lastTurnActivityUtc = DateTime.UtcNow;
                 if (compressed && CurrentSessionId == generatingSessionId)
                 {
@@ -2501,6 +2518,7 @@ public class ChatEngine(
         {
             if (i == currentUserIndex) continue;
             var msg = activeHistory[i];
+            if (msg.Role == ChatRole.System) continue;
             int msgTokens = TokensOf(msg);
             
             // If an individual tool result message is excessively long (> 3000 chars), create a
@@ -3216,7 +3234,7 @@ public class ChatEngine(
                         }
                     ));
                 }
-                else if (Regex.IsMatch(visibleResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
+                else if (!toolsDisabled && !rescueTriggered && Regex.IsMatch(visibleResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
                 {
                     _agentTrace.Record(AgentTraceEvent.Create(
                         TraceEventType.OutputParseFailed,
@@ -3239,7 +3257,7 @@ public class ChatEngine(
             // After repeated malformed tool calls, block execution entirely and force a direct
             // answer. The notice is injected once; subsequent iterations with tool tags just
             // re-generate until the model answers plainly (or the iteration budget ends).
-            if (toolsSuspendedForTurn &&
+            if (!toolsDisabled && !rescueTriggered && toolsSuspendedForTurn &&
                 (toolCallRequests.Count > 0 || Regex.IsMatch(visibleResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase)))
             {
                 if (!suspensionNoticeSent)
@@ -4055,7 +4073,7 @@ public class ChatEngine(
                     break;
                 }
             }
-            else if (Regex.IsMatch(visibleResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
+            else if (!toolsDisabled && !rescueTriggered && Regex.IsMatch(visibleResponse, @"<\|?tool_call\|?>", RegexOptions.IgnoreCase))
             {
                 // Assistant attempted a tool call tag but parsing produced 0 valid requests.
                 // Escalate the feedback across attempts instead of repeating the same error, so
@@ -4138,14 +4156,18 @@ public class ChatEngine(
                 // the plan state decide what counts — a text-only response with open steps is
                 // repaired so the model must execute instead of narrate.
                 bool refusalLike = ToolActionParser.IsActionRefusal(visibleResponse);
-                bool openStepsRemain;
+                bool openStepsRemain = false;
+                bool hasUnfinishedPlan = false;
                 try
                 {
-                    openStepsRemain = toolExecutor.GetSessionPlanEntries(generatingSessionId).Any(e => !e.Done);
+                    var planEntries = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                    openStepsRemain = planEntries.Any(e => !e.Done);
+                    hasUnfinishedPlan = openStepsRemain || planEntries.Count == 0;
                 }
                 catch (Exception)
                 {
                     openStepsRemain = false;
+                    hasUnfinishedPlan = false;
                 }
                 // STEP-AWARE NO-ACTION DETECTION (P1.8): a text-only response is a protocol
                 // failure ONLY on steps whose contract demands an executable action. Steps whose
@@ -4180,7 +4202,7 @@ public class ChatEngine(
                 bool openStepExecutionMissing = openStepsRemain && currentStepForTurn != null &&
                     Klydis.Core.Tasks.AgentSupervisor.RequiresExecution(currentStepForTurn.ExpectedActionKind) &&
                     executedToolsThisTurn.Count == 0;
-                bool goalModeNoAction = isGoalMode && (refusalLike || (openStepsRemain && (!stepProducesText || !substantiveDeliverable)));
+                bool goalModeNoAction = (isGoalMode || mode == InteractionMode.Autonomous) && (refusalLike || (hasUnfinishedPlan && (!stepProducesText || !substantiveDeliverable)));
 
                 bool noActionProducedThisTurn = !visibleEmpty && !toolsSuspendedForTurn && !rescueTriggered &&
                     (hallucinatedExecution || unverifiedCompletionClaim || goalModeNoAction || openStepExecutionMissing);
@@ -4741,17 +4763,22 @@ public class ChatEngine(
                     {
                         if (openStepsRemain && currentStepForTurn != null)
                         {
-                            await toolExecutor.AdvancePlanItemDoneAsync(generatingSessionId, currentStepForTurn.Title);
-                            var remainingPlan = toolExecutor.GetSessionPlanEntries(generatingSessionId);
-                            var nextStep = remainingPlan.FirstOrDefault(e => !e.Done);
-                            if (nextStep != null)
+                            bool requiresExecution = Klydis.Core.Tasks.AgentSupervisor.RequiresExecution(currentStepForTurn.ExpectedActionKind);
+                            bool executedAny = executedToolsThisTurn.Count > 0;
+                            if (!requiresExecution || executedAny)
                             {
-                                logger.LogInformation("Autonomous loop auto-advancing from completed step '{Current}' to next step '{Next}'.",
-                                    currentStepForTurn.Title, nextStep.Text);
-                                var advanceMsg = $"[Autonomous Execution: Step '{currentStepForTurn.Title}' completed. Proceeding immediately to Next Step: '{nextStep.Text}'. Reason independently, execute the required tools, and continue building the deliverable.]";
-                                AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, advanceMsg), generatingSessionId);
-                                yield return new ChatStreamEvent(ChatStreamEventType.Error, $"✔ Step completed — auto-advancing to: {nextStep.Text}…");
-                                continue;
+                                await toolExecutor.AdvancePlanItemDoneAsync(generatingSessionId, currentStepForTurn.Title);
+                                var remainingPlan = toolExecutor.GetSessionPlanEntries(generatingSessionId);
+                                var nextStep = remainingPlan.FirstOrDefault(e => !e.Done);
+                                if (nextStep != null)
+                                {
+                                    logger.LogInformation("Autonomous loop auto-advancing from completed step '{Current}' to next step '{Next}'.",
+                                        currentStepForTurn.Title, nextStep.Text);
+                                    var advanceMsg = $"[Autonomous Execution: Step '{currentStepForTurn.Title}' completed. Proceeding immediately to Next Step: '{nextStep.Text}'. Reason independently, execute the required tools, and continue building the deliverable.]";
+                                    AddToSessionHistory(activeHistory, new ChatMessage(ChatRole.Runtime, advanceMsg), generatingSessionId);
+                                    yield return new ChatStreamEvent(ChatStreamEventType.Error, $"✔ Step completed — auto-advancing to: {nextStep.Text}…");
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -5088,17 +5115,14 @@ public class ChatEngine(
             return true;
         }
 
-        // M2: 4. Mid-sentence cutoff — no terminal punctuation or closing bracket on final non-empty line
+        // M2: 4. Mid-sentence cutoff — last char is a letter or digit, NOT terminating punctuation
         var lastNonEmpty = cleanTrimmed.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.TrimEnd();
         if (!string.IsNullOrEmpty(lastNonEmpty) && lastNonEmpty.Length > 20)
         {
             char lastChar = lastNonEmpty[^1];
-            // Ends with a word char or comma/colon — likely truncated mid-sentence
-            if (char.IsLetterOrDigit(lastChar) || lastChar == ',' || lastChar == ':')
+            if (char.IsLetterOrDigit(lastChar) || lastChar == ',' || lastChar == ':' || lastChar == '+' || lastChar == '=')
             {
-                // But NOT if it's a short code snippet, URL, or identifier-like token
-                bool looksLikeProse = lastNonEmpty.Contains(' ');
-                if (looksLikeProse) return true;
+                return true;
             }
         }
 

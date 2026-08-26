@@ -18,12 +18,18 @@ namespace Klydis.Core.Tasks;
 /// </summary>
 public static class WorkspaceBoundaryValidator
 {
-    /// <summary>Tools whose path arguments are subject to containment.</summary>
-    private static readonly HashSet<string> PathTools = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>Tools that mutate the filesystem — strictly contained within the workspace.</summary>
+    private static readonly HashSet<string> MutationTools = new(StringComparer.OrdinalIgnoreCase)
     {
-        "read_file", "view_file", "write_file", "edit_file", "replace_lines",
-        "apply_patch", "structural_replace", "str_replace",
-        "list_directory", "list_dir", "search_files", "index_folder_rag"
+        "write_file", "edit_file", "replace_lines", "str_replace", "replace_text",
+        "apply_patch", "structural_replace", "delete_file"
+    };
+
+    /// <summary>Tools that perform read-only inspection, search, or listing — allowed system-wide.</summary>
+    private static readonly HashSet<string> ReadOnlyInspectionTools = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "read_file", "view_file", "list_directory", "list_dir",
+        "search_files", "search_dir", "find_files", "file_exists", "index_folder_rag"
     };
 
     /// <summary>Tools whose working directory argument is subject to containment.</summary>
@@ -39,9 +45,17 @@ public static class WorkspaceBoundaryValidator
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
     };
 
-    /// <summary>True when the tool's path arguments should be contained.</summary>
+    /// <summary>True when the tool mutates files and must be contained inside the workspace.</summary>
+    public static bool IsMutationTool(string? toolName)
+        => !string.IsNullOrWhiteSpace(toolName) && MutationTools.Contains(toolName);
+
+    /// <summary>True when the tool performs read-only inspection/search and is allowed across the system.</summary>
+    public static bool IsReadOnlyInspectionTool(string? toolName)
+        => !string.IsNullOrWhiteSpace(toolName) && ReadOnlyInspectionTools.Contains(toolName);
+
+    /// <summary>True when the tool's path arguments are handled by filesystem validation.</summary>
     public static bool IsPathTool(string? toolName)
-        => !string.IsNullOrWhiteSpace(toolName) && PathTools.Contains(toolName);
+        => IsMutationTool(toolName) || IsReadOnlyInspectionTool(toolName);
 
     /// <summary>True when the tool is a shell tool with a working directory.</summary>
     public static bool IsShellTool(string? toolName)
@@ -49,6 +63,7 @@ public static class WorkspaceBoundaryValidator
 
     /// <summary>
     /// Validates the tool's path argument against the workspace context or workspace root.
+    /// Read-only inspection and search tools are permitted system-wide; mutation tools are contained to the workspace.
     /// Returns null when within bounds; returns a concrete reason when out of bounds or targeting restricted paths.
     /// </summary>
     public static string? Validate(string? toolName, IDictionary<string, object>? args, AgentWorkspaceContext? workspaceContext)
@@ -56,15 +71,26 @@ public static class WorkspaceBoundaryValidator
         if (workspaceContext == null) return null;
         if (args == null) return null;
 
-        if (IsPathTool(toolName))
+        if (IsMutationTool(toolName))
         {
             string? path = FindPathArg(args);
             if (string.IsNullOrWhiteSpace(path)) return null;
 
-            var resolution = FilesystemPolicy.ResolveAndValidate(path, workspaceContext);
+            var resolution = FilesystemPolicy.ResolveAndValidate(path, workspaceContext, isMutation: true);
             if (!resolution.IsAllowed)
             {
-                return resolution.FailureReason ?? $"Path '{path}' is not permitted under the workspace policy.";
+                return resolution.FailureReason ?? $"Path '{path}' is outside the active workspace '{workspaceContext.Root}'. Modifying or creating files is only permitted within the workspace.";
+            }
+        }
+        else if (IsReadOnlyInspectionTool(toolName))
+        {
+            string? path = FindPathArg(args);
+            if (string.IsNullOrWhiteSpace(path)) return null;
+
+            var resolution = FilesystemPolicy.ResolveAndValidate(path, workspaceContext, isMutation: false);
+            if (!resolution.IsAllowed && (resolution.Status == PathAuthorizationStatus.RestrictedApplicationPath || resolution.Status == PathAuthorizationStatus.TraversalAttackDetected))
+            {
+                return resolution.FailureReason ?? $"Path '{path}' is not permitted under the filesystem policy.";
             }
         }
         else if (IsShellTool(toolName))
@@ -72,8 +98,8 @@ public static class WorkspaceBoundaryValidator
             string? workingDir = FindWorkingDirArg(args);
             if (!string.IsNullOrWhiteSpace(workingDir))
             {
-                var resolution = FilesystemPolicy.ResolveAndValidate(workingDir, workspaceContext);
-                if (!resolution.IsAllowed)
+                var resolution = FilesystemPolicy.ResolveAndValidate(workingDir, workspaceContext, isMutation: false);
+                if (!resolution.IsAllowed && (resolution.Status == PathAuthorizationStatus.RestrictedApplicationPath || resolution.Status == PathAuthorizationStatus.TraversalAttackDetected))
                 {
                     return resolution.FailureReason ?? $"Working directory '{workingDir}' is not permitted under the workspace policy.";
                 }
@@ -86,41 +112,24 @@ public static class WorkspaceBoundaryValidator
     /// <summary>
     /// Validates the tool's path argument against the workspace root. Returns null when the
     /// call is within bounds (or the tool/path is not path-scoped); returns a concrete reason
-    /// when the resolved path escapes the root. Never throws.
+    /// when a path escapes the root or targets restricted system directories. Never throws.
     /// </summary>
     public static string? Validate(string? toolName, IDictionary<string, object>? args, string? workspaceRoot)
     {
         if (string.IsNullOrWhiteSpace(workspaceRoot)) return null;
         if (args == null) return null; // missing required path is the schema check's job
 
-        if (IsPathTool(toolName))
-        {
-            string? path = FindPathArg(args);
-            if (string.IsNullOrWhiteSpace(path)) return null;
+        var wsContext = new AgentWorkspaceContext(
+            SessionId: "temp",
+            Root: workspaceRoot,
+            Scratch: Path.Combine(workspaceRoot, "scratch"),
+            Artifacts: Path.Combine(workspaceRoot, "artifacts"),
+            Changes: Path.Combine(workspaceRoot, "changes"),
+            Exports: Path.Combine(workspaceRoot, "exports"),
+            Terminal: Path.Combine(workspaceRoot, "terminal"),
+            AuthorizedExternalRoots: new List<string>());
 
-            path = NormalizePathForWorkspace(path, workspaceRoot);
-
-            if (!IsWithinWorkspace(path, workspaceRoot, out string resolved, out string root))
-            {
-                return $"path '{path}' resolves to '{resolved}', which is OUTSIDE the task workspace " +
-                       $"root '{root}'. File-tool paths must stay inside the workspace.";
-            }
-        }
-        else if (IsShellTool(toolName))
-        {
-            string? workingDir = FindWorkingDirArg(args);
-            if (!string.IsNullOrWhiteSpace(workingDir))
-            {
-                workingDir = NormalizePathForWorkspace(workingDir, workspaceRoot);
-                if (!IsWithinWorkspace(workingDir, workspaceRoot, out string resolved, out string root))
-                {
-                    return $"working directory '{workingDir}' resolves to '{resolved}', which is OUTSIDE the task workspace " +
-                           $"root '{root}'. Shell commands must execute within the workspace.";
-                }
-            }
-        }
-
-        return null;
+        return Validate(toolName, args, wsContext);
     }
 
     /// <summary>

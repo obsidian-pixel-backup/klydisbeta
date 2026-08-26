@@ -361,7 +361,7 @@ public sealed class ChatStreamParser
 
         if (_isToolCall)
         {
-            // Stream ended inside a tool call block; suppress yielding raw JSON as plain text.
+            // Stream ended inside an unclosed tool call block; discard partial tool payload so raw JSON never reaches user
             _unyieldedText = string.Empty;
             return;
         }

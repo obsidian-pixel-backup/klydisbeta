@@ -57,12 +57,12 @@ public interface IWorkspaceManager
     /// <summary>
     /// Checks if a given path is permitted for access under the session's workspace policy.
     /// </summary>
-    bool IsPathAllowed(string sessionId, string path);
+    bool IsPathAllowed(string sessionId, string path, bool isMutation = false);
 
     /// <summary>
     /// Resolves and validates a requested relative or absolute path against the session workspace policy.
     /// </summary>
-    WorkspacePathResolution ResolvePath(string sessionId, string requestedPath);
+    WorkspacePathResolution ResolvePath(string sessionId, string requestedPath, bool isMutation = false);
 
     /// <summary>
     /// Authorizes an external directory path for a session.

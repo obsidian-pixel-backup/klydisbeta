@@ -151,18 +151,18 @@ public sealed class WorkspaceManager : IWorkspaceManager
         => GetWorkspaceContext(sessionId).Terminal;
 
     /// <inheritdoc />
-    public bool IsPathAllowed(string sessionId, string path)
+    public bool IsPathAllowed(string sessionId, string path, bool isMutation = false)
     {
         var context = GetWorkspaceContext(sessionId);
-        var resolution = FilesystemPolicy.ResolveAndValidate(path, context);
+        var resolution = FilesystemPolicy.ResolveAndValidate(path, context, isMutation);
         return resolution.IsAllowed;
     }
 
     /// <inheritdoc />
-    public WorkspacePathResolution ResolvePath(string sessionId, string requestedPath)
+    public WorkspacePathResolution ResolvePath(string sessionId, string requestedPath, bool isMutation = false)
     {
         var context = GetWorkspaceContext(sessionId);
-        return FilesystemPolicy.ResolveAndValidate(requestedPath, context);
+        return FilesystemPolicy.ResolveAndValidate(requestedPath, context, isMutation);
     }
 
     /// <inheritdoc />

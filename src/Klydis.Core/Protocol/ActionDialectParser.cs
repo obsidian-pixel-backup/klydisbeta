@@ -124,61 +124,85 @@ internal static class ActionDialectParser
             foreach (Match block in nativeBlocks)
             {
                 var body = block.Groups[1].Value;
-                if (string.IsNullOrWhiteSpace(body) ||
-                    body.IndexOf("<function", StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    // Not a native call (e.g. <tool_call>{"name": ...}</tool_call> JSON form) —
-                    // leave it for the JSON heuristics below.
-                    continue;
-                }
+                if (string.IsNullOrWhiteSpace(body)) continue;
 
-                // Function name: attribute form, '=' form, or bare-text form (model dropped '=').
                 string? name = null;
-                var fnAttr = Regex.Match(body,
-                    @"<function\s+name\s*=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))\s*>",
-                    RegexOptions.IgnoreCase);
-                if (fnAttr.Success)
+                string innerBody = body;
+
+                // 1. Explicit <function ...> tag: attribute form, '=' form, ':' form, or bare text
+                if (body.IndexOf("<function", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    name = FirstNonEmpty(fnAttr, 1, 2, 3);
-                }
-                else
-                {
-                    var fnEq = Regex.Match(body, @"<function\s*=\s*([a-zA-Z0-9_.\-]+)\s*>", RegexOptions.IgnoreCase);
-                    if (fnEq.Success)
+                    var fnAttr = Regex.Match(body,
+                        @"<function\s+name\s*=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))\s*>",
+                        RegexOptions.IgnoreCase);
+                    if (fnAttr.Success)
                     {
-                        name = fnEq.Groups[1].Value;
+                        name = FirstNonEmpty(fnAttr, 1, 2, 3);
                     }
                     else
                     {
-                        var fnBare = Regex.Match(body, @"<function>\s*([a-zA-Z0-9_.\-]+)(?:\s*[><])", RegexOptions.IgnoreCase);
-                        if (fnBare.Success)
+                        var fnEq = Regex.Match(body, @"<function\s*=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))\s*>", RegexOptions.IgnoreCase);
+                        if (fnEq.Success)
                         {
-                            name = fnBare.Groups[1].Value;
+                            name = FirstNonEmpty(fnEq, 1, 2, 3);
+                        }
+                        else
+                        {
+                            var fnColon = Regex.Match(body, @"<function:\s*([a-zA-Z0-9_.\-]+)\s*>", RegexOptions.IgnoreCase);
+                            if (fnColon.Success)
+                            {
+                                name = fnColon.Groups[1].Value;
+                            }
+                            else
+                            {
+                                var fnBare = Regex.Match(body, @"<function>\s*([a-zA-Z0-9_.\-]+)(?:\s*[><])", RegexOptions.IgnoreCase);
+                                if (fnBare.Success)
+                                {
+                                    name = fnBare.Groups[1].Value;
+                                }
+                            }
                         }
                     }
                 }
+                else
+                {
+                    // 2. Tag where tool name is the XML element directly inside <tool_call>,
+                    // e.g. <tool_call><crawl_url><url>...</url></crawl_url></tool_call>
+                    // Only apply if body is NOT a JSON object/array (JSON is handled in layer 1).
+                    var trimmedBody = body.Trim();
+                    if (!trimmedBody.StartsWith("{", StringComparison.Ordinal) && !trimmedBody.StartsWith("[", StringComparison.Ordinal))
+                    {
+                        var toolTagMatch = Regex.Match(trimmedBody,
+                            @"^<(?!\b(?:tool_calls?|think|thought|antml|parameter|param)\b)([a-zA-Z_][a-zA-Z0-9_.\-]*)(?:\s+[^>]*)?>([\s\S]*?)(?:</\1>|$)",
+                            RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                        if (toolTagMatch.Success)
+                        {
+                            name = toolTagMatch.Groups[1].Value;
+                            innerBody = toolTagMatch.Groups[2].Value;
+                        }
+                    }
+                }
+
                 if (string.IsNullOrEmpty(name)) continue;
 
                 var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
-                // <parameter ...>value</parameter> in any tolerated syntax: =K, name="K", name=K,
-                // or a bare K (the model dropping the '=').
-                foreach (Match pm in Regex.Matches(body,
-                    @"<parameter\s*(?:=\s*([a-zA-Z0-9_.\-]+)|name\s*=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))|([a-zA-Z0-9_.\-]+))\s*>([\s\S]*?)</parameter>",
+                // <parameter ...>value</parameter> or <param ...>value</param> in any tolerated syntax:
+                // =K, name="K", name=K, :K, or bare K, closed by </parameter>, </param>, matching </key_name>, next param, or </function>.
+                foreach (Match pm in Regex.Matches(innerBody,
+                    @"<(?:parameter|param)\s*(?:=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))|name\s*=\s*(?:""([^""]+)""|'([^']+)'|([a-zA-Z0-9_.\-]+))|:\s*([a-zA-Z0-9_.\-]+)|([a-zA-Z0-9_.\-]+))\s*>([\s\S]*?)(?:</(?:parameter|param)>|</\1>|</\2>|</\3>|</\4>|</\5>|</\6>|</\7>|</\8>|(?=<(?:parameter|param)\b|</function>|</tool_call>|$))",
                     RegexOptions.Singleline | RegexOptions.IgnoreCase))
                 {
-                    var key = FirstNonEmpty(pm, 1, 2, 3, 4, 5);
+                    var key = FirstNonEmpty(pm, 1, 2, 3, 4, 5, 6, 7, 8);
                     if (string.IsNullOrEmpty(key)) continue;
-                    var rawVal = WebUtility.HtmlDecode(pm.Groups[6].Value.Trim());
-                    // The template renders complex values (objects/arrays) with tojson; keep
-                    // plain scalars as strings.
+                    var rawVal = WebUtility.HtmlDecode(pm.Groups[9].Value.Trim());
                     args[key] = TryParseQwenNativeJsonValue(rawVal) ?? rawVal;
                 }
 
                 // Bare <K>value</K> tags as parameters (the model's <location>Cape Town</location>
                 // style). Reserved tags never map to arguments.
-                foreach (Match bm in Regex.Matches(body,
-                    @"<(?!function\b|parameter\b|tool_call\b|tool_calls\b|think\b|thought\b|/)([a-zA-Z_][a-zA-Z0-9_.\-]*)\s*>([\s\S]*?)</\1>",
+                foreach (Match bm in Regex.Matches(innerBody,
+                    @"<(?!function\b|parameter\b|param\b|tool_call\b|tool_calls\b|think\b|thought\b|antml\b|/)([a-zA-Z_][a-zA-Z0-9_.\-]*)\s*>([\s\S]*?)</\1>",
                     RegexOptions.Singleline | RegexOptions.IgnoreCase))
                 {
                     var key = bm.Groups[1].Value;
@@ -187,20 +211,11 @@ internal static class ActionDialectParser
                     args[key] = TryParseQwenNativeJsonValue(rawVal) ?? rawVal;
                 }
 
-                // Tolerant fallback for MISMATCHED bare-tag closures (observed with the
-                // smeagle-4b qwen35 fine-tune): the model opens a bare <path> tag and closes
-                // it with the WRONG tag — <path>E:\...\file.txt</parameter> — and the strict
-                // <...>...</same-name> pass above drops the argument entirely, so the action
-                // gate then rejects the call as missing its required argument even though the
-                // value is present. Accept an opening bare tag closed by ANY closing tag (or
-                // the end of the block, which the block regex already tolerates for
-                // </tool_call>), provided the captured value contains no further markup (a
-                // nested structure is NOT a misclosed argument). Runs only when no arguments
-                // were captured, so a well-formed <parameter> call is never re-parsed.
+                // Tolerant fallback for MISMATCHED bare-tag closures
                 if (args.Count == 0)
                 {
-                    foreach (Match tm in Regex.Matches(body,
-                        @"<(?!\bfunction\b|\bparameter\b|\btool_call\b|\btool_calls\b|\bthink\b|\bthought\b|/)([a-zA-Z_][a-zA-Z0-9_.\-]*)\s*>([\s\S]*?)(?:</[a-zA-Z_][a-zA-Z0-9_.\-]*>|$)",
+                    foreach (Match tm in Regex.Matches(innerBody,
+                        @"<(?!\bfunction\b|\bparameter\b|\bparam\b|\btool_call\b|\btool_calls\b|\bthink\b|\bthought\b|\bantml\b|/)([a-zA-Z_][a-zA-Z0-9_.\-]*)\s*>([\s\S]*?)(?:</[a-zA-Z_][a-zA-Z0-9_.\-]*>|$)",
                         RegexOptions.Singleline | RegexOptions.IgnoreCase))
                     {
                         var key = tm.Groups[1].Value;
@@ -212,10 +227,6 @@ internal static class ActionDialectParser
                     }
                 }
 
-                // Zero-parameter tools (get_system_info, list_rag_collections, ...) emit
-                // <function=NAME> with no <parameter> block. Requiring args.Count > 0 dropped
-                // those calls, which then triggered the "INCOMPLETE tool call" feedback loop
-                // — the model was told to fix a call that was already well-formed.
                 if (!string.IsNullOrEmpty(name))
                 {
                     results.Add(new ParsedCall(new ToolCallRequest(name, args), CanonicalActionType.ToolCall, "qwen-native"));

@@ -79,22 +79,43 @@ public class PromptTemplateEngine
             case ChatTemplate.ChatML:
             case ChatTemplate.Qwen:
             case ChatTemplate.DeepSeek:
+                bool chatmlSystemInjected = false;
                 foreach (var msg in messages)
                 {
-                    string roleStr = msg.Role switch
+                    string roleStr;
+                    string content;
+                    if (msg.Role == ChatRole.System)
                     {
-                        ChatRole.System => "system",
-                        ChatRole.User => "user",
-                        ChatRole.Assistant => "assistant",
-                        ChatRole.Tool => "user",
-                        ChatRole.Runtime => "system",
-                        _ => "user"
-                    };
-                    string content = msg.Role == ChatRole.Tool 
-                        ? (string.IsNullOrEmpty(msg.Name) ? $"<tool_response>\n{msg.Content}\n</tool_response>" : $"<tool_response>\n[Tool Result for '{msg.Name}']:\n{msg.Content}\n</tool_response>")
-                        : msg.Role == ChatRole.Runtime
-                            ? BuildRuntimeDirective(msg.Content)
+                        if (!chatmlSystemInjected)
+                        {
+                            roleStr = "system";
+                            content = msg.Content;
+                            chatmlSystemInjected = true;
+                        }
+                        else
+                        {
+                            // Skip duplicate system prompts from history
+                            continue;
+                        }
+                    }
+                    else if (msg.Role == ChatRole.Runtime)
+                    {
+                        roleStr = "system";
+                        content = BuildRuntimeDirective(msg.Content);
+                    }
+                    else
+                    {
+                        roleStr = msg.Role switch
+                        {
+                            ChatRole.User => "user",
+                            ChatRole.Assistant => "assistant",
+                            ChatRole.Tool => "user",
+                            _ => "user"
+                        };
+                        content = msg.Role == ChatRole.Tool 
+                            ? (string.IsNullOrEmpty(msg.Name) ? $"<tool_response>\n{msg.Content}\n</tool_response>" : $"<tool_response>\n[Tool Result for '{msg.Name}']:\n{msg.Content}\n</tool_response>")
                             : msg.Content;
+                    }
                     sb.Append($"<|im_start|>{roleStr}\n{content}<|im_end|>\n");
                 }
                 sb.Append("<|im_start|>assistant\n");
@@ -102,22 +123,43 @@ public class PromptTemplateEngine
 
             case ChatTemplate.Llama3:
                 sb.Append("<|begin_of_text|>");
+                bool llama3SystemInjected = false;
                 foreach (var msg in messages)
                 {
-                    string roleStr = msg.Role switch
+                    string roleStr;
+                    string content;
+                    if (msg.Role == ChatRole.System)
                     {
-                        ChatRole.System => "system",
-                        ChatRole.User => "user",
-                        ChatRole.Assistant => "assistant",
-                        ChatRole.Tool => "ipython",
-                        ChatRole.Runtime => "system",
-                        _ => "user"
-                    };
-                    string content = msg.Role == ChatRole.Tool && !string.IsNullOrEmpty(msg.Name) 
-                        ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" 
-                        : msg.Role == ChatRole.Runtime
-                            ? BuildRuntimeDirective(msg.Content)
+                        if (!llama3SystemInjected)
+                        {
+                            roleStr = "system";
+                            content = msg.Content;
+                            llama3SystemInjected = true;
+                        }
+                        else
+                        {
+                            // Skip duplicate system prompts from history
+                            continue;
+                        }
+                    }
+                    else if (msg.Role == ChatRole.Runtime)
+                    {
+                        roleStr = "system";
+                        content = BuildRuntimeDirective(msg.Content);
+                    }
+                    else
+                    {
+                        roleStr = msg.Role switch
+                        {
+                            ChatRole.User => "user",
+                            ChatRole.Assistant => "assistant",
+                            ChatRole.Tool => "ipython",
+                            _ => "user"
+                        };
+                        content = msg.Role == ChatRole.Tool && !string.IsNullOrEmpty(msg.Name) 
+                            ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" 
                             : msg.Content;
+                    }
                     sb.Append($"<|start_header_id|>{roleStr}<|end_header_id|>\n\n{content}<|eot_id|>\n");
                 }
                 sb.Append("<|start_header_id|>assistant<|end_header_id|>\n\n");
@@ -209,44 +251,86 @@ public class PromptTemplateEngine
                 break;
 
             case ChatTemplate.Phi:
+                bool phiSystemInjected = false;
                 foreach (var msg in messages)
                 {
-                    string roleStr = msg.Role switch
+                    string roleStr;
+                    string content;
+                    if (msg.Role == ChatRole.System)
                     {
-                        ChatRole.System => "system",
-                        ChatRole.User => "user",
-                        ChatRole.Assistant => "assistant",
-                        ChatRole.Tool => "user",
-                        ChatRole.Runtime => "system",
-                        _ => "user"
-                    };
-                    string content = msg.Role == ChatRole.Tool 
-                        ? (!string.IsNullOrEmpty(msg.Name) ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" : $"[Tool Result]:\n{msg.Content}")
-                        : msg.Role == ChatRole.Runtime
-                            ? BuildRuntimeDirective(msg.Content)
+                        if (!phiSystemInjected)
+                        {
+                            roleStr = "system";
+                            content = msg.Content;
+                            phiSystemInjected = true;
+                        }
+                        else
+                        {
+                            // Skip duplicate system prompts from history
+                            continue;
+                        }
+                    }
+                    else if (msg.Role == ChatRole.Runtime)
+                    {
+                        roleStr = "system";
+                        content = BuildRuntimeDirective(msg.Content);
+                    }
+                    else
+                    {
+                        roleStr = msg.Role switch
+                        {
+                            ChatRole.User => "user",
+                            ChatRole.Assistant => "assistant",
+                            ChatRole.Tool => "user",
+                            _ => "user"
+                        };
+                        content = msg.Role == ChatRole.Tool 
+                            ? (!string.IsNullOrEmpty(msg.Name) ? $"[Tool Result for '{msg.Name}']:\n{msg.Content}" : $"[Tool Result]:\n{msg.Content}")
                             : msg.Content;
+                    }
                     sb.Append($"<|{roleStr}|>\n{content}<|end|>\n");
                 }
                 sb.Append("<|assistant|>\n");
                 break;
 
             case ChatTemplate.CommandR:
+                bool crSystemInjected = false;
                 foreach (var msg in messages)
                 {
-                    string roleToken = msg.Role switch
+                    string roleToken;
+                    string content;
+                    if (msg.Role == ChatRole.System)
                     {
-                        ChatRole.System => "SYSTEM",
-                        ChatRole.User => "USER",
-                        ChatRole.Assistant => "CHATBOT",
-                        ChatRole.Tool => "USER",
-                        ChatRole.Runtime => "SYSTEM",
-                        _ => "USER"
-                    };
-                    string content = msg.Role == ChatRole.Tool
-                        ? $"[Tool Result]: {msg.Content}"
-                        : msg.Role == ChatRole.Runtime
-                            ? BuildRuntimeDirective(msg.Content)
+                        if (!crSystemInjected)
+                        {
+                            roleToken = "SYSTEM";
+                            content = msg.Content;
+                            crSystemInjected = true;
+                        }
+                        else
+                        {
+                            // Skip duplicate system prompts from history
+                            continue;
+                        }
+                    }
+                    else if (msg.Role == ChatRole.Runtime)
+                    {
+                        roleToken = "SYSTEM";
+                        content = BuildRuntimeDirective(msg.Content);
+                    }
+                    else
+                    {
+                        roleToken = msg.Role switch
+                        {
+                            ChatRole.User => "USER",
+                            ChatRole.Assistant => "CHATBOT",
+                            ChatRole.Tool => "USER",
+                            _ => "USER"
+                        };
+                        content = msg.Role == ChatRole.Tool
+                            ? $"[Tool Result]: {msg.Content}"
                             : msg.Content;
+                    }
                     sb.Append($"<|START_OF_TURN_TOKEN|><|{roleToken}_TOKEN|>{content}<|END_OF_TURN_TOKEN|>");
                 }
                 sb.Append("<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>");

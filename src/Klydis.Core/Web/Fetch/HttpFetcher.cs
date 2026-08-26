@@ -179,19 +179,22 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
             }
             catch (HttpRequestException ex) when (IsTlsError(ex))
             {
-                return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.TlsFailure, false, false,
-                    $"TLS handshake failed: {ex.Message}", httpStatus, "http", attempt));
+                var detail = ex.InnerException?.Message ?? ex.Message;
+                return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.TlsFailure, false, true,
+                    $"TLS handshake failed: {detail}", httpStatus, "http", attempt));
             }
             catch (HttpRequestException ex)
             {
-                return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.ConnectionFailure, true, false,
-                    $"Connection failed: {ex.Message}", httpStatus, "http", attempt));
+                var detail = ex.InnerException != null ? $"{ex.Message} ({ex.InnerException.Message})" : ex.Message;
+                return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.ConnectionFailure, true, true,
+                    $"Connection failed: {detail}", httpStatus, "http", attempt));
             }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "HTTP fetch failed for {Url}", currentUrl);
-                return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.ConnectionFailure, true, false,
-                    $"Unexpected fetch error: {ex.Message}", httpStatus, "http", attempt));
+                var detail = ex.InnerException != null ? $"{ex.Message} ({ex.InnerException.Message})" : ex.Message;
+                return WebFetchOutcome.Fail(new WebFailure(WebFailureCode.ConnectionFailure, true, true,
+                    $"Unexpected fetch error: {detail}", httpStatus, "http", attempt));
             }
         }
 
@@ -200,15 +203,13 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
     }
 
     /// <summary>
-    /// Connects a socket ONLY to addresses the SSRF guard verified for the target host, then
-    /// (for https) performs the TLS handshake with SNI. This is the DNS-rebinding defense:
-    /// the OS resolver is never consulted after policy validation.
+    /// Connects a socket ONLY to addresses the SSRF guard verified for the target host.
+    /// This is the DNS-rebinding defense: the OS resolver is never consulted after policy validation.
+    /// SocketsHttpHandler performs TLS negotiation on top of the returned stream for HTTPS requests.
     /// </summary>
     private async ValueTask<Stream> PinnedConnectAsync(SocketsHttpConnectionContext context, CancellationToken ct)
     {
         var host = context.DnsEndPoint?.Host ?? throw new HttpRequestException("Missing DnsEndPoint in connection context.");
-        var isHttps = string.Equals(context.InitialRequestMessage?.RequestUri?.Scheme,
-            Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
 
         IReadOnlyList<IPAddress> addresses;
         try
@@ -220,59 +221,31 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
             throw new HttpRequestException($"Host '{host}' is blocked or unresolvable: {ex.Message}", ex);
         }
 
+        // Prioritize IPv4 addresses first to avoid unroutable IPv6 timeout hangs on dual-stack hosts
+        var orderedAddresses = addresses
+            .OrderBy(ip => ip.AddressFamily == AddressFamily.InterNetwork ? 0 : 1)
+            .ToList();
+
         Exception? last = null;
-        foreach (var ip in addresses)
+        foreach (var ip in orderedAddresses)
         {
             Socket? socket = null;
             try
             {
                 socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-                await socket.ConnectAsync(ip, context.DnsEndPoint.Port, ct).ConfigureAwait(false);
-                var stream = new NetworkStream(socket, ownsSocket: true);
-
-                if (isHttps)
-                {
-                    var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
-                    try
-                    {
-                        await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
-                        {
-                            TargetHost = host,
-                            EnabledSslProtocols = SslProtocols.None, // OS default policy
-                            ApplicationProtocols = new List<SslApplicationProtocol>
-                            {
-                                SslApplicationProtocol.Http2,
-                                SslApplicationProtocol.Http11
-                            }
-                        }, ct).ConfigureAwait(false);
-                        return ssl;
-                    }
-                    catch
-                    {
-                        try { ssl.Dispose(); } catch { }
-                        var retrySocket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-                        await retrySocket.ConnectAsync(ip, context.DnsEndPoint.Port, ct).ConfigureAwait(false);
-                        var retryStream = new NetworkStream(retrySocket, ownsSocket: true);
-                        var retrySsl = new SslStream(retryStream, leaveInnerStreamOpen: false);
-                        await retrySsl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
-                        {
-                            TargetHost = host,
-                            EnabledSslProtocols = SslProtocols.None
-                        }, ct).ConfigureAwait(false);
-                        return retrySsl;
-                    }
-                }
-
-                return stream;
+                using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                connectCts.CancelAfter(TimeSpan.FromSeconds(5));
+                await socket.ConnectAsync(ip, context.DnsEndPoint.Port, connectCts.Token).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 last = ex;
                 try { socket?.Dispose(); } catch { /* ignore */ }
             }
         }
 
-        throw new HttpRequestException($"Could not connect to '{host}'.", last);
+        throw new HttpRequestException($"Could not connect to '{host}': {last?.Message}", last);
     }
 
     private static bool IsRedirect(HttpStatusCode status) =>
@@ -286,7 +259,13 @@ public sealed class HttpFetcher : IWebFetcher, IDisposable
     {
         for (Exception? inner = ex; inner != null; inner = inner.InnerException)
         {
-            if (inner is AuthenticationException)
+            if (inner is AuthenticationException ||
+                inner.GetType().Name.Contains("Tls", StringComparison.OrdinalIgnoreCase) ||
+                inner.GetType().Name.Contains("Ssl", StringComparison.OrdinalIgnoreCase) ||
+                inner.Message.Contains("SSL", StringComparison.OrdinalIgnoreCase) ||
+                inner.Message.Contains("TLS", StringComparison.OrdinalIgnoreCase) ||
+                inner.Message.Contains("certificate", StringComparison.OrdinalIgnoreCase) ||
+                inner.Message.Contains("SEC_E_", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }

@@ -254,6 +254,45 @@ namespace Klydis.Core.Memory
         }
 
         /// <summary>
+        /// Checks whether conversation history has compressible overflow messages outside the recent tail.
+        /// </summary>
+        public bool HasCompressibleOverflow(List<ChatMessage> history, int thresholdTokens = 30000, int keepRecentTokens = 4096)
+        {
+            if (history == null || history.Count <= 2) return false;
+
+            int totalTokens = 0;
+            foreach (var msg in history)
+            {
+                totalTokens += EstimateTokens(msg.Content) + 25;
+            }
+
+            if (totalTokens < thresholdTokens) return false;
+
+            ChatMessage? initialMsg = history.Count > 0 ? history[0] : null;
+            int initialTokens = initialMsg != null ? EstimateTokens(initialMsg.Content) + 25 : 0;
+
+            int recentTokens = initialTokens;
+            int splitIndex = history.Count - 1;
+            for (int i = history.Count - 1; i >= 1; i--)
+            {
+                var msg = history[i];
+                int msgTokens = EstimateTokens(msg.Content) + 25;
+
+                if (recentTokens + msgTokens <= keepRecentTokens)
+                {
+                    recentTokens += msgTokens;
+                    splitIndex = i;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return (splitIndex - 1) > 0;
+        }
+
+        /// <summary>
         /// Performs automated rolling compression on conversation history when token count exceeds the threshold (~30k tokens).
         /// Summarizes older history into WorldState and prunes raw history messages in place.
         /// </summary>

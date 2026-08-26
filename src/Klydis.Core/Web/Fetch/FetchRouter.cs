@@ -67,7 +67,6 @@ public sealed class FetchRouter
             or WebFailureCode.BlockedByPolicy
             or WebFailureCode.Http404
             or WebFailureCode.Http4xx
-            or WebFailureCode.TlsFailure
             or WebFailureCode.RedirectLimit
             or WebFailureCode.ContentTooLarge
             or WebFailureCode.UnsupportedContentType)

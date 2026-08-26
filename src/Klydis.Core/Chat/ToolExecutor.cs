@@ -125,12 +125,13 @@ public class ToolExecutor(
 
     /// <summary>
     /// Resolves and validates a path requested by the model against the session's workspace policy.
+    /// Read-only inspection and search tools pass isMutation=false; file creations and edits pass isMutation=true.
     /// </summary>
-    public Klydis.Core.Workspace.WorkspacePathResolution ResolveToolPath(string? sessionId, string requestedPath)
+    public Klydis.Core.Workspace.WorkspacePathResolution ResolveToolPath(string? sessionId, string requestedPath, bool isMutation = false)
     {
         if (WorkspaceManager != null && !string.IsNullOrWhiteSpace(sessionId))
         {
-            return WorkspaceManager.ResolvePath(sessionId, requestedPath);
+            return WorkspaceManager.ResolvePath(sessionId, requestedPath, isMutation);
         }
 
         string fallbackRoot = WorkspaceRoot ?? Directory.GetCurrentDirectory();
@@ -151,7 +152,7 @@ public class ToolExecutor(
             AuthorizedExternalRoots: authorized,
             Mode: Klydis.Core.Workspace.WorkspaceMode.Scratch);
 
-        return Klydis.Core.Workspace.FilesystemPolicy.ResolveAndValidate(requestedPath, fallbackContext);
+        return Klydis.Core.Workspace.FilesystemPolicy.ResolveAndValidate(requestedPath, fallbackContext, isMutation);
     }
 
     /// <summary>
@@ -1578,7 +1579,7 @@ public class ToolExecutor(
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
 
-        var resolution = ResolveToolPath(sessionId, path);
+        var resolution = ResolveToolPath(sessionId, path, isMutation: true);
         if (!resolution.IsAllowed)
         {
             return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");
@@ -1607,7 +1608,7 @@ public class ToolExecutor(
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
 
-        var resolution = ResolveToolPath(sessionId, path);
+        var resolution = ResolveToolPath(sessionId, path, isMutation: true);
         if (!resolution.IsAllowed)
         {
             return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");
@@ -1637,7 +1638,7 @@ public class ToolExecutor(
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
 
-        var resolution = ResolveToolPath(sessionId, path);
+        var resolution = ResolveToolPath(sessionId, path, isMutation: true);
         if (!resolution.IsAllowed)
         {
             return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");
@@ -2673,7 +2674,7 @@ public class ToolExecutor(
         var commandLike = CommandLikePathResult(request, path);
         if (commandLike != null) return commandLike;
 
-        var resolution = ResolveToolPath(sessionId, path);
+        var resolution = ResolveToolPath(sessionId, path, isMutation: true);
         if (!resolution.IsAllowed)
         {
             return new ToolResult(request.Name, false, string.Empty, resolution.FailureReason ?? "Path access denied by workspace policy.");

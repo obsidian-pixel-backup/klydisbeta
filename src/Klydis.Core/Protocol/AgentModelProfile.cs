@@ -148,7 +148,7 @@ public sealed record AgentModelProfile
             DefaultTemperature = 0.7,
             DefaultTopP = 0.9,
             RecommendedContextBudget = isSmall ? 16384 : 32768,
-            HardContextBudget = isSmall ? 24576 : 65536,
+            HardContextBudget = isSmall ? 24576 : 32768,
             SmallModelExecutionMode = isSmall,
             IsReferenceModel = false,
             SupportsNativeTools = profile?.SupportsNativeTools ?? true,

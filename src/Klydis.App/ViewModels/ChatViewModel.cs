@@ -1489,12 +1489,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                             OnUi(() =>
                             {
                                 CloseAssistantBubble();
+                                CloseThoughtBubble();
                                 var memoryMsg = new ChatMessageViewModel
                                 {
                                     Role = "thought",
                                     Content = evt.Content,
-                                    IsThinkingExpanded = true,
-                                    IsStreaming = true,
+                                    IsThinkingExpanded = false,
+                                    IsStreaming = false,
                                     Timestamp = DateTime.Now
                                 };
                                 AppendMessage(memoryMsg);

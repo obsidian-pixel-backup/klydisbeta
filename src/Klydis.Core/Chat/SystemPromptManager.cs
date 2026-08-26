@@ -476,7 +476,7 @@ public class SystemPromptManager
             sb.AppendLine();
         }
         sb.AppendLine("### TOOL RULES");
-        sb.AppendLine("- Tools are REAL and execute on this machine with full system access as granted by the runtime's approval and workspace policy: run_command runs actual commands, search_web queries the live web, read_file reads actual files. A call may be denied by the runtime (approval, workspace boundary, or step restrictions) — that denial is final for that call. NEVER simulate tool use or fabricate results — emit the real <tool_call> tag and use the actual returned output.");
+        sb.AppendLine("- Tools are REAL and execute on this machine with the runtime's full system access where policy permits: run_command runs actual commands, search_web queries the live web, read_file/list_directory/search_files inspect and search files across the entire system, while file creations and modifications (write_file, edit_file, replace_lines, apply_patch) take effect within the workspace. NEVER simulate tool use or fabricate results — emit the real <tool_call> tag and use the actual returned output.");
         sb.AppendLine("- NEVER claim you lack access or that live data is unavailable (internet, weather, files, system) — the tools above execute for you on demand. Call the tool.");
         sb.AppendLine("- NEVER repeat a tool call with identical arguments. If you already received a result, USE IT. Identical failed retries are blocked — change the arguments or use a different tool.");
         sb.AppendLine("- ALWAYS analyze tool results before making additional calls; try a DIFFERENT approach on errors.");
@@ -701,8 +701,8 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         sb.AppendLine("```");
         sb.AppendLine($"- Workspace: {workspaceRoot}");
         sb.AppendLine($"- Working directory: {workingDir}");
-        sb.AppendLine("- Writable by default: YES");
-        sb.AppendLine("- External paths: NOT permitted unless explicitly authorized");
+        sb.AppendLine("- Writable by default: YES (within workspace)");
+        sb.AppendLine("- System search & inspection: Permitted across all drives and directories (read_file, list_directory, search_files); file creation and editing are confined to the workspace.");
         sb.AppendLine($"- Application data: {appHome} (INTERNAL APPLICATION STATE - DO NOT write there)");
         sb.AppendLine("- Hierarchy: Prefer typed native system tools (`system_*`) > specialized tools > raw `run_command` shell commands.");
         sb.AppendLine("- Operating System: Windows. PowerShell is the default shell for `run_command`. Do NOT use Linux syntax (e.g. `4>/dev/null`, `head`, `grep`, `cat /proc/*`).");
