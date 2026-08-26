@@ -3,13 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using Klydis.Core.Chat;
-using Klydis.Core.Orchestration;
 
 namespace Klydis.Core.Tasks;
 
 /// <summary>
 /// Engine for generating deterministic execution directives when model produces
-/// capability refusals or no-action narration, and for resolving direct tool executions.
+/// capability refusals or no-action narration.
 /// </summary>
 public static class DeterministicDirectiveEngine
 {
@@ -64,44 +63,5 @@ public static class DeterministicDirectiveEngine
         string json = JsonSerializer.Serialize(payload, JsonOptions);
         return $"[RUNTIME REPAIR DIRECTIVE]\n```json\n{json}\n```\nExecute the required action for the current step.";
     }
-
-    /// <summary>
-    /// Resolves unambiguous direct intents (e.g. CPU, RAM, GPU, OS, Process query) into deterministic tool calls.
-    /// </summary>
-    public static ToolCallRequest? TryResolveDirectAction(string? message, TaskStep? currentStep = null)
-    {
-        if (string.IsNullOrWhiteSpace(message)) return null;
-
-        var resolution = DeterministicIntentResolver.Resolve(message);
-        if (resolution.Route != null && resolution.Confidence >= 0.95)
-        {
-            var route = resolution.Route;
-            var args = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            if (route.Arguments != null)
-            {
-                foreach (var (k, v) in route.Arguments)
-                {
-                    args[k] = v;
-                }
-            }
-
-            return new ToolCallRequest(
-                Name: route.ToolName,
-                Arguments: (IDictionary<string, object>)(route.Arguments ?? new Dictionary<string, object>()));
-        }
-
-        // If current step is specific diagnostic without prompt
-        if (currentStep != null && currentStep.AllowedTools != null && currentStep.AllowedTools.Count == 1)
-        {
-            string singleTool = currentStep.AllowedTools.First();
-            if (singleTool.StartsWith("system_", StringComparison.OrdinalIgnoreCase))
-            {
-                return new ToolCallRequest(
-                    Name: singleTool,
-                    Arguments: new Dictionary<string, object>());
-            }
-        }
-
-        return null;
-    }
 }
+

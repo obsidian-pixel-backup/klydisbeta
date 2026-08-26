@@ -49,7 +49,7 @@ public partial class ChatMessageViewModel : ObservableObject
     {
         Action doUpdate = () =>
         {
-            RenderedContent = FormatMarkdown(newValue);
+            RenderedContent = FormatMarkdown(newValue, IsStreaming);
         };
 
         if (!IsStreaming)
@@ -89,7 +89,7 @@ public partial class ChatMessageViewModel : ObservableObject
                 {
                     _lastRenderUpdate = DateTime.Now;
                     var textToRender = Content;
-                    Action applyRender = () => RenderedContent = FormatMarkdown(textToRender);
+                    Action applyRender = () => RenderedContent = FormatMarkdown(textToRender, IsStreaming);
 
                     if (System.Windows.Application.Current?.Dispatcher != null)
                     {
@@ -118,19 +118,38 @@ public partial class ChatMessageViewModel : ObservableObject
         if (!newValue)
         {
             _renderPending = false;
-            RenderedContent = FormatMarkdown(Content);
+            RenderedContent = FormatMarkdown(Content, false);
         }
     }
 
-    private static string FormatMarkdown(string? text)
+    private static string FormatMarkdown(string? text, bool isStreaming = false)
     {
         if (string.IsNullOrEmpty(text)) return string.Empty;
 
+        string formatted = text;
+
+        // Ensure fenced code blocks have leading blank lines so MdXaml parses them as code blocks
+        formatted = System.Text.RegularExpressions.Regex.Replace(
+            formatted,
+            @"(?<=[^\n])\n(```[a-zA-Z0-9_-]*)",
+            "\n\n$1");
+
         // Ensure Markdown tables have leading and trailing blank lines (\n\n) so MdXaml engine parses them as FlowDocument Tables
-        string formatted = System.Text.RegularExpressions.Regex.Replace(
-            text, 
+        formatted = System.Text.RegularExpressions.Regex.Replace(
+            formatted, 
             @"(?<!\n\n)(\n\|[^\n]+\|\n\|[\s:\-\|]+\|\n(?:\|[^\n]+\|\n)+)", 
             "\n\n$1\n\n");
+
+        // During streaming, if there is an unclosed code fence, close it temporarily so the preview renders as a code block
+        if (isStreaming)
+        {
+            int fenceCount = System.Text.RegularExpressions.Regex.Matches(formatted, @"```").Count;
+            if (fenceCount % 2 != 0)
+            {
+                formatted += "\n```";
+            }
+        }
+
         return formatted;
     }
 

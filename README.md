@@ -579,8 +579,6 @@ Beneath the engine sits a model-agnostic protocol stack (`src/Klydis.Core/Protoc
 
 - **`ModelRouter`** — decides which engine/provider handles a request based on
   `ModelCapabilityProfile` and live `ModelExecutionMetrics`.
-- **`DeterministicIntentResolver`** — resolves user intent markers to execution intents.
-- **`DirectActionRouter`** — fast-path routing for known action shapes.
 - **`ModelCapabilityEstimator`** — estimates what a model can do from its profile.
 - **`ExecutionTelemetryAnalyzer`** — turns run telemetry into routing signals.
 

@@ -1180,28 +1180,6 @@ public class ChatEngine(
             IsGenerating = true;
             _recentTools.Clear();
 
-            // ===== DETERMINISTIC DIRECT ACTION FAST-PATH =====
-            // Recognize obvious system telemetry and desktop operational queries ("CPU load", "GPU load", "OS version",
-            // "full system report", "open chrome") and execute them immediately with zero LLM reasoning latency
-            // or capability hallucination risk.
-            var directRoute = DirectActionRouter.TryRoute(userMessage);
-            if (directRoute != null)
-            {
-                var directUserMsg = new ChatMessage(ChatRole.User, userMessage);
-                var activeHist = _sessionHistories.GetOrAdd(generatingSessionId, _ => new List<ChatMessage>(_history));
-                AddToSessionHistory(activeHist, directUserMsg, generatingSessionId);
-                await messageStore.AddMessageAsync(generatingSessionId, ChatRole.User, userMessage, 0, null);
-
-                var directResult = await DirectActionRouter.ExecuteAsync(directRoute, toolExecutor, generatingSessionId, ct);
-                yield return new ChatStreamEvent(ChatStreamEventType.Token, directResult.FormattedResponse);
-
-                var directAssistantMsg = new ChatMessage(ChatRole.Assistant, directResult.FormattedResponse);
-                AddToSessionHistory(activeHist, directAssistantMsg, generatingSessionId);
-                await messageStore.AddMessageAsync(generatingSessionId, ChatRole.Assistant, directResult.FormattedResponse, 0, null);
-
-                yield return new ChatStreamEvent(ChatStreamEventType.StreamEnd, "");
-                yield break;
-            }
 
         // ===== INTERACTION-MODE BOUNDARY =====
         // Decide BEFORE task resolution whether this message is ordinary conversation or
