@@ -114,7 +114,7 @@ public sealed record AgentModelProfile
     /// <summary>
     /// Resolves or synthesizes the appropriate AgentModelProfile for a loaded model.
     /// </summary>
-    public static AgentModelProfile ForModel(string modelId, string architecture, ModelProfile? profile = null)
+    public static AgentModelProfile ForModel(string modelId, string architecture, ModelProfile? profile = null, int? contextSize = null)
     {
         string idLower = (modelId ?? string.Empty).ToLowerInvariant();
         string archLower = (architecture ?? string.Empty).ToLowerInvariant();
@@ -133,6 +133,13 @@ public sealed record AgentModelProfile
 
         bool isQwen = archLower.Contains("qwen");
 
+        int hardBudget = isSmall
+            ? (contextSize.HasValue && contextSize.Value > 0 ? Math.Min(24576, contextSize.Value) : 24576)
+            : (contextSize.HasValue && contextSize.Value > 0 ? contextSize.Value : 131072);
+        int recBudget = isSmall
+            ? (contextSize.HasValue && contextSize.Value > 0 ? Math.Min(16384, (int)(hardBudget * 0.67)) : 16384)
+            : (int)(hardBudget * 0.75);
+
         return new AgentModelProfile
         {
             ModelFamily = isQwen ? "qwen35" : archLower,
@@ -147,8 +154,8 @@ public sealed record AgentModelProfile
             PromptProfile = "standard-agentic",
             DefaultTemperature = 0.7,
             DefaultTopP = 0.9,
-            RecommendedContextBudget = isSmall ? 16384 : 32768,
-            HardContextBudget = isSmall ? 24576 : 32768,
+            RecommendedContextBudget = recBudget,
+            HardContextBudget = hardBudget,
             SmallModelExecutionMode = isSmall,
             IsReferenceModel = false,
             SupportsNativeTools = profile?.SupportsNativeTools ?? true,

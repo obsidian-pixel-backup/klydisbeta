@@ -67,7 +67,7 @@ public sealed class BrowserPool : IAsyncDisposable
             var contextOptions = new BrowserNewContextOptions
             {
                 UserAgent = randomAgent,
-                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+                ViewportSize = ViewportSize.NoViewport,
                 Locale = "en-US",
                 TimezoneId = "America/New_York",
                 ServiceWorkers = ServiceWorkerPolicy.Block // Block service workers for request routing security
@@ -80,6 +80,15 @@ public sealed class BrowserPool : IAsyncDisposable
             await networkPolicy.AttachAsync(context).ConfigureAwait(false);
 
             var page = await context.NewPageAsync().ConfigureAwait(false);
+
+            try
+            {
+                await page.SetViewportSizeAsync(1920, 1080).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogDebug(ex, "Note: Page viewport sizing fallback used.");
+            }
 
             // Apply stealth init patches
             try
@@ -138,7 +147,8 @@ public sealed class BrowserPool : IAsyncDisposable
                 {
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
-                    "--disable-infobars"
+                    "--disable-infobars",
+                    "--window-size=1920,1080"
                 }
             };
 

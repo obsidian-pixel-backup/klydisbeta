@@ -487,7 +487,8 @@ public class ChatEngine(
             <= 4096 => 1024,
             <= 16384 => Math.Min(contextSize / 4, 3072),
             <= 65536 => Math.Min(contextSize / 4, 6144),
-            _ => Math.Min(contextSize / 4, 12288)
+            <= 131072 => Math.Min(contextSize / 4, 12288),
+            _ => Math.Min(contextSize / 4, 16384)
         };
         int safetyMargin = 256;
 
@@ -560,7 +561,8 @@ public class ChatEngine(
                         inferenceEngine.Architecture ?? "unknown",
                         rawChatTemplate: inferenceEngine.RawChatTemplate,
                         declaredTemplate: null,
-                        explicitOverride: null);
+                        explicitOverride: null,
+                        contextSize: (int)inferenceEngine.ContextSize);
                     // GGUF-derived stop tokens (eos/bos token text) merged with the
                     // template-family defaults as a safety net (blueprint TODO 012).
                     profile = profile with { StopTokens = ResolveProfileStopTokens(inferenceEngine.CurrentModelPath, profile.Template) };

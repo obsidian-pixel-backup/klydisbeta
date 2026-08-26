@@ -29,6 +29,7 @@ public static class ModelProfileFactory
     /// <param name="declaredTemplate">Declared template family from model metadata, when present.</param>
     /// <param name="explicitOverride">Explicit user/model override; highest priority.</param>
     /// <param name="stopTokens">Model-specific stop tokens extracted from GGUF tokenizer metadata.</param>
+    /// <param name="contextSize">Model context capacity in tokens.</param>
     public static ModelProfile Build(
         string modelId,
         string modelPath,
@@ -36,7 +37,8 @@ public static class ModelProfileFactory
         string? rawChatTemplate = null,
         ChatTemplate? declaredTemplate = null,
         ChatTemplate? explicitOverride = null,
-        IReadOnlyList<string>? stopTokens = null)
+        IReadOnlyList<string>? stopTokens = null,
+        int? contextSize = null)
     {
         ChatTemplate template = ResolveTemplate(architecture, rawChatTemplate, declaredTemplate, explicitOverride);
         ReasoningProtocol reasoning = ResolveReasoning(template, architecture);
@@ -61,7 +63,7 @@ public static class ModelProfileFactory
 
         double confidence = CalculateProtocolConfidence(architecture, template, toolProtocol, reasoning, stopTokens, rawChatTemplate, probeSucceeded: false);
         AgentModelTier tier = ResolveModelTier(modelId, modelPath);
-        AgentModelProfile agentProfile = AgentModelProfile.ForModel(modelId, architecture);
+        AgentModelProfile agentProfile = AgentModelProfile.ForModel(modelId, architecture, null, contextSize);
 
         CapabilityLevel toolCallingLevel = unknownFamily ? CapabilityLevel.Unsupported
             : confidence >= 0.90 ? CapabilityLevel.Reliable

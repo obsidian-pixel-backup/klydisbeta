@@ -175,10 +175,15 @@ public static class InteractionClassifier
         // 1b. Live-data requests need the web/search tools — Task mode, never Conversation.
         if (ContainsAny(tokens, LiveDataMarkers)) return InteractionMode.Task;
 
-        // 2. Explanation / informational questions are conversation — even with verbs inside
-        //    ("explain how to build X" asks for an explanation, it does not build X).
-        if (ContainsAny(tokens, ExplanationMarkers) && !HasImperativeExecutionCommand(normalized))
+        // 2. Explanation / informational questions are conversation — unless accompanied by strong build/fix verbs, imperative commands, or diagnostic/task actions.
+        if (ContainsAny(tokens, ExplanationMarkers) &&
+            !HasImperativeExecutionCommand(normalized) &&
+            !ContainsAny(tokens, AutonomousVerbs) &&
+            !ContainsAny(tokens, ExecutionMarkers) &&
+            !ContainsAny(tokens, TaskVerbs))
+        {
             return InteractionMode.Conversation;
+        }
 
         // 2b. COMPOUND imperative: a command marker FOLLOWED by an autonomous verb
         //     ("begin building", "start implementing", "continue developing",
@@ -216,8 +221,10 @@ public static class InteractionClassifier
     /// </summary>
     private static bool HasImperativeExecutionCommand(string normalized)
     {
-        string[] imperatives = { "execute ", "run ", "perform ", "inspect ", "check ", "scan ", "determine " };
-        return imperatives.Any(imp => normalized.StartsWith(imp, StringComparison.Ordinal) || normalized.Contains(" " + imp, StringComparison.Ordinal));
+        string[] imperatives = { "execute", "run", "perform", "inspect", "check", "scan", "determine", "examine", "diagnose", "troubleshoot", "resolve", "investigate", "test", "fix" };
+        return imperatives.Any(imp => normalized.StartsWith(imp + " ", StringComparison.Ordinal) ||
+                                      normalized.Contains(" " + imp + " ", StringComparison.Ordinal) ||
+                                      normalized.EndsWith(" " + imp, StringComparison.Ordinal));
     }
 
     /// <summary>

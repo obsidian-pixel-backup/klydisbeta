@@ -120,7 +120,10 @@ public sealed class CommandExecution
             lower.Contains("parsererror") ||
             lower.Contains("invalid characters in path") ||
             lower.Contains("the token '") ||
-            lower.Contains("at line:") && lower.Contains("char:"))
+            lower.Contains("at line:") && lower.Contains("char:") ||
+            lower.Contains("parameter 'index'") ||
+            lower.Contains("actual value was -1") ||
+            lower.Contains("must be a non-negative value"))
         {
             return CommandErrorClassification.ShellSyntaxError;
         }
@@ -178,7 +181,7 @@ public sealed class CommandExecution
         CommandErrorClassification.Timeout =>
             "TIMEOUT: Command exceeded timeout budget. Split operation into smaller batches or optimize query parameters.",
         CommandErrorClassification.ShellSyntaxError =>
-            "SHELL_SYNTAX_ERROR: Command syntax is invalid for the shell. Avoid Linux-only syntax on Windows (e.g. 4>/dev/null, head/grep). Write pure PowerShell or CMD syntax.",
+            "SHELL_SYNTAX_ERROR: Command syntax or expression is invalid for the shell. Avoid Linux syntax on Windows and verify PowerShell calculated properties (@{N=...;E=...}). Use clean cmdlets (e.g. Get-PSDrive, [System.IO.DriveInfo]::GetDrives(), Get-ChildItem) without nested invalid expressions.",
         CommandErrorClassification.OutputLimit =>
             "OUTPUT_TOO_LARGE: Tool output exceeded context limit. Filter or pipe results (e.g. Select-Object -First 25 or pagination).",
         CommandErrorClassification.WorkingDirectoryInvalid =>
