@@ -73,4 +73,14 @@ public interface IWorkspaceManager
     /// Sets an explicit project directory for a session (Project mode).
     /// </summary>
     AgentWorkspaceContext SetProjectWorkspace(string sessionId, string projectRoot);
+
+    /// <summary>
+    /// Saves or copies an uploaded attachment into the session artifacts directory and workspace root.
+    /// </summary>
+    Task<string> SaveAttachmentArtifactAsync(string sessionId, string fileName, string? sourceFilePath = null, string? content = null);
+
+    /// <summary>
+    /// Deletes the session's workspace folder and all associated artifacts, scratch files, and logs from disk.
+    /// </summary>
+    void DeleteSessionWorkspace(string sessionId);
 }

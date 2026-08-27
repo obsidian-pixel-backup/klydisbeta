@@ -1651,11 +1651,38 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// </summary>
     private LLama.Sampling.ISamplingPipeline BuildSamplingPipeline()
     {
-        // Control/special tokens (e.g. qwen's <channel|> control token) must never stream to
-        // the user; llama.cpp's sampler chain does not exclude them. See
-        // SpecialTokenFilterPipeline.
-        LLama.Sampling.DefaultSamplingPipeline profile = IsMixtureOfExperts
-            ? new LLama.Sampling.DefaultSamplingPipeline
+        bool isQwenThinking = IsQwenThinkingArchitecture(Architecture);
+
+        LLama.Sampling.DefaultSamplingPipeline profile;
+        if (isQwenThinking && IsMixtureOfExperts)
+        {
+            // Qwen3.5-MoE / Qwen3.6-Next / Coding thinking mode profile
+            profile = new LLama.Sampling.DefaultSamplingPipeline
+            {
+                Temperature = 0.6f,
+                TopP = 0.95f,
+                TopK = 20,
+                MinP = 0.0f,
+                RepeatPenalty = 1.05f,
+                PresencePenalty = 0.0f
+            };
+        }
+        else if (isQwenThinking)
+        {
+            // Qwen3.5 dense thinking mode profile (official specifications)
+            profile = new LLama.Sampling.DefaultSamplingPipeline
+            {
+                Temperature = 1.0f,
+                TopP = 0.95f,
+                TopK = 20,
+                MinP = 0.0f,
+                RepeatPenalty = 1.05f,
+                PresencePenalty = 1.5f
+            };
+        }
+        else if (IsMixtureOfExperts)
+        {
+            profile = new LLama.Sampling.DefaultSamplingPipeline
             {
                 Temperature = 0.6f,
                 TopP = 0.9f,
@@ -1663,17 +1690,18 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 RepeatPenalty = 1.25f,
                 FrequencyPenalty = 0.15f,
                 PresencePenalty = 0.15f
-            }
-            : new LLama.Sampling.DefaultSamplingPipeline
+            };
+        }
+        else
+        {
+            profile = new LLama.Sampling.DefaultSamplingPipeline
             {
                 Temperature = 0.7f,
                 TopP = 0.9f,
                 MinP = 0.05f,
-                // 1.15 (was 1.1): thinking models in production stuttered "The The The..." on a
-                // cold first generation; a slightly stronger repeat penalty breaks that attractor
-                // without harming long-form quality.
                 RepeatPenalty = 1.15f
             };
+        }
 
         if (!EnableToolGrammarConstrainedDecoding || !IsQwenNativeToolCallModel)
         {

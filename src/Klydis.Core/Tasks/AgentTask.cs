@@ -60,12 +60,38 @@ public sealed record AgentTask(
     /// Creates a fresh task with a new id and a Running status.
     /// </summary>
     public static AgentTask Create(string sessionId, string objective, bool requiresExecution = true)
-        => new(
+    {
+        string cleanObjective = objective?.Trim() ?? string.Empty;
+        if (cleanObjective.Length > 500)
+        {
+            if (cleanObjective.StartsWith("--- Attached Context:", StringComparison.OrdinalIgnoreCase) ||
+                cleanObjective.StartsWith("[Attached", StringComparison.OrdinalIgnoreCase))
+            {
+                var lines = cleanObjective.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                var instructionLine = lines.FirstOrDefault(l => !l.StartsWith("---") && !l.StartsWith("[Attached") && !string.IsNullOrWhiteSpace(l));
+                if (!string.IsNullOrWhiteSpace(instructionLine))
+                {
+                    cleanObjective = instructionLine.Trim();
+                    if (cleanObjective.Length > 300) cleanObjective = cleanObjective[..300] + "…";
+                }
+                else
+                {
+                    cleanObjective = cleanObjective[..Math.Min(300, cleanObjective.Length)] + "…";
+                }
+            }
+            else
+            {
+                cleanObjective = cleanObjective[..Math.Min(500, cleanObjective.Length)] + "…";
+            }
+        }
+
+        return new(
             TaskId: "T-" + Guid.NewGuid().ToString("N")[..12],
             SessionId: sessionId,
-            Objective: objective,
+            Objective: cleanObjective,
             Status: TaskStatus.Running,
             CreatedAtUtc: DateTime.UtcNow,
             UpdatedAtUtc: DateTime.UtcNow,
             RequiresExecution: requiresExecution);
+    }
 }

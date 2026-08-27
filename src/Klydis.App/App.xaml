@@ -37,6 +37,11 @@
             <converters:PercentToDashOffsetConverter x:Key="PercentToDashOffsetConverter" />
             <converters:SeverityToBrushConverter x:Key="SeverityToBrushConverter" />
             <converters:ZeroToCollapsedConverter x:Key="ZeroToCollapsedConverter" />
+            <converters:CountToFormattedStringConverter x:Key="CountToFormattedStringConverter" />
+            <converters:EqualityToVisibilityConverter x:Key="EqualityToVisibilityConverter" />
+            <converters:NullToVisibilityConverter x:Key="NullToVisibilityConverter" />
+            <converters:StringToBrushConverter x:Key="StringToBrushConverter" />
+
             
             <Style x:Key="PulsingDotStyle" TargetType="Ellipse">
                 <Setter Property="Width" Value="7"/>

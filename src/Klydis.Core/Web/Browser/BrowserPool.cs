@@ -67,7 +67,7 @@ public sealed class BrowserPool : IAsyncDisposable
             var contextOptions = new BrowserNewContextOptions
             {
                 UserAgent = randomAgent,
-                ViewportSize = ViewportSize.NoViewport,
+                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
                 Locale = "en-US",
                 TimezoneId = "America/New_York",
                 ServiceWorkers = ServiceWorkerPolicy.Block // Block service workers for request routing security

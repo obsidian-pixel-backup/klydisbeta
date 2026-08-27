@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text.RegularExpressions;
+using Klydis.Core.Inference;
 
 namespace Klydis.Core.Protocol;
 
@@ -200,10 +201,10 @@ public sealed record AgentModelProfile
                 : ReasoningProtocol.None);
 
         int hardBudget = isSmall
-            ? (contextSize.HasValue && contextSize.Value > 0 ? Math.Min(24576, contextSize.Value) : 24576)
+            ? (contextSize.HasValue && contextSize.Value > 24576 ? contextSize.Value : (contextSize.HasValue && contextSize.Value > 0 ? contextSize.Value : 24576))
             : (contextSize.HasValue && contextSize.Value > 0 ? contextSize.Value : 131072);
         int recBudget = isSmall
-            ? (contextSize.HasValue && contextSize.Value > 0 ? Math.Min(16384, (int)(hardBudget * 0.67)) : 16384)
+            ? (contextSize.HasValue && contextSize.Value > 24576 ? (int)(hardBudget * 0.75) : (contextSize.HasValue && contextSize.Value > 0 ? Math.Min(16384, (int)(hardBudget * 0.67)) : 16384))
             : (int)(hardBudget * 0.75);
 
         return new AgentModelProfile
@@ -216,8 +217,8 @@ public sealed record AgentModelProfile
             AllowParallelTools = !isSmall,
             MaxToolCallsPerGeneration = isSmall ? 1 : 4,
             PromptProfile = "standard-agentic",
-            DefaultTemperature = 0.7,
-            DefaultTopP = 0.9,
+            DefaultTemperature = isQwen ? 1.0 : 0.7,
+            DefaultTopP = isQwen ? 0.95 : 0.9,
             RecommendedContextBudget = recBudget,
             HardContextBudget = hardBudget,
             SmallModelExecutionMode = isSmall,

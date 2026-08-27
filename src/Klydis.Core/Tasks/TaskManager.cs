@@ -200,11 +200,21 @@ public class TaskManager(
 
         if (current.Status == TaskStatus.Completed)
         {
-            // The last task is sealed. A message that clearly returns to it reopens it;
-            // anything else starts fresh.
-            return Overlaps(userMessage, current.Objective)
-                ? TaskResolutionKind.ReopenTask
-                : TaskResolutionKind.NewTask;
+            // The last task is sealed. Only reopen if the user explicitly asks to resume/reopen/continue the previous task.
+            // Any new prompt, uploaded attachment, or independent request starts a fresh task so the model
+            // never gets trapped repeating the old completed task.
+            bool explicitReopen = lower.StartsWith("reopen", StringComparison.OrdinalIgnoreCase)
+                || lower.StartsWith("resume", StringComparison.OrdinalIgnoreCase)
+                || lower.Contains("previous task", StringComparison.OrdinalIgnoreCase)
+                || lower.Contains("continue previous", StringComparison.OrdinalIgnoreCase);
+
+            return explicitReopen ? TaskResolutionKind.ReopenTask : TaskResolutionKind.NewTask;
+        }
+
+        // New attachment context always signals a fresh or updated task boundary
+        if (lower.Contains("attached context:") || lower.Contains("attached file:") || lower.Contains("attached artifact:"))
+        {
+            return TaskResolutionKind.NewTask;
         }
 
         if (SteerMarkers.Any(m => lower.Contains(m, StringComparison.OrdinalIgnoreCase)))

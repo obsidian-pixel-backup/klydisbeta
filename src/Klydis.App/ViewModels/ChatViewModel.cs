@@ -620,7 +620,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     }
 
                     var plan = _offloadStrategy.CalculatePlan(
-                        totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu);
+                        totalLayers, layerSizeBytes, kvCachePerLayerBytes, contextLength, gpuInfo, systemInfo, Klydis.Core.Hardware.OffloadStrategyType.FullGpu, isHybridSsm: isHybridSsm);
                     
                     if (ct.IsCancellationRequested || seqId != Volatile.Read(ref _modelLoadSequenceId)) return;
 
@@ -1138,27 +1138,68 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 sb.AppendLine();
             }
 
+            string activeSessionId = SelectedSession?.Id ?? "default";
+            string? artifactsDir = null;
+            try
+            {
+                artifactsDir = _toolExecutor.WorkspaceManager?.GetArtifactsDirectory(activeSessionId);
+            }
+            catch { }
+
             foreach (var att in attachments)
             {
+                string savedArtifactPath = string.Empty;
+                try
+                {
+                    if (_toolExecutor.WorkspaceManager != null)
+                    {
+                        savedArtifactPath = await _toolExecutor.WorkspaceManager.SaveAttachmentArtifactAsync(
+                            activeSessionId,
+                            att.FileName,
+                            att.FilePath,
+                            att.Content).ConfigureAwait(false);
+                    }
+                }
+                catch { }
+
+                string pathNotice = !string.IsNullOrWhiteSpace(savedArtifactPath)
+                    ? $" (Saved to workspace: {savedArtifactPath})"
+                    : (!string.IsNullOrWhiteSpace(att.FilePath) ? $" ({att.FilePath})" : string.Empty);
+
                 if (att.Type == AttachmentType.TextContext || (att.Type == AttachmentType.File && !string.IsNullOrEmpty(att.Content)))
                 {
-                    sb.AppendLine($"--- Attached Context: {att.FileName} ---");
+                    sb.AppendLine($"--- Attached Context: {att.FileName}{pathNotice} ---");
                     sb.AppendLine(att.Content);
                     sb.AppendLine("----------------------------------------");
                     sb.AppendLine();
                 }
                 else if (att.Type == AttachmentType.Image || att.Type == AttachmentType.Screenshot)
                 {
-                    sb.AppendLine($"[Attached Image/Screenshot: {att.FileName} ({att.FilePath})]");
+                    sb.AppendLine($"[Attached Image/Screenshot: {att.FileName}{pathNotice}]");
                 }
                 else if (att.Type == AttachmentType.Audio)
                 {
-                    sb.AppendLine($"[Attached Audio Clip: {att.FileName} ({att.FilePath})]");
+                    sb.AppendLine($"[Attached Audio Clip: {att.FileName}{pathNotice}]");
                 }
                 else if (att.Type == AttachmentType.File)
                 {
-                    sb.AppendLine($"[Attached File: {att.FileName} ({att.FilePath}) - {att.SizeDisplay}]");
+                    sb.AppendLine($"[Attached File: {att.FileName}{pathNotice} - {att.SizeDisplay}]");
                 }
+            }
+
+            // Ingest session artifacts into RAG in background so historical uploaded data is indexed and retrievable
+            if (!string.IsNullOrWhiteSpace(artifactsDir) && System.IO.Directory.Exists(artifactsDir) && _toolExecutor.IngestionEngine != null && _toolExecutor.VectorStore != null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _toolExecutor.VectorStore.InitializeAsync();
+                        await _toolExecutor.VectorStore.AddOrUpdateCollectionAsync($"session-{activeSessionId}", $"Session {activeSessionId} Uploads", artifactsDir, 0);
+                        await _toolExecutor.IngestionEngine.IndexDirectoryAsync($"session-{activeSessionId}", artifactsDir);
+                    }
+                    catch { }
+                });
             }
 
             promptMessagePayload = sb.ToString().TrimEnd();
@@ -2620,6 +2661,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         _messageQueue?.Clear(session.Id);
         await _messageStore.DeleteSessionAsync(session.Id);
+        _toolExecutor.WorkspaceManager?.DeleteSessionWorkspace(session.Id);
+        try
+        {
+            if (_toolExecutor.VectorStore != null)
+            {
+                await _toolExecutor.VectorStore.DeleteCollectionAsync($"session-{session.Id}").ConfigureAwait(false);
+            }
+        }
+        catch { }
         Sessions.Remove(session);
         _sessionTranscriptCache.Remove(session.Id);
         if (Sessions.Count > 0)

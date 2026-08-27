@@ -8,6 +8,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Klydis.Core.Chat;
 using Klydis.Core.Inference.Telemetry;
@@ -35,8 +36,8 @@ public sealed class OpenAiProvider : HttpInferenceProviderBase
         SupportsVision: true,
         SupportsThinkingBudget: true,
         SupportsPromptCaching: true,
-        MaxContextTokens: 128000,
-        MaxOutputTokens: 16384,
+        MaxContextTokens: 262144,
+        MaxOutputTokens: 81920,
         CostPerMillionInputTokens: 2.50m,
         CostPerMillionOutputTokens: 10.00m,
         CostPerMillionCachedInputTokens: 1.25m
@@ -477,6 +478,23 @@ public sealed class OpenAiProvider : HttpInferenceProviderBase
                     content = msg.Content
                 });
             }
+            else if (msg.Role == Klydis.Core.Chat.ChatRole.Assistant)
+            {
+                // Qwen 3.5 multi-turn chat template requirement: Strip thinking tags from historical assistant turns
+                messages.Add(new
+                {
+                    role = "assistant",
+                    content = OutputSanitizer.StripThinkingBlocks(msg.Content)
+                });
+            }
+            else if (msg.Role == Klydis.Core.Chat.ChatRole.User)
+            {
+                messages.Add(new
+                {
+                    role = "user",
+                    content = FormatUserContent(msg.Content)
+                });
+            }
             else
             {
                 messages.Add(new
@@ -488,6 +506,55 @@ public sealed class OpenAiProvider : HttpInferenceProviderBase
         }
 
         return messages;
+    }
+
+    private static object FormatUserContent(string content)
+    {
+        if (string.IsNullOrEmpty(content)) return content;
+
+        // Check for attached image markers: [Attached Image/Screenshot: filename (path)]
+        var imageMatch = Regex.Match(content, @"\[Attached Image(?:/Screenshot)?:\s*([^\(\]]+)\s*(?:\(([^\)]+)\))?\]", RegexOptions.IgnoreCase);
+        if (imageMatch.Success)
+        {
+            string? filePath = imageMatch.Groups[2].Success ? imageMatch.Groups[2].Value.Trim() : null;
+            if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+            {
+                try
+                {
+                    byte[] bytes = File.ReadAllBytes(filePath);
+                    string ext = Path.GetExtension(filePath).TrimStart('.').ToLowerInvariant();
+                    string mime = ext switch
+                    {
+                        "jpg" or "jpeg" => "image/jpeg",
+                        "webp" => "image/webp",
+                        "gif" => "image/gif",
+                        "bmp" => "image/bmp",
+                        _ => "image/png"
+                    };
+                    string base64 = Convert.ToBase64String(bytes);
+                    string dataUri = $"data:{mime};base64,{base64}";
+                    string textClean = content.Replace(imageMatch.Value, "").Trim();
+
+                    var parts = new List<object>();
+                    if (!string.IsNullOrEmpty(textClean))
+                    {
+                        parts.Add(new { type = "text", text = textClean });
+                    }
+                    parts.Add(new
+                    {
+                        type = "image_url",
+                        image_url = new { url = dataUri }
+                    });
+                    return parts;
+                }
+                catch
+                {
+                    // Fallback to text if file cannot be read
+                }
+            }
+        }
+
+        return content;
     }
 
     private static object FormatToolParameters(IList<ToolParameter> parameters)

@@ -322,6 +322,12 @@ public class SystemPromptManager
         sb.AppendLine("- 'run_command' ALREADY executes PowerShell — write your PowerShell directly. Do NOT wrap your command in `powershell -Command \"...\"`: that double-wraps it and breaks variables (e.g. `$lines` becomes empty).");
         sb.AppendLine("- When tool output is offloaded to a file, read it in RANGES with start_line and end_line (about 100 lines per call). NEVER re-read the whole offloaded file in one call — it will be capped and offloaded again.");
         sb.AppendLine();
+        sb.AppendLine("### PLAN & TODO MAINTENANCE STRATEGY (CRITICAL)");
+        sb.AppendLine("- When executing a multi-step task with a plan: DO NOT merely create the plan once and forget it.");
+        sb.AppendLine("- REVISIT AND UPDATE YOUR PLAN CONTINUOUSLY: As you complete the work for each item, call tool 'plan' (e.g. {\"name\": \"plan\", \"arguments\": {\"action\": \"complete\", \"item\": \"<item_text>\"}}) to check it off immediately.");
+        sb.AppendLine("- ADAPT IN-FLIGHT: If requirements change, tests fail, or new dependencies appear, call 'plan' (action='add', action='remove', or action='replan') to adjust tasks dynamically.");
+        sb.AppendLine("- The PLAN tab in the user's workbench updates in real-time as you check off items. Keeping the plan live is required before task_complete can succeed.");
+        sb.AppendLine();
         sb.AppendLine("### QUEUED MESSAGES & STEERING STRATEGY");
         sb.AppendLine("- Pending queued user messages are ANNOUNCED to you directly when they exist (see the queue notice in this prompt) — you do NOT need to poll for them.");
         sb.AppendLine("- When such a notice appears, call tool 'incorporate_queued_message' with argument {\"queue_id\": \"<ID>\"} to retrieve and steer using the user's queued commands, attached images, screenshots, or context files.");

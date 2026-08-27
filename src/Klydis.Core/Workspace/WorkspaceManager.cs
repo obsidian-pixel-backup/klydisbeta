@@ -32,6 +32,19 @@ public sealed class WorkspaceManager : IWorkspaceManager
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             _baseWorkspaceDirectory = Path.Combine(userProfile, "Klydis", "Workspace");
         }
+
+        try
+        {
+            Directory.CreateDirectory(_baseWorkspaceDirectory);
+            string defaultSessionDir = Path.Combine(_baseWorkspaceDirectory, "session-default");
+            Directory.CreateDirectory(defaultSessionDir);
+            Directory.CreateDirectory(Path.Combine(defaultSessionDir, "scratch"));
+            Directory.CreateDirectory(Path.Combine(defaultSessionDir, "artifacts"));
+            Directory.CreateDirectory(Path.Combine(defaultSessionDir, "changes"));
+            Directory.CreateDirectory(Path.Combine(defaultSessionDir, "exports"));
+            Directory.CreateDirectory(Path.Combine(defaultSessionDir, "terminal"));
+        }
+        catch { }
     }
 
     /// <inheritdoc />
@@ -199,6 +212,74 @@ public sealed class WorkspaceManager : IWorkspaceManager
     public AgentWorkspaceContext SetProjectWorkspace(string sessionId, string projectRoot)
     {
         return CreateSessionWorkspace(sessionId, projectRoot);
+    }
+
+    /// <inheritdoc />
+    public async Task<string> SaveAttachmentArtifactAsync(string sessionId, string fileName, string? sourceFilePath = null, string? content = null)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId)) sessionId = "default";
+        var context = GetWorkspaceContext(sessionId);
+        string safeName = Path.GetFileName(fileName);
+        if (string.IsNullOrWhiteSpace(safeName)) safeName = $"attachment_{Guid.NewGuid():N}.txt";
+
+        string artifactsDir = context.Artifacts;
+        Directory.CreateDirectory(artifactsDir);
+        string targetArtifactPath = Path.Combine(artifactsDir, safeName);
+        string targetRootPath = Path.Combine(context.Root, safeName);
+
+        if (!string.IsNullOrWhiteSpace(sourceFilePath) && File.Exists(sourceFilePath))
+        {
+            try
+            {
+                File.Copy(sourceFilePath, targetArtifactPath, overwrite: true);
+                if (!string.Equals(targetArtifactPath, targetRootPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Copy(sourceFilePath, targetRootPath, overwrite: true);
+                }
+            }
+            catch
+            {
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    await File.WriteAllTextAsync(targetArtifactPath, content).ConfigureAwait(false);
+                    if (!string.Equals(targetArtifactPath, targetRootPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        await File.WriteAllTextAsync(targetRootPath, content).ConfigureAwait(false);
+                    }
+                }
+            }
+        }
+        else if (content != null)
+        {
+            await File.WriteAllTextAsync(targetArtifactPath, content).ConfigureAwait(false);
+            if (!string.Equals(targetArtifactPath, targetRootPath, StringComparison.OrdinalIgnoreCase))
+            {
+                await File.WriteAllTextAsync(targetRootPath, content).ConfigureAwait(false);
+            }
+        }
+
+        AuthorizeExternalPath(sessionId, targetArtifactPath);
+        AuthorizeExternalPath(sessionId, targetRootPath);
+        return targetArtifactPath;
+    }
+
+    /// <inheritdoc />
+    public void DeleteSessionWorkspace(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId)) return;
+        string sessionFolderName = SanitizeSessionFolderName(sessionId);
+        string sessionDir = Path.Combine(_baseWorkspaceDirectory, sessionFolderName);
+        _sessions.TryRemove(sessionId, out _);
+        _authorizedExternalRoots.TryRemove(sessionId, out _);
+
+        try
+        {
+            if (Directory.Exists(sessionDir))
+            {
+                Directory.Delete(sessionDir, recursive: true);
+            }
+        }
+        catch { }
     }
 
     private HashSet<string> GetAuthorizedRoots(string sessionId)

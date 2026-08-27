@@ -5269,6 +5269,15 @@ public class ChatEngine(
         }
         sb.AppendLine($"  Reason: {verdict.Reason}");
 
+        if (verdict.Error == Klydis.Core.Tasks.ActionGateError.PrematureCompletion)
+        {
+            sb.AppendLine("  Action Required: You attempted to call 'task_complete' while plan tasks remain open or incomplete.");
+            sb.AppendLine("  Guidance: You MUST complete all outstanding plan items before calling 'task_complete'.");
+            sb.AppendLine("  Call tool 'plan' with action='complete' (e.g. {\"action\": \"complete\", \"item\": \"<item>\"}) or action='remove' for each open item.");
+            sb.AppendLine("  Do NOT retry 'task_complete' until every plan item is marked complete.");
+            return sb.ToString();
+        }
+
         // Schema guidance: a missing-argument rejection must TEACH the model the tool's
         // actual contract, not just say "pattern is missing". Small models (qwen3.5, mistral)
         // repeatedly fail schema checks when the feedback does not name the expected

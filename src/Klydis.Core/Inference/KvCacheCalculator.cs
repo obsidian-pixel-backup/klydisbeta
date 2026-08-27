@@ -57,6 +57,8 @@ public static class KvCacheCalculator
 
     /// <summary>
     /// Calculates KV Cache VRAM footprint from GGUF metadata and context parameters.
+    /// Accurately scales KV cache layers for hybrid SSM/DeltaNet architectures (such as Qwen 3.5 / Qwen 3-Next)
+    /// where only standard attention layers (1/4 of layers, e.g. 8 of 32) maintain a dynamic KV cache.
     /// </summary>
     public static KvCacheMemoryEstimate Calculate(GgufMetadata metadata, long contextSize, KvCacheQuantizationType quantType = KvCacheQuantizationType.Q4_0)
     {
@@ -66,7 +68,24 @@ public static class KvCacheCalculator
         long embeddingLength = metadata.EmbeddingLength ?? 4096;
         long headDim = numQueryHeads > 0 ? (embeddingLength / numQueryHeads) : 128;
 
-        return Calculate(numLayers, numQueryHeads, numKvHeads, headDim, contextSize, quantType);
+        string archLower = (metadata.Architecture ?? string.Empty).ToLowerInvariant();
+        long effectiveAttentionLayers = numLayers;
+
+        // Qwen 3.5 / Qwen 3-Next hybrid architectures: 8 of 32 layers (1/4) are standard attention,
+        // while 24 of 32 layers are Gated DeltaNet linear recurrence with constant O(1) state.
+        if (archLower is "qwen35" or "qwen3next" or "qwen35moe" ||
+            archLower.StartsWith("qwen35", StringComparison.Ordinal) ||
+            archLower.StartsWith("qwen3next", StringComparison.Ordinal) ||
+            archLower.StartsWith("qwen3-next", StringComparison.Ordinal))
+        {
+            effectiveAttentionLayers = Math.Max(1, numLayers / 4);
+        }
+        else if (archLower is "mamba" or "rwkv" or "jamba")
+        {
+            effectiveAttentionLayers = 0;
+        }
+
+        return Calculate(effectiveAttentionLayers, numQueryHeads, numKvHeads, headDim, contextSize, quantType);
     }
 
     /// <summary>

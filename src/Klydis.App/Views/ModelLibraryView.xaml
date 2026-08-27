@@ -4,345 +4,626 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
              xmlns:viewmodels="clr-namespace:Klydis.App.ViewModels"
+             xmlns:mdxam="clr-namespace:MdXaml;assembly=MdXaml"
              mc:Ignorable="d" 
-             d:DesignHeight="800" d:DesignWidth="1200">
+             d:DesignHeight="850" d:DesignWidth="1280">
+
     <UserControl.Resources>
-        <DataTemplate x:Key="HfModelCardTemplate" DataType="{x:Type viewmodels:HfModelCardViewModel}">
-            <Border x:Name="CardBorderHf" Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Margin="0,0,0,10" Padding="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" RenderTransformOrigin="0.5,0.5">
-                <Border.RenderTransform>
-                    <ScaleTransform ScaleX="1" ScaleY="1"/>
-                </Border.RenderTransform>
-                <StackPanel>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel>
-                            <TextBlock Text="{Binding RepoId}" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="{Binding Author}" Foreground="{DynamicResource TextSecondaryBrush}" />
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                            <Border Background="#6366f1" CornerRadius="4" Padding="4,2" Margin="0,0,5,0" Visibility="{Binding IsVision, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                <TextBlock Text="👁 Vision" FontSize="10" Foreground="White" />
-                            </Border>
-                            <Border Background="#10b981" CornerRadius="4" Padding="4,2" Margin="0,0,10,0" Visibility="{Binding IsThinking, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                <TextBlock Text="🧠 Thinking" FontSize="10" Foreground="White" />
-                            </Border>
-                            <TextBlock Text="{Binding Downloads, StringFormat='⬇ {0}'}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,15,0" />
-                            <TextBlock Text="{Binding Likes, StringFormat='♥ {0}'}" Foreground="{DynamicResource TextSecondaryBrush}" />
-                        </StackPanel>
-                    </Grid>
-                    <Expander Header="Available GGUF Files" IsExpanded="{Binding IsExpanded, Mode=TwoWay}" Margin="0,5,0,0" Foreground="{DynamicResource TextPrimaryBrush}">
-                        <StackPanel Margin="0,5,0,0">
-                            <!-- Loading State -->
-                            <StackPanel Orientation="Horizontal" Margin="0,6,0,6" Visibility="{Binding IsLoadingFiles, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                <ProgressBar IsIndeterminate="True" Width="80" Height="4" Margin="0,0,10,0" Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" VerticalAlignment="Center" />
-                                <TextBlock Text="Fetching GGUF files from Hugging Face..." FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" />
-                            </StackPanel>
+        <!-- Model List Item Row Container Style -->
+        <Style x:Key="ModelHubRowStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource InputBackgroundBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="Margin" Value="0,0,0,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource AccentPrimaryBrush}"/>
+                    <Setter Property="BorderThickness" Value="1.5"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
 
-                            <!-- Error State -->
-                            <StackPanel Orientation="Horizontal" Margin="0,4,0,6" Visibility="{Binding LoadError, Converter={StaticResource StringToVisibilityConverter}}">
-                                <TextBlock Text="{Binding LoadError}" Foreground="{DynamicResource ErrorBrush}" FontSize="11" VerticalAlignment="Center" Margin="0,0,10,0" />
-                                <Button Content="🔄 Retry" Command="{Binding RetryLoadFilesCommand}" Style="{StaticResource SecondaryButton}" Padding="6,2" FontSize="11" />
-                            </StackPanel>
+        <!-- Segmented Tab Button Style -->
+        <Style x:Key="SegmentedTabButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="Padding" Value="16,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="14" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="{DynamicResource SurfaceHoverBrush}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
-                            <!-- Empty State -->
-                            <TextBlock Text="No GGUF files found in this repository." FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,4,0,4">
-                                <TextBlock.Style>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Visibility" Value="Collapsed" />
-                                        <Style.Triggers>
-                                            <MultiDataTrigger>
-                                                <MultiDataTrigger.Conditions>
-                                                    <Condition Binding="{Binding HasLoadedFiles}" Value="True" />
-                                                    <Condition Binding="{Binding IsLoadingFiles}" Value="False" />
-                                                    <Condition Binding="{Binding GgufFiles.Count}" Value="0" />
-                                                    <Condition Binding="{Binding LoadError}" Value="{x:Null}" />
-                                                </MultiDataTrigger.Conditions>
-                                                <Setter Property="Visibility" Value="Visible" />
-                                            </MultiDataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </TextBlock.Style>
-                            </TextBlock>
+        <!-- Metadata Pill Badge Style -->
+        <Style x:Key="MetaPillStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SurfaceElevatedBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Margin" Value="0,0,6,6"/>
+        </Style>
 
-                            <!-- Files List -->
-                            <ItemsControl ItemsSource="{Binding GgufFiles}" Margin="0,2,0,0">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Margin="0,2">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <Grid Grid.Column="0" Margin="0,0,10,0">
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*" />
-                                                    <ColumnDefinition Width="Auto" />
-                                                    <ColumnDefinition Width="Auto" />
-                                                    <ColumnDefinition Width="Auto" />
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Grid.Column="0" Text="{Binding FileName}" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,10,0" TextTrimming="CharacterEllipsis" ToolTip="{Binding FileName}" VerticalAlignment="Center" />
-                                                <TextBlock Grid.Column="1" Text="{Binding Size}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,10,0" VerticalAlignment="Center" />
-                                                <Border Grid.Column="2" Background="{DynamicResource BackgroundTertiary}" CornerRadius="4" Padding="4,2" Margin="0,0,5,0" VerticalAlignment="Center">
-                                                    <TextBlock Text="{Binding QuantType}" FontSize="10" Foreground="{DynamicResource TextPrimaryBrush}" />
-                                                </Border>
-                                                <TextBlock Grid.Column="3" Text="⚠ Exceeds VRAM" FontSize="10" Foreground="{DynamicResource ErrorBrush}" VerticalAlignment="Center" Visibility="{Binding CanFitInVram, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
-                                            </Grid>
-                                            <Button Grid.Column="1" Content="Download" Style="{StaticResource SecondaryButton}" Padding="8,3" FontSize="11"
-                                                    Command="{Binding DataContext.DownloadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" 
-                                                    CommandParameter="{Binding}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </StackPanel>
-                    </Expander>
-                </StackPanel>
-            </Border>
-        </DataTemplate>
+        <!-- Top Header Status Badge Style -->
+        <Style x:Key="HeaderStatusBadgeStyle" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SurfaceElevatedBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
     </UserControl.Resources>
 
-    <Grid Margin="20">
+    <Grid Background="{DynamicResource WindowBackgroundBrush}" Margin="20,16,20,16">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/> <!-- Row 0: Top Header & Telemetry -->
+            <RowDefinition Height="Auto"/> <!-- Row 1: Segmented Tabs, Search & Filters -->
+            <RowDefinition Height="*"/>    <!-- Row 2: Master-Detail Split Content -->
         </Grid.RowDefinitions>
 
-        <!-- Header -->
-        <Grid Grid.Row="0" Margin="0,0,0,20">
+        <!-- ========================================================================= -->
+        <!-- ROW 0: TOP HEADER BAR                                                     -->
+        <!-- ========================================================================= -->
+        <Grid Grid.Row="0" Margin="0,0,0,16">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="200" />
             </Grid.ColumnDefinitions>
-            <TextBlock Text="Model Library" FontSize="28" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" />
-            <Button Grid.Column="2" Content="🔄 Scan" Command="{Binding ScanCommand}" Margin="0,0,20,0" Style="{StaticResource SecondaryButton}" />
-            <StackPanel Grid.Column="3" VerticalAlignment="Center">
-                <TextBlock Text="VRAM Usage" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12" />
-                <ProgressBar Minimum="0" Maximum="100" Value="{Binding VramUsagePercent}" Height="10" Margin="0,5,0,0"
-                             Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" />
+
+            <!-- Left: Title & Subtitle -->
+            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                <TextBlock Text="Model hub" FontSize="26" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" />
+                <TextBlock Text="Discover, download, and run inference models locally." FontSize="12.5" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,3,0,0" />
+            </StackPanel>
+
+            <!-- Right: System Telemetry Chips -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <!-- Protocol Capsule -->
+                <Border Style="{StaticResource HeaderStatusBadgeStyle}">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse Width="7" Height="7" Fill="#EF4444" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Auto" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,6,0"/>
+                        <TextBlock Text="HTTP" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,6,0"/>
+                        <TextBlock Text="Xet" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Cache count badge -->
+                <Border Style="{StaticResource HeaderStatusBadgeStyle}">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="📦 " FontSize="10" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding CacheCountText}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Local count badge -->
+                <Border Style="{StaticResource HeaderStatusBadgeStyle}">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="💾 " FontSize="10" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding LocalCountText}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- VRAM badge -->
+                <Border Style="{StaticResource HeaderStatusBadgeStyle}" ToolTip="Detected GPU VRAM Capacity">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="🖥 " FontSize="10" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding VramBadgeText}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- RAM badge -->
+                <Border Style="{StaticResource HeaderStatusBadgeStyle}" ToolTip="System RAM Capacity">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="🧠 " FontSize="10" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding RamBadgeText}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- CPU badge -->
+                <Border Style="{StaticResource HeaderStatusBadgeStyle}" ToolTip="CPU Cores &amp; Logical Threads">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="⚡ " FontSize="10" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding CpuBadgeText}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    </StackPanel>
+                </Border>
             </StackPanel>
         </Grid>
 
-        <!-- Columns -->
-        <Grid Grid.Row="1">
+        <!-- ========================================================================= -->
+        <!-- ROW 1: TABS, SEARCH & FILTER TOOLBAR                                     -->
+        <!-- ========================================================================= -->
+        <Grid Grid.Row="1" Margin="0,0,0,16">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="20"/> <!-- Spacer -->
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/> <!-- Segmented Tabs -->
+                <ColumnDefinition Width="*"/>    <!-- Search Box -->
+                <ColumnDefinition Width="Auto"/> <!-- Filter Dropdowns -->
             </Grid.ColumnDefinitions>
 
-            <!-- Left Column: Hugging Face Hub -->
-            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Padding="0,0,10,0">
-                <StackPanel>
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                        <TextBlock Text="🤗" FontSize="20" Margin="0,0,10,0" />
-                        <TextBlock Text="Hugging Face Hub" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" />
+            <!-- Segmented Switcher: [ Discover ] [ On Device ] -->
+            <Border Grid.Column="0" Background="{DynamicResource SurfaceElevatedBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="16" Padding="3" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal">
+                    <Button Content="Discover" Command="{Binding SelectDiscoverTabCommand}">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource SegmentedTabButtonStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SelectedHubTab}" Value="Discover">
+                                        <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                    <Button Content="On Device" Command="{Binding SelectOnDeviceTabCommand}">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource SegmentedTabButtonStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SelectedHubTab}" Value="OnDevice">
+                                        <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}"/>
+                                        <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </StackPanel>
+            </Border>
+
+            <!-- Center: Search Box -->
+            <Border Grid.Column="1" Background="{DynamicResource InputBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="16" Height="36" Margin="14,0,14,0" VerticalAlignment="Center">
+                <Grid Margin="10,0,10,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0" Text="🔍" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+
+                    <TextBox Grid.Column="1" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged, Delay=250}" 
+                             Background="Transparent" BorderThickness="0" Foreground="{DynamicResource TextPrimaryBrush}"
+                             VerticalContentAlignment="Center" FontSize="13"
+                             Tag="Search all models" />
+
+                    <!-- Search Watermark Placeholder -->
+                    <TextBlock Grid.Column="1" Text="Search all models" Foreground="{DynamicResource TextMutedBrush}"
+                               VerticalAlignment="Center" Margin="2,0,0,0" IsHitTestVisible="False" FontSize="13"
+                               Visibility="{Binding SearchQuery, Converter={StaticResource StringEmptyToVisibilityConverter}}"/>
+
+                    <Button Grid.Column="2" Content="✕" Command="{Binding ClearFiltersCommand}" Style="{StaticResource GhostButton}"
+                            Padding="4,2" FontSize="10" VerticalAlignment="Center"
+                            Visibility="{Binding SearchQuery, Converter={StaticResource StringToVisibilityConverter}}"/>
+                </Grid>
+            </Border>
+
+            <!-- Right: Filters & Tools -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <!-- Format Filter Dropdown -->
+                <ComboBox ItemsSource="{Binding AvailableFormatFilters}" SelectedItem="{Binding SelectedFormatFilter}" Width="100" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+
+                <!-- Capabilities Filter Dropdown -->
+                <ComboBox ItemsSource="{Binding AvailableCapabilityFilters}" SelectedItem="{Binding SelectedCapabilityFilter}" Width="145" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+
+                <!-- Sort Filter Dropdown -->
+                <ComboBox ItemsSource="{Binding AvailableSortFilters}" SelectedItem="{Binding SelectedSortFilter}" Width="145" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+
+                <!-- Refresh / Scan Button -->
+                <Button Command="{Binding ScanCommand}" ToolTip="Scan &amp; Refresh Model Hub" Style="{StaticResource GhostButton}" Width="34" Height="34" Margin="0,0,4,0">
+                    <TextBlock Text="🔄" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- ========================================================================= -->
+        <!-- ROW 2: MASTER-DETAIL SPLIT VIEW                                           -->
+        <!-- ========================================================================= -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="380" MinWidth="300" MaxWidth="500"/> <!-- Master Column -->
+                <ColumnDefinition Width="16"/>                                 <!-- Gap Spacer -->
+                <ColumnDefinition Width="*"/>                                   <!-- Detail Column -->
+            </Grid.ColumnDefinitions>
+
+            <!-- ========================================== -->
+            <!-- LEFT PANEL: MODEL LIST                     -->
+            <!-- ========================================== -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/> <!-- Header inside list -->
+                    <RowDefinition Height="Auto"/> <!-- Active Downloads Banner -->
+                    <RowDefinition Height="*"/>    <!-- Scrollable Model List -->
+                </Grid.RowDefinitions>
+
+                <!-- List Header: < Models | Category Filter -->
+                <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="&lt; Models" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
                     </StackPanel>
-                    
-                    <Grid Margin="0,0,0,10">
-                        <TextBox Text="{Binding HfSearchText, UpdateSourceTrigger=PropertyChanged, Delay=300}" 
-                                 Tag="Search Hugging Face for GGUF models..." />
-                    </Grid>
 
-                    <!-- Hugging Face Dedicated Filter Bar -->
-                    <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="10,8" Margin="0,0,0,15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
-                        <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <CheckBox Content="👁 Vision" IsChecked="{Binding HfFilterVisionOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0" />
-                            <CheckBox Content="🧠 Thinking" IsChecked="{Binding HfFilterThinkingOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,12,0" />
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <ComboBox ItemsSource="{Binding AvailableCategoryFilters}" SelectedItem="{Binding SelectedCategoryFilter}" Width="85" Height="28" FontSize="11" Margin="0,0,8,0" VerticalContentAlignment="Center"/>
+                    </StackPanel>
+                </Grid>
 
-                            <TextBlock Text="Size:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <ComboBox ItemsSource="{Binding AvailableSizeFilters}" SelectedItem="{Binding HfSelectedSizeFilter}" Width="100" Margin="0,0,12,0" />
-
-                            <TextBlock Text="Role:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <ComboBox ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding HfSelectedRoleFilter}" Width="110" Margin="0,0,10,0" />
-
-                            <Button Content="✕ Clear" Command="{Binding ClearHfFiltersCommand}" Style="{StaticResource SecondaryButton}" Padding="6,2" FontSize="11" VerticalAlignment="Center"
-                                    Visibility="{Binding IsHfSearchOrFilterActive, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                        </WrapPanel>
-                    </Border>
-
-                    <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="15" Margin="0,0,0,20"
-                            Visibility="{Binding HasActiveDownloads, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <!-- Active Downloads Tray Card -->
+                <Border Grid.Row="1" Background="{DynamicResource SurfaceElevatedBrush}" BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1" CornerRadius="8" Padding="10,8" Margin="0,0,0,8"
+                        Visibility="{Binding HasActiveDownloads, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="⚡ Active Downloads" FontWeight="SemiBold" FontSize="11.5" Foreground="{DynamicResource AccentPrimaryBrush}" Margin="0,0,0,6"/>
                         <ItemsControl ItemsSource="{Binding ActiveDownloads}">
                             <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <StackPanel Margin="0,0,0,10">
-                                        <Grid Margin="0,0,0,5">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Status}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" />
-                                            <Button Grid.Column="1" Content="Cancel" Command="{Binding CancelCommand}" Style="{StaticResource SecondaryButton}" Padding="8,2" FontSize="10" Foreground="{DynamicResource ErrorBrush}" BorderBrush="{DynamicResource ErrorBrush}" />
-                                        </Grid>
-                                        <ProgressBar Minimum="0" Maximum="100" Value="{Binding Progress}" Height="10"
-                                                     Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" />
-                                    </StackPanel>
+                                <DataTemplate DataType="{x:Type viewmodels:ActiveDownloadViewModel}">
+                                    <Grid Margin="0,2,0,6">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Status}" FontSize="10.5" Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis"/>
+                                        <Button Grid.Row="0" Grid.Column="1" Content="✕" Command="{Binding CancelCommand}" Style="{StaticResource GhostButton}" Foreground="{DynamicResource ErrorBrush}" Padding="4,0" FontSize="10" ToolTip="Cancel download"/>
+                                        <ProgressBar Grid.Row="1" Grid.ColumnSpan="2" Minimum="0" Maximum="100" Value="{Binding Progress}" Height="4" Margin="0,4,0,0" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                    </Grid>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                    </Border>
-
-                    <!-- Search Indicator & Header when Searching or Filtering -->
-                    <StackPanel Visibility="{Binding IsHfSearchOrFilterActive, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,0,0,10">
-                        <Grid Margin="0,0,0,5">
-                            <TextBlock Text="Raw Hugging Face Search Results" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" />
-                            <TextBlock Text="🔍 Searching Hugging Face..." HorizontalAlignment="Right" Foreground="{DynamicResource AccentPrimaryBrush}" FontSize="12" FontStyle="Italic" VerticalAlignment="Center"
-                                       Visibility="{Binding HfIsSearching, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                        </Grid>
                     </StackPanel>
+                </Border>
 
-                    <!-- Search Results -->
-                    <ItemsControl ItemsSource="{Binding HfResults}" ItemTemplate="{StaticResource HfModelCardTemplate}" Margin="0,0,0,20" />
-
-                    <!-- Categories -->
-                    <StackPanel Visibility="{Binding IsHfCategoriesVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <Expander Header="🔥 Popular Models" IsExpanded="True" Margin="0,0,0,15" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" FontSize="16">
-                            <ItemsControl ItemsSource="{Binding PopularModels}" ItemTemplate="{StaticResource HfModelCardTemplate}" Margin="0,10,0,0" />
-                        </Expander>
-
-                        <Expander Header="✨ Newest Models" IsExpanded="False" Margin="0,0,0,15" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" FontSize="16">
-                            <ItemsControl ItemsSource="{Binding NewestModels}" ItemTemplate="{StaticResource HfModelCardTemplate}" Margin="0,10,0,0" />
-                        </Expander>
-
-                        <Expander Header="⭐ Highest Rated" IsExpanded="False" Margin="0,0,0,15" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" FontSize="16">
-                            <ItemsControl ItemsSource="{Binding HighestRatedModels}" ItemTemplate="{StaticResource HfModelCardTemplate}" Margin="0,10,0,0" />
-                        </Expander>
-                    </StackPanel>
-
-                </StackPanel>
-            </ScrollViewer>
-
-            <!-- Right Column: Local Models -->
-            <Grid Grid.Column="2" Margin="10,0,0,0">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <StackPanel Grid.Row="0">
-                    <TextBlock Text="Local Models" FontSize="20" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10" />
-                    <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}" 
-                             Margin="0,0,0,10"
-                             Tag="Search local models..." />
-
-                    <!-- Local Model Dedicated Filters Bar -->
-                    <Border Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Padding="10,8" Margin="0,0,0,15" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
-                        <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <CheckBox Content="👁 Vision" IsChecked="{Binding FilterVisionOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0" />
-                            <CheckBox Content="🧠 Thinking" IsChecked="{Binding FilterThinkingOnly}" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="0,0,12,0" />
-
-                            <TextBlock Text="Size:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <ComboBox ItemsSource="{Binding AvailableSizeFilters}" SelectedItem="{Binding SelectedSizeFilter}" Width="100" Margin="0,0,12,0" />
-
-                            <TextBlock Text="Role:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                            <ComboBox ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding SelectedRoleFilter}" Width="110" />
-                        </WrapPanel>
-                    </Border>
-
-                    <TextBlock Text="No models found. Download models from the Hugging Face Hub." 
-                               Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic" Margin="10,0,10,10"
-                               Visibility="{Binding FilteredModels.Count, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                </StackPanel>
-
-                <!-- The model list MUST be its own scroller with a bounded height (fills this
-                     row) — never nested inside an outer ScrollViewer. A ListBox has an internal
-                     ScrollViewer; nesting it inside an outer ScrollViewer creates a mouse-wheel
-                     dead zone: the inner viewer sizes to its content (unbounded in the outer
-                     StackPanel), captures the wheel, has nothing to scroll, and the outer
-                     ScrollViewer never receives the event — so the page appears unscrollable.
-                     This matches the SkillsView / ChatView scroller pattern. -->
-                <ListBox Grid.Row="1" ItemsSource="{Binding FilteredModels}" SelectedItem="{Binding SelectedLocalModel, Mode=TwoWay}"
-                         Background="Transparent" BorderThickness="0" Margin="0,10,0,0"
+                <!-- Model List Items -->
+                <ListBox Grid.Row="2" ItemsSource="{Binding HubItems}" SelectedItem="{Binding SelectedHubItem, Mode=TwoWay}"
+                         Background="Transparent" BorderThickness="0"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                          ScrollViewer.VerticalScrollBarVisibility="Auto">
-                        <ListBox.ItemContainerStyle>
-                            <Style TargetType="ListBoxItem">
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                                <Setter Property="Template">
-                                    <Setter.Value>
-                                        <ControlTemplate TargetType="ListBoxItem">
-                                            <ContentPresenter />
-                                        </ControlTemplate>
-                                    </Setter.Value>
-                                </Setter>
-                            </Style>
-                        </ListBox.ItemContainerStyle>
-                        <ListBox.ItemTemplate>
-                            <DataTemplate DataType="{x:Type viewmodels:ModelCardViewModel}">
-                                <Border x:Name="CardBorder" Background="{DynamicResource PanelBackgroundBrush}" CornerRadius="7" Margin="0,0,0,10" Padding="10" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" RenderTransformOrigin="0.5,0.5">
-                                    <Border.RenderTransform>
-                                        <ScaleTransform ScaleX="1" ScaleY="1"/>
-                                    </Border.RenderTransform>
-                                    <StackPanel>
-                                        <Grid>
-                                            <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" />
-                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
-                                                <Border Background="#6366f1" CornerRadius="4" Padding="4,2" Margin="0,0,5,0" Visibility="{Binding IsVision, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                                    <TextBlock Text="👁 Vision" FontSize="10" Foreground="White" />
-                                                </Border>
-                                                <Border Background="#10b981" CornerRadius="4" Padding="4,2" Margin="0,0,5,0" Visibility="{Binding IsThinking, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                                    <TextBlock Text="🧠 Thinking" FontSize="10" Foreground="White" />
-                                                </Border>
-                                                <Border Background="{DynamicResource AccentPrimaryBrush}" CornerRadius="7" Padding="5,2" Margin="0,0,5,0">
-                                                    <TextBlock Text="{Binding ParameterSize}" FontSize="11" Foreground="{DynamicResource TextInverse}" />
-                                                </Border>
-                                                <Border Background="{DynamicResource BackgroundTertiary}" CornerRadius="7" Padding="5,2">
-                                                    <TextBlock Text="{Binding QuantType}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}" />
-                                                </Border>
-                                            </StackPanel>
-                                        </Grid>
-                                        <TextBlock Text="{Binding Architecture}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,5,0,0" />
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            <Setter Property="Padding" Value="0"/>
+                            <Setter Property="Margin" Value="0"/>
+                            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <ContentPresenter />
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
 
-                                        <!-- Native engine compatibility warning (e.g. unsupported tokenizer pre-type) -->
-                                        <Border Background="#3d1a1a" BorderBrush="{DynamicResource ErrorBrush}" BorderThickness="1" CornerRadius="5" Padding="8,5" Margin="0,6,0,0"
-                                                Visibility="{Binding IsCompatible, Converter={StaticResource InverseBooleanToVisibilityConverter}}">
-                                            <TextBlock Text="{Binding CompatibilityWarning}" FontSize="11" Foreground="#ffd7d7" TextWrapping="Wrap" />
-                                        </Border>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="{x:Type viewmodels:ModelHubItemViewModel}">
+                            <Border Style="{StaticResource ModelHubRowStyle}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" /> <!-- Avatar -->
+                                        <ColumnDefinition Width="*" />    <!-- Name & Author -->
+                                        <ColumnDefinition Width="Auto" /> <!-- Stats & Date -->
+                                    </Grid.ColumnDefinitions>
 
-                                        <!-- Role Management -->
-                                        <StackPanel Orientation="Horizontal" Margin="0,5,0,0" VerticalAlignment="Center">
-                                            <TextBlock Text="Role Allocation:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0" />
-                                            <ComboBox ItemsSource="{Binding AvailableRoles}" SelectedItem="{Binding Role, UpdateSourceTrigger=PropertyChanged}" Width="150" />
+                                    <!-- Author / Brand Avatar Box -->
+                                    <Border Grid.Column="0" Width="36" Height="36" CornerRadius="6" VerticalAlignment="Center" Margin="0,0,10,0"
+                                            Background="{Binding AvatarBackground, Converter={StaticResource StringToBrushConverter}}">
+                                        <TextBlock Text="{Binding AvatarLetter}" FontSize="15" FontWeight="Bold" Foreground="{DynamicResource TextInverse}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+
+                                    <!-- Model Name & Author -->
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding ModelName}" FontWeight="SemiBold" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" MaxWidth="190" ToolTip="{Binding ModelName}"/>
+                                            <!-- Dot Indicator -->
+                                            <Ellipse Width="6" Height="6" Margin="6,0,0,0" VerticalAlignment="Center"
+                                                     Fill="{Binding DotColor, Converter={StaticResource StringToBrushConverter}}"/>
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding Author}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+
+                                    <!-- Stats & Time Ago -->
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right">
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                            <TextBlock Text="♥ " FontSize="10" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                                            <TextBlock Text="{Binding Likes, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="10.5" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,8,0"/>
+                                            <TextBlock Text="⬇ " FontSize="10" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                                            <TextBlock Text="{Binding Downloads, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="10.5" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding TimeAgo}" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <!-- Empty State for Master List -->
+                <TextBlock Grid.Row="1" Text="No models found matching your search or filters." 
+                           Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="{Binding HubItems.Count, Converter={StaticResource ZeroToCollapsedConverter}, ConverterParameter=Inverse}">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HubItems.Count}" Value="0">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+
+            <!-- ========================================== -->
+            <!-- RIGHT PANEL: MODEL DETAILS & README        -->
+            <!-- ========================================== -->
+            <Border Grid.Column="2" Background="{DynamicResource PanelBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="20">
+                <Grid>
+                    <!-- Detail Content (when a model is selected) -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                  Visibility="{Binding SelectedHubItem, Converter={StaticResource NullToVisibilityConverter}}">
+                        <StackPanel>
+                            <!-- 1. Header Box: Avatar, Title, External Link, Author, Capability Pills -->
+                            <Grid Margin="0,0,0,16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Large Avatar -->
+                                <Border Grid.Column="0" Width="52" Height="52" CornerRadius="10" Margin="0,0,16,0" VerticalAlignment="Top"
+                                        Background="{Binding SelectedHubItem.AvatarBackground, Converter={StaticResource StringToBrushConverter}}">
+                                    <TextBlock Text="{Binding SelectedHubItem.AvatarLetter}" FontSize="24" FontWeight="Bold" Foreground="{DynamicResource TextInverse}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+
+                                <!-- Title, Author, Tags -->
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding SelectedHubItem.ModelName}" FontSize="22" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                        <Button Command="{Binding OpenHfPageCommand}" CommandParameter="{Binding SelectedHubItem.RepoId}" Style="{StaticResource GhostButton}" ToolTip="Open repository on Hugging Face" Margin="6,0,0,0" VerticalAlignment="Center">
+                                            <TextBlock Text="↗" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                        </Button>
+                                    </StackPanel>
+
+                                    <TextBlock Text="{Binding SelectedHubItem.Author}" FontSize="13" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,8"/>
+
+                                    <!-- Capability Tag Pills -->
+                                    <ItemsControl ItemsSource="{Binding SelectedHubItem.Capabilities}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel Orientation="Horizontal" />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Background="{DynamicResource SurfaceElevatedBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="12" Padding="10,3" Margin="0,0,6,4">
+                                                    <TextBlock Text="{Binding}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- 2. Quantization Selector & Action Bar -->
+                            <Border Background="{DynamicResource InputBackgroundBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,0,0,16">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Left: Quant Selection Pill -->
+                                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <!-- When GGUF Files are available -->
+                                        <ComboBox ItemsSource="{Binding SelectedHubItem.GgufFiles}" SelectedItem="{Binding SelectedHubItem.SelectedFile}" 
+                                                  MinWidth="240" Height="34" VerticalContentAlignment="Center"
+                                                  Visibility="{Binding SelectedHubItem.GgufFiles.Count, Converter={StaticResource ZeroToCollapsedConverter}}">
+                                            <ComboBox.ItemTemplate>
+                                                <DataTemplate DataType="{x:Type viewmodels:HfFileViewModel}">
+                                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                        <Ellipse Width="7" Height="7" Fill="#10B981" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                        <TextBlock Text="{Binding QuantType}" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,6,0"/>
+                                                        <TextBlock Text="• GGUF" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,8,0"/>
+                                                        <TextBlock Text="{Binding Size}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,8,0"/>
+                                                        <TextBlock Text="⚠ Exceeds VRAM" FontSize="10" Foreground="{DynamicResource ErrorBrush}" VerticalAlignment="Center" 
+                                                                   Visibility="{Binding CanFitInVram, Converter={StaticResource InverseBooleanToVisibilityConverter}}"/>
+                                                    </StackPanel>
+                                                </DataTemplate>
+                                            </ComboBox.ItemTemplate>
+                                        </ComboBox>
+
+                                        <!-- When Files are Loading -->
+                                        <StackPanel Orientation="Horizontal" Margin="6,0,0,0" VerticalAlignment="Center"
+                                                    Visibility="{Binding SelectedHubItem.IsLoadingFiles, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                            <ProgressBar IsIndeterminate="True" Width="80" Height="4" Margin="0,0,8,0" Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" VerticalAlignment="Center"/>
+                                            <TextBlock Text="Fetching available files..." FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </StackPanel>
+
+                                    <!-- Right: Action Buttons (Download / Load / Delete / Role) -->
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <!-- Discover Mode: Download Button -->
+                                        <Button Content="⬇ Download" Command="{Binding DownloadSelectedModelCommand}" Style="{StaticResource PrimaryButton}" Padding="18,7"
+                                                Visibility="{Binding SelectedHubItem.IsLocal, Converter={StaticResource InverseBooleanToVisibilityConverter}}"/>
+
+                                        <!-- On-Device Mode: Role Allocation -->
+                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0"
+                                                    Visibility="{Binding SelectedHubItem.IsLocal, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                            <TextBlock Text="Role:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                            <ComboBox ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding SelectedHubItem.Role}" Width="110" Height="32"/>
                                         </StackPanel>
 
-                                        <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                                            <TextBlock Text="{Binding FileSizeGb}" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,15,0" />
-                                            <TextBlock Text="{Binding Source}" Foreground="{DynamicResource TextSecondaryBrush}" />
-                                        </StackPanel>
+                                        <!-- On-Device Mode: Load / Unload Buttons -->
+                                        <Button Content="▶ Load" Command="{Binding LoadSelectedModelCommand}" Padding="16,7" Margin="0,0,8,0">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding SelectedHubItem.IsLocal}" Value="True"/>
+                                                                <Condition Binding="{Binding SelectedHubItem.IsLoaded}" Value="False"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </MultiDataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                        </Button>
 
-                                        <Grid Margin="0,5,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <TextBlock Text="✓ Fits in VRAM" Foreground="{DynamicResource SuccessBrush}" 
-                                                           Visibility="{Binding CanFitInVram, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                                                <TextBlock Text="⚠ Exceeds VRAM" Foreground="{DynamicResource ErrorBrush}" 
-                                                           Visibility="{Binding CanFitInVram, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
-                                            </StackPanel>
-                                            
-                                            <Button Grid.Column="1" Content="🗑 Delete" Command="{Binding DataContext.DeleteModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding ModelId}"
-                                                    Style="{StaticResource SecondaryButton}" Margin="0,0,10,0" Foreground="{DynamicResource ErrorBrush}" />
+                                        <Button Content="⏹ Unload" Command="{Binding UnloadSelectedModelCommand}" Padding="16,7" Margin="0,0,8,0">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding SelectedHubItem.IsLocal}" Value="True"/>
+                                                                <Condition Binding="{Binding SelectedHubItem.IsLoaded}" Value="True"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </MultiDataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                        </Button>
 
-                                            <Button Grid.Column="2" Content="Load" Command="{Binding DataContext.LoadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding ModelId}"
-                                                    Style="{StaticResource PrimaryButton}"
-                                                    Visibility="{Binding IsLoaded, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
-                                            <Button Grid.Column="2" Content="Unload" Command="{Binding DataContext.UnloadModelCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                                    Style="{StaticResource SecondaryButton}"
-                                                    Visibility="{Binding IsLoaded, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                                        </Grid>
+                                        <!-- On-Device Mode: Delete Button -->
+                                        <Button Content="🗑 Delete" Command="{Binding DeleteSelectedModelCommand}" Style="{StaticResource SecondaryButton}" Padding="12,7" Foreground="{DynamicResource ErrorBrush}"
+                                                Visibility="{Binding SelectedHubItem.IsLocal, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <!-- Active Download Progress Indicator -->
+                            <Border Background="{DynamicResource SurfaceElevatedBrush}" BorderBrush="{DynamicResource AccentPrimaryBrush}" BorderThickness="1" CornerRadius="8" Padding="12" Margin="0,0,0,16"
+                                    Visibility="{Binding SelectedHubItem.IsDownloading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <StackPanel>
+                                    <Grid Margin="0,0,0,6">
+                                        <TextBlock Text="{Binding SelectedHubItem.DownloadStatus}" Foreground="{DynamicResource TextPrimaryBrush}" FontWeight="SemiBold" FontSize="12"/>
+                                    </Grid>
+                                    <ProgressBar Minimum="0" Maximum="100" Value="{Binding SelectedHubItem.DownloadProgress}" Height="8" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- 3. Metadata Chips Bar: TimeAgo, Release Date, Downloads, Likes, Params, Arch, Context, License -->
+                            <WrapPanel Orientation="Horizontal" Margin="0,0,0,16">
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="🕒 " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.TimeAgo}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-            </Grid>
+
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="📅 " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.ReleaseDate}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="⬇ " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.Downloads, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="♥ " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.Likes, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="⚡ " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.ParameterSize}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="🧱 " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.Architecture}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="📏 " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.ContextLength}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource MetaPillStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="⚖ " FontSize="10" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding SelectedHubItem.License}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </StackPanel>
+                                </Border>
+                            </WrapPanel>
+
+                            <!-- Divider line -->
+                            <Border Height="1" Background="{DynamicResource BorderBrush}" Margin="0,0,0,16"/>
+
+                            <!-- 4. Model Readme / Description Markdown Content -->
+                            <StackPanel>
+                                <!-- Loading Readme spinner -->
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,20,0,20"
+                                            Visibility="{Binding SelectedHubItem.IsLoadingReadme, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                    <ProgressBar IsIndeterminate="True" Width="80" Height="4" Margin="0,0,10,0" Foreground="{DynamicResource AccentPrimaryBrush}" Background="{DynamicResource BackgroundTertiary}" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Loading model card documentation..." FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                                </StackPanel>
+
+                                <!-- Markdown Viewer -->
+                                <mdxam:MarkdownScrollViewer Markdown="{Binding SelectedHubItem.ReadmeMarkdown}" Loaded="MarkdownViewer_Loaded" Background="Transparent" BorderThickness="0"
+                                                            ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- Empty Placeholder State (when no model is selected) -->
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Visibility="{Binding SelectedHubItem, Converter={StaticResource NullToVisibilityConverter}, ConverterParameter=Inverse}">
+                        <TextBlock Text="🤖" FontSize="40" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+                        <TextBlock Text="Select a model from the list to view specifications and download files." FontSize="14" Foreground="{DynamicResource TextSecondaryBrush}" HorizontalAlignment="Center"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
         </Grid>
     </Grid>
 </UserControl>

@@ -358,22 +358,28 @@ public static class ActionGate
         string aliasKey = name.ToLowerInvariant();
         return aliasKey switch
         {
-            "system_cpu" or "system_cpu_usage" or "system_cpu_metrics" or "cpu_info" or "cpu_usage" => "system_cpu_info",
-            "system_gpu" or "system_gpu_usage" or "system_gpu_metrics" or "gpu_info" or "gpu_usage" => "system_gpu_info",
-            "system_mem" or "system_ram" or "system_memory_metrics" or "ram_info" or "memory_info" => "system_memory",
-            "system_disk" or "system_disk_metrics" or "disk_info" or "disk_space" => "system_disks",
-            "system_os_info" or "os_info" or "windows_info" => "system_os",
-            "system_proc" or "system_process" or "process_list" => "system_processes",
-            "top_processes" or "processes_top" or "system_cpu_processes" or "cpu_processes" or "system_cpu_procs" or "system_top_processes" => "system_top_processes",
-            "find_process" or "search_processes" or "get_process" => "process_find",
-            "system_temp" or "system_temperature" => "system_temperatures",
+            "system_cpu" or "system_cpu_usage" or "system_cpu_metrics" or "cpu_info" or "cpu_usage" or "hardware.cpu.inspect" => "system_cpu_info",
+            "system_gpu" or "system_gpu_usage" or "system_gpu_metrics" or "gpu_info" or "gpu_usage" or "system_gpu_memory" or "gpu_memory" or "system_vram" or "gpu_vram" or "hardware.gpu.inspect" or "ai.gpu.inspect" => "system_gpu_info",
+            "system_mem" or "system_ram" or "system_memory_metrics" or "ram_info" or "memory_info" or "system_ram_usage" or "system_memory_usage" or "hardware.ram.inspect" => "system_memory",
+            "system_disk" or "system_disk_metrics" or "disk_info" or "disk_space" or "system_disk_usage" or "hardware.disk.inspect" => "system_disks",
+            "system_os_info" or "os_info" or "windows_info" or "os.system.info" => "system_os",
+            "system_proc" or "system_process" or "process_list" or "os.processes.enumerate" => "system_processes",
+            "top_processes" or "processes_top" or "system_cpu_processes" or "cpu_processes" or "system_cpu_procs" or "system_top_processes" or "system.processes.top" => "system_top_processes",
+            "find_process" or "search_processes" or "get_process" or "system.processes.find" => "process_find",
+            "system_temp" or "system_temperature" or "hardware.battery.inspect" => "system_temperatures",
             "system_time" or "system_uptime" => "system_uptime",
             "hardware_report" or "system_hardware" => "system_hardware_report",
             "software_report" or "system_software" => "system_software_report",
             "system_info" or "get_system_info" => "system_report",
-            "list_dir" => "list_directory",
-            "search_dir" or "find_files" => "search_files",
+            "list_dir" or "filesystem.list" or "filesystem_list" => "list_directory",
+            "search_dir" or "find_files" or "filesystem.search" or "filesystem_search" => "search_files",
+            "filesystem.read" or "filesystem_read" => "read_file",
+            "filesystem.write" or "filesystem_write" => "write_file",
+            "filesystem.edit" or "filesystem_edit" => "edit_file",
             "str_replace" or "replace_text" => "replace_lines",
+            "todo.create" or "todo.complete" or "todo.update" or "todo.list" or "todo.block" or "todo.reopen" or "plan.create" or "plan.add_task" or "plan.update_task" or "plan.complete_task" or "plan.block_task" or "plan.remove_task" or "plan.replan" => "plan",
+            "chrome_navigator" => "chrome-navigator",
+            "weather" or "weather_fetcher" or "get_weather" => "weather-fetcher",
             _ => null
         };
     }
@@ -416,7 +422,7 @@ public static class ActionGate
         },
         ["list_directory"] = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["path"] = new[] { "directory", "dir", "folder", "target", "path_to_dir" }
+            ["path"] = new[] { "directory", "dir", "folder", "target", "path_to_dir", "root" }
         },
         ["run_command"] = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -433,7 +439,8 @@ public static class ActionGate
         },
         ["search_files"] = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["pattern"] = new[] { "query", "text", "term" }
+            ["path"] = new[] { "directory", "dir", "folder", "target", "path_to_dir", "root" },
+            ["pattern"] = new[] { "query", "text", "term", "filter", "search" }
         },
         ["find_on_page"] = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -460,6 +467,35 @@ public static class ActionGate
         ["process_find"] = new(StringComparer.OrdinalIgnoreCase)
         {
             ["name"] = new[] { "query", "process_name" }
+        },
+        ["desktop_launch"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["app"] = new[] { "application", "name", "command", "process", "path", "exe", "target", "app_name" },
+            ["arguments"] = new[] { "args", "parameters", "params", "extra_args" },
+            ["monitor"] = new[] { "display", "screen", "monitor_index", "monitor_number" }
+        },
+        ["desktop.window.maximize"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["hwnd"] = new[] { "handle", "window", "window_handle", "title", "window_title", "id" }
+        },
+        ["desktop.window.minimize"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["hwnd"] = new[] { "handle", "window", "window_handle", "title", "window_title", "id" }
+        },
+        ["desktop.window.close"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["hwnd"] = new[] { "handle", "window", "window_handle", "title", "window_title", "id" }
+        },
+        ["desktop.window.focus"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["hwnd"] = new[] { "handle", "window", "window_handle", "title", "window_title", "id" }
+        },
+        ["desktop.window.move"] = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["hwnd"] = new[] { "handle", "window", "window_handle", "title", "window_title", "id" },
+            ["monitor"] = new[] { "display", "screen", "monitor_index", "monitor_number" },
+            ["x"] = new[] { "pos_x", "left" },
+            ["y"] = new[] { "pos_y", "top" }
         }
     };
 

@@ -422,7 +422,7 @@ public class ToolExecutor(
         }, false),
         new ToolDefinition("search_files", "Searches directory recursively for files matching a pattern. Returns up to 20 matches. Do NOT call repeatedly with identical arguments.", new List<ToolParameter>
         {
-            new("path", "string", "Directory to search", true),
+            new("path", "string", "Optional directory to search (defaults to current workspace directory)", false),
             new("pattern", "string", "File pattern (e.g. *.cs)", true),
             new("contains", "string", "Optional text to search inside files", false)
         }, false),
@@ -3198,7 +3198,7 @@ public class ToolExecutor(
             return Task.FromResult(new ToolResult("incorporate_queued_message", false, "", "No pending queued message found to incorporate."));
         }
 
-        if (msg.Status != QueuedMessageStatus.Queued)
+        if (msg.Status != QueuedMessageStatus.Queued && msg.Status != QueuedMessageStatus.Processing)
         {
             return Task.FromResult(new ToolResult("incorporate_queued_message", false, "", $"Queued message '{msg.Id}' cannot be incorporated because its status is {msg.Status}."));
         }
@@ -4278,9 +4278,14 @@ public class ToolExecutor(
             {
                 case "set_plan":
                 case "create":
+                case "replan":
+                case "replace":
+                case "reset":
                     plan.Clear();
                     goto case "add";
                 case "add":
+                case "append":
+                case "insert":
                     object? itemsObj = null;
                     if (request.Arguments != null)
                     {
@@ -4298,16 +4303,22 @@ public class ToolExecutor(
                     }
                     planMutated = true;
                     break;
+                case "update":
                 case "patch":
                     ApplyBulkPlanPatch(request, plan);
                     ApplyPlanPatch(request, plan);
                     planMutated = true;
                     break;
                 case "complete":
+                case "done":
+                case "finish":
+                case "check":
                     MarkPlanItems(request, plan, done: true);
                     planMutated = true;
                     break;
                 case "remove":
+                case "delete":
+                case "drop":
                     MarkPlanItems(request, plan, done: false, remove: true);
                     planMutated = true;
                     break;
@@ -4317,6 +4328,10 @@ public class ToolExecutor(
                     planMutated = true;
                     break;
                 case "show":
+                case "get":
+                case "list":
+                case "view":
+                case "status":
                 default:
                     break;
             }

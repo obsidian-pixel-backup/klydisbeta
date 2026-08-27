@@ -123,3 +123,62 @@ public class SeverityToBrushConverter : IValueConverter
     }
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
 }
+
+public class CountToFormattedStringConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value == null) return "0";
+        if (double.TryParse(value.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out double n))
+        {
+            if (n >= 1_000_000) return $"{(n / 1_000_000.0):F1}M";
+            if (n >= 1_000) return $"{(n / 1_000.0):F1}K";
+            return n.ToString("N0", CultureInfo.InvariantCulture);
+        }
+        return value.ToString() ?? "0";
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+public class EqualityToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        string? valStr = value?.ToString();
+        string? paramStr = parameter?.ToString();
+        bool match = string.Equals(valStr, paramStr, StringComparison.OrdinalIgnoreCase);
+        return match ? Visibility.Visible : Visibility.Collapsed;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+public class NullToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        return value != null ? Visibility.Visible : Visibility.Collapsed;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+public class StringToBrushConverter : IValueConverter
+{
+    private static readonly BrushConverter _brushConverter = new();
+
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is string str && !string.IsNullOrWhiteSpace(str))
+        {
+            try
+            {
+                var brush = _brushConverter.ConvertFromString(str) as Brush;
+                if (brush != null) return brush;
+            }
+            catch { }
+        }
+        return Brushes.Transparent;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+
