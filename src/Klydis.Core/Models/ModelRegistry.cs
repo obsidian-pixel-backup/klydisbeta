@@ -433,30 +433,22 @@ public class ModelRegistry
     }
 
     /// <summary>
-    /// Finds the default flagship model (Smeagle by priority, then bundled models, then most recently used).
+    /// Finds the default flagship model (bundled models, then most recently used, then first registered).
     /// </summary>
     public ModelInfo? GetDefaultModel()
     {
         var allModels = GetAllModels().ToList();
         if (allModels.Count == 0) return null;
 
-        // 1. Smeagle model (case-insensitive identifier match)
-        var smeagle = allModels.FirstOrDefault(m =>
-            m.DisplayName.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ||
-            m.FileName.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ||
-            m.FilePath.Contains("smeagle", StringComparison.OrdinalIgnoreCase) ||
-            m.Id.Contains("smeagle", StringComparison.OrdinalIgnoreCase));
-        if (smeagle != null) return smeagle;
-
-        // 2. Bundled model
+        // 1. Bundled model
         var bundled = allModels.FirstOrDefault(m => m.Source == ModelSource.Bundled);
         if (bundled != null) return bundled;
 
-        // 3. Most recently used model
+        // 2. Most recently used model
         var mostRecent = allModels.OrderByDescending(m => m.LastUsedAt).FirstOrDefault();
         if (mostRecent != null) return mostRecent;
 
-        // 4. First registered model
+        // 3. First registered model
         return allModels[0];
     }
 

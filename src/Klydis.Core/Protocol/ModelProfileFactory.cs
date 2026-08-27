@@ -63,7 +63,6 @@ public static class ModelProfileFactory
 
         double confidence = CalculateProtocolConfidence(architecture, template, toolProtocol, reasoning, stopTokens, rawChatTemplate, probeSucceeded: false);
         AgentModelTier tier = ResolveModelTier(modelId, modelPath);
-        AgentModelProfile agentProfile = AgentModelProfile.ForModel(modelId, architecture, null, contextSize);
 
         CapabilityLevel toolCallingLevel = unknownFamily ? CapabilityLevel.Unsupported
             : confidence >= 0.90 ? CapabilityLevel.Reliable
@@ -80,12 +79,11 @@ public static class ModelProfileFactory
             : confidence >= 0.70 ? CapabilityLevel.Usable
             : CapabilityLevel.Experimental;
 
-        return new ModelProfile
+        var profile = new ModelProfile
         {
             ModelId = modelId,
             ModelPath = modelPath,
             Tier = tier,
-            AgentProfile = agentProfile,
             Architecture = architecture,
             Template = template,
             Reasoning = reasoning,
@@ -108,6 +106,9 @@ public static class ModelProfileFactory
             Continuation = continuationLevel,
             Repair = repairLevel
         };
+
+        AgentModelProfile agentProfile = AgentModelProfile.ForModel(modelId, architecture, profile, contextSize);
+        return profile with { AgentProfile = agentProfile };
     }
 
     /// <summary>

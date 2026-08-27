@@ -31,7 +31,7 @@ public class ContextCompiler
 
     public ContextCompiler(AgentModelProfile? profile = null)
     {
-        _profile = profile ?? AgentModelProfile.Smeagle4B;
+        _profile = profile ?? AgentModelProfile.Default;
     }
 
     /// <summary>

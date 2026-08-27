@@ -82,6 +82,11 @@ public sealed record AgentModelProfile
     public string PreferredToolMode { get; init; } = "native";
 
     /// <summary>
+    /// Default standard agent model profile.
+    /// </summary>
+    public static readonly AgentModelProfile Default = ForModel("default", "generic");
+
+    /// <summary>
     /// Canonical profile for Smeagle 4B (Klydis Reference Agent Model).
     /// </summary>
     public static readonly AgentModelProfile Smeagle4B = new()
@@ -130,8 +135,69 @@ public sealed record AgentModelProfile
         }
 
         bool isSmall = IsSmallModel(idLower);
-
         bool isQwen = archLower.Contains("qwen");
+        bool isLlama = archLower.Contains("llama");
+        bool isDeepSeek = archLower.Contains("deepseek") || archLower.Contains("dse") || idLower.Contains("deepseek");
+        bool isMistral = archLower.Contains("mistral") || archLower.Contains("mixtral") || archLower.Contains("codestral");
+        bool isGemma = archLower.Contains("gemma");
+        bool isPhi = archLower.Contains("phi");
+        bool isCommandR = archLower.Contains("command") || archLower.Contains("cohere");
+
+        string modelFamily = isQwen ? "qwen35"
+            : isLlama ? "llama3"
+            : isDeepSeek ? "deepseek"
+            : isMistral ? "mistral"
+            : isGemma ? "gemma"
+            : isPhi ? "phi"
+            : isCommandR ? "command-r"
+            : !string.IsNullOrWhiteSpace(archLower) ? archLower : "generic";
+
+        string protocolFamily = profile != null ? profile.PreferredProtocol.ToString().ToLowerInvariant()
+            : isQwen ? "qwen-native"
+            : isLlama ? "llama3"
+            : isDeepSeek ? "deepseek"
+            : isMistral ? "mistral"
+            : isGemma ? "gemma"
+            : isPhi ? "phi"
+            : isCommandR ? "command-r"
+            : "generic-json";
+
+        string protocolAdapter = profile?.ToolProtocol switch
+        {
+            ToolProtocol.QwenNative => "QwenProtocolAdapter",
+            ToolProtocol.Llama3Native => "Llama3ProtocolAdapter",
+            ToolProtocol.DeepSeekNative => "DeepSeekProtocolAdapter",
+            ToolProtocol.MistralNative => "MistralProtocolAdapter",
+            ToolProtocol.GemmaNative => "GemmaProtocolAdapter",
+            ToolProtocol.PhiNative => "PhiProtocolAdapter",
+            ToolProtocol.CommandRNative => "CommandRProtocolAdapter",
+            ToolProtocol.OpenAiStyle => "OpenAiProtocolAdapter",
+            ToolProtocol.Antml => "AntmlProtocolAdapter",
+            ToolProtocol.GenericJson => "GenericJsonProtocolAdapter",
+            _ => isQwen ? "QwenProtocolAdapter"
+                : isLlama ? "Llama3ProtocolAdapter"
+                : isDeepSeek ? "DeepSeekProtocolAdapter"
+                : isMistral ? "MistralProtocolAdapter"
+                : isGemma ? "GemmaProtocolAdapter"
+                : isPhi ? "PhiProtocolAdapter"
+                : isCommandR ? "CommandRProtocolAdapter"
+                : "GenericJsonProtocolAdapter"
+        };
+
+        ToolProtocol toolMode = profile?.ToolProtocol ?? (
+            isQwen ? ToolProtocol.QwenNative :
+            isLlama ? ToolProtocol.Llama3Native :
+            isDeepSeek ? ToolProtocol.DeepSeekNative :
+            isMistral ? ToolProtocol.MistralNative :
+            isGemma ? ToolProtocol.GemmaNative :
+            isPhi ? ToolProtocol.PhiNative :
+            isCommandR ? ToolProtocol.CommandRNative :
+            ToolProtocol.GenericJson);
+
+        ReasoningProtocol reasoning = profile?.Reasoning ?? (
+            (isQwen || isDeepSeek || idLower.Contains("r1"))
+                ? ReasoningProtocol.NativeThinkBlock
+                : ReasoningProtocol.None);
 
         int hardBudget = isSmall
             ? (contextSize.HasValue && contextSize.Value > 0 ? Math.Min(24576, contextSize.Value) : 24576)
@@ -142,15 +208,13 @@ public sealed record AgentModelProfile
 
         return new AgentModelProfile
         {
-            ModelFamily = isQwen ? "qwen35" : archLower,
-            ProtocolFamily = profile != null ? profile.PreferredProtocol.ToString().ToLowerInvariant() : "generic-json",
-            ProtocolAdapter = isQwen ? "QwenProtocolAdapter" : "GenericJsonProtocolAdapter",
-            ReasoningMode = profile?.Reasoning ?? (isQwen ? ReasoningProtocol.NativeThinkBlock : ReasoningProtocol.None),
-            ToolCallingMode = profile?.ToolProtocol ?? (isQwen ? ToolProtocol.QwenNative : ToolProtocol.GenericJson),
+            ModelFamily = modelFamily,
+            ProtocolFamily = protocolFamily,
+            ProtocolAdapter = protocolAdapter,
+            ReasoningMode = reasoning,
+            ToolCallingMode = toolMode,
             AllowParallelTools = !isSmall,
             MaxToolCallsPerGeneration = isSmall ? 1 : 4,
-            // Generic (non-Smeagle) models never use the Smeagle-specific action-first
-            // prompt profile, even when they are small enough to get small-model mode.
             PromptProfile = "standard-agentic",
             DefaultTemperature = 0.7,
             DefaultTopP = 0.9,

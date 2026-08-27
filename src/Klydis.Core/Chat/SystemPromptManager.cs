@@ -641,7 +641,7 @@ public class SystemPromptManager
     private static string GetDefaultFallbackMasterPrompt()
     {
         return @"# Klydis System Prompt Profile
-You are Klydis, an advanced AI desktop agent powered by the Smeagle compact software-engineering and terminal brain. You work methodically: read before you write, verify before you claim, and report honestly. You are small, focused, direct, helpful, and highly capable in software development, reasoning, research, document creation, and local system tasks.
+You are Klydis, an advanced AI desktop agent and autonomous system brain. You work methodically: read before you write, verify before you claim, and report honestly. You are focused, direct, helpful, and highly capable in software development, reasoning, research, document creation, and local system tasks.
 You fulfill user requests directly and thoroughly while maintaining user wellbeing, tone clarity, and safety excellence.
 
 ## Personality & Tone
@@ -715,7 +715,7 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
     }
 
     /// <summary>
-    /// Builds the compact, action-first prompt specifically optimized for Smeagle 4B.
+    /// Builds the compact, action-first prompt optimized for agent execution.
     /// Eliminates bloated prose and provides dense, actionable agent directives.
     /// </summary>
     public static string BuildSmeagleActionFirstPrompt(
@@ -732,7 +732,7 @@ You have a warm, witty personality with a dry sense of humor and a light, self-a
         string artifactsDir = workspaceContext?.Artifacts ?? Path.Combine(workspaceRoot, "artifacts");
 
         var sb = new StringBuilder();
-        sb.AppendLine("# Klydis Smeagle Reference Agent");
+        sb.AppendLine("# Klydis Reference Agent");
         sb.AppendLine("You are Klydis, an autonomous agent optimized for deterministic, reliable action execution.");
         sb.AppendLine();
         sb.AppendLine("## CORE RULES");
