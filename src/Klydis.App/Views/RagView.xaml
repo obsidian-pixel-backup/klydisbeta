@@ -121,7 +121,7 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBox x:Name="FolderPathBox" Text="{Binding SelectedFolderPath, UpdateSourceTrigger=PropertyChanged}"
+                            <TextBox x:Name="FolderPathBox" AutomationProperties.Name="Folder path" Text="{Binding SelectedFolderPath, UpdateSourceTrigger=PropertyChanged}"
                                      Padding="9,7" Background="{DynamicResource InputBackgroundBrush}"
                                      Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"
                                      BorderThickness="1" VerticalContentAlignment="Center"/>
@@ -138,7 +138,7 @@
 
                         <!-- Collection name -->
                         <TextBlock Text="COLLECTION NAME" FontSize="10.5" FontWeight="SemiBold" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
-                        <TextBox x:Name="CollectionNameBox" Text="{Binding CollectionName, UpdateSourceTrigger=PropertyChanged}"
+                        <TextBox x:Name="CollectionNameBox" AutomationProperties.Name="Collection name" Text="{Binding CollectionName, UpdateSourceTrigger=PropertyChanged}"
                                  Padding="9,7" Background="{DynamicResource InputBackgroundBrush}"
                                  Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"
                                  BorderThickness="1" VerticalContentAlignment="Center" Margin="0,0,0,4"/>
@@ -258,13 +258,13 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <ComboBox Grid.Column="0" ItemsSource="{Binding CollectionFilters}"
+                        <ComboBox Grid.Column="0" AutomationProperties.Name="Collection filter" ItemsSource="{Binding CollectionFilters}"
                                   SelectedItem="{Binding SelectedCollectionFilter, Mode=TwoWay}"
                                   DisplayMemberPath="Label" Height="34" VerticalContentAlignment="Center"
                                   Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
                                   BorderBrush="{DynamicResource BorderBrush}" ToolTip="Scope the search to one workspace or all of them"/>
 
-                        <TextBox x:Name="SearchQueryBox" Grid.Column="2" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged}"
+                        <TextBox x:Name="SearchQueryBox" AutomationProperties.Name="Search indexed content" Grid.Column="2" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged}"
                                  Padding="9,7" Background="{DynamicResource InputBackgroundBrush}"
                                  Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"
                                  BorderThickness="1" VerticalContentAlignment="Center">

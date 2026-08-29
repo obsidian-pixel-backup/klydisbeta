@@ -70,6 +70,9 @@
             <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
         </Style>
         <Style x:Key="SidePanelListBoxItem" TargetType="ListBoxItem">
+            <!-- Used only by the Changes list (WorkspaceFileItem); without a name the rows fall
+                 back to object.ToString() and announce the type. -->
+            <Setter Property="AutomationProperties.Name" Value="{Binding RelativePath}"/>
             <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
             <Setter Property="Padding" Value="4,2"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -328,6 +331,7 @@
                              ToolTip="Drag a queued message to change its processing order (Manual order)">
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
+                                <Setter Property="AutomationProperties.Name" Value="{Binding DisplayText}"/>
                                 <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                 <Setter Property="Padding" Value="0"/>
@@ -518,6 +522,7 @@
                          Margin="10,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding Text}"/>
                             <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="Padding" Value="4,3"/>
                             <Setter Property="Background" Value="Transparent"/>
@@ -619,6 +624,7 @@
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding RelativePath}"/>
                             <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="Padding" Value="4,3"/>
                             <Setter Property="Background" Value="Transparent"/>
@@ -771,6 +777,7 @@
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListBox.ItemContainerStyle>
                                 <Style TargetType="ListBoxItem">
+                                    <Setter Property="AutomationProperties.Name" Value="{Binding Name}"/>
                                     <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                     <Setter Property="Padding" Value="4,3"/>
                                     <Setter Property="Background" Value="Transparent"/>
@@ -997,6 +1004,7 @@
                          Background="Transparent" BorderThickness="0" Margin="10,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding Content}"/>
                             <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="Padding" Value="6,4"/>
                             <Setter Property="Background" Value="Transparent"/>

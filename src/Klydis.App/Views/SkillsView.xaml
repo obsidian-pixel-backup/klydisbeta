@@ -87,12 +87,12 @@
 
                 <!-- Search & Filters -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,16,0">
-                    <TextBox Width="220" Height="32" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged}"
+                    <TextBox Width="220" Height="32" AutomationProperties.Name="Search skills" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged}"
                              ToolTip="Search skills by name, tag, or description"
                              Padding="8,6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
                              BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" VerticalContentAlignment="Center" Margin="0,0,10,0"/>
 
-                    <ComboBox Width="180" Height="32" ItemsSource="{Binding Categories}" SelectedItem="{Binding SelectedCategory}"
+                    <ComboBox Width="180" Height="32" AutomationProperties.Name="Skill category filter" ItemsSource="{Binding Categories}" SelectedItem="{Binding SelectedCategory}"
                               Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
                               VerticalContentAlignment="Center"/>
                 </StackPanel>
@@ -130,6 +130,7 @@
                              Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
+                                <Setter Property="AutomationProperties.Name" Value="{Binding Name}"/>
                                 <Setter Property="Background" Value="Transparent"/>
                                 <Setter Property="BorderThickness" Value="0"/>
                                 <Setter Property="Padding" Value="0"/>
@@ -154,7 +155,7 @@
                                         </Grid.ColumnDefinitions>
 
                                         <!-- Enable/Disable Checkbox -->
-                                        <CheckBox IsChecked="{Binding IsEnabled}" VerticalAlignment="Top" Margin="0,3,10,0"
+                                        <CheckBox IsChecked="{Binding IsEnabled}" AutomationProperties.Name="{Binding Name, StringFormat='Enable {0}'}" VerticalAlignment="Top" Margin="0,3,10,0"
                                                   Command="{Binding DataContext.ToggleSkillCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
                                                   CommandParameter="{Binding}"/>
 
@@ -219,12 +220,12 @@
 
                                 <StackPanel Grid.Column="0">
                                     <TextBlock Text="Skill Name" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
-                                    <TextBox Text="{Binding EditName, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                                    <TextBox AutomationProperties.Name="Skill name" Text="{Binding EditName, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="2">
                                     <TextBlock Text="Category" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
-                                    <TextBox Text="{Binding EditCategory, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                                    <TextBox AutomationProperties.Name="Skill category" Text="{Binding EditCategory, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
                                 </StackPanel>
                             </Grid>
 
@@ -237,12 +238,12 @@
 
                                 <StackPanel Grid.Column="0">
                                     <TextBlock Text="Complexity Level" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
-                                    <ComboBox ItemsSource="{Binding AvailableComplexities}" SelectedItem="{Binding EditComplexity}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    <ComboBox AutomationProperties.Name="Complexity level" ItemsSource="{Binding AvailableComplexities}" SelectedItem="{Binding EditComplexity}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="2">
                                     <TextBlock Text="Tags (comma separated)" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4"/>
-                                    <TextBox Text="{Binding EditTags, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
+                                    <TextBox AutomationProperties.Name="Skill tags" Text="{Binding EditTags, UpdateSourceTrigger=PropertyChanged}" Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
                                 </StackPanel>
                             </Grid>
 
@@ -251,7 +252,7 @@
                                 <!-- Prose-length content: wraps instead of clipping mid-word
                                      off the edge of the panel (a single-line box was cutting
                                      descriptions off with no indication there was more text). -->
-                                <TextBox Text="{Binding EditDescription, UpdateSourceTrigger=PropertyChanged}"
+                                <TextBox AutomationProperties.Name="Skill description" Text="{Binding EditDescription, UpdateSourceTrigger=PropertyChanged}"
                                          TextWrapping="Wrap" AcceptsReturn="True" MinHeight="52" MaxHeight="110"
                                          VerticalScrollBarVisibility="Auto"
                                          Padding="6" Background="{DynamicResource InputBackgroundBrush}" Foreground="{DynamicResource TextPrimaryBrush}" BorderBrush="{DynamicResource BorderBrush}"/>
@@ -264,7 +265,7 @@
                                  border), so it stays legible and on-brand in every combination. -->
                             <StackPanel Margin="0,0,0,10">
                                 <TextBlock Text="Prompt Instructions &amp; Knowledge Directive (Markdown)" Foreground="{DynamicResource TextSecondaryBrush}" FontSize="11" Margin="0,0,0,4" FontWeight="SemiBold"/>
-                                <TextBox Text="{Binding EditInstruction, UpdateSourceTrigger=PropertyChanged}"
+                                <TextBox AutomationProperties.Name="Prompt instructions and knowledge directive" Text="{Binding EditInstruction, UpdateSourceTrigger=PropertyChanged}"
                                          AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap" MinHeight="260"
                                          FontFamily="Consolas, Courier New, monospace" FontSize="12"
                                          Padding="10" Background="{DynamicResource SurfaceElevatedBrush}" Foreground="{DynamicResource TextPrimaryBrush}"
