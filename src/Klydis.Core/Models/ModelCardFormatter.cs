@@ -49,6 +49,8 @@ public static class ModelCardFormatter
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
 
+        raw = StripFrontMatter(raw);
+
         // Mask code first so tags inside examples survive untouched.
         var masked = new List<string>();
         string working = Mask(raw, FencedBlock, masked);
@@ -262,5 +264,48 @@ public static class ModelCardFormatter
         int dot = path.LastIndexOf('.');
         if (dot < 0) return false;   // extensionless endpoints (shields.io/badge/…) serve SVG
         return DecodableExtensions.Contains(path[dot..]);
+    }
+
+    private static readonly Regex YamlKey = new(@"^[A-Za-z_][\w.\-]*\s*:", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Removes the YAML front matter block Hugging Face puts at the top of a model card.
+    /// </summary>
+    /// <remarks>
+    /// The block is metadata for the Hub -- library_name, license, pipeline_tag, base_model --
+    /// not documentation. Markdown has no syntax for it, so MdXaml rendered the delimiters as
+    /// horizontal rules and the fields as a paragraph of "key: value" text, which is the first
+    /// thing the reader met on every card.
+    ///
+    /// Deliberately conservative, because "---" is also a horizontal rule and a setext heading
+    /// underline. The block only counts when the very first line is the delimiter, a closing
+    /// delimiter follows, and something between them actually looks like a YAML key -- so a card
+    /// that opens with a rule keeps it.
+    /// </remarks>
+    private static string StripFrontMatter(string raw)
+    {
+        string text = raw.TrimStart('\uFEFF');
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        if (lines.Length < 3 || lines[0].Trim() != "---") return raw;
+
+        for (int i = 1; i < lines.Length; i++)
+        {
+            string line = lines[i].Trim();
+            if (line != "---" && line != "...") continue;
+
+            // Require at least one key: value line, so a horizontal rule followed by prose and
+            // another rule is not mistaken for metadata.
+            bool looksLikeYaml = false;
+            for (int j = 1; j < i; j++)
+            {
+                if (YamlKey.IsMatch(lines[j])) { looksLikeYaml = true; break; }
+            }
+            if (!looksLikeYaml) return raw;
+
+            return string.Join("\n", lines[(i + 1)..]).TrimStart('\n');
+        }
+
+        // No closing delimiter: this is an ordinary rule, not front matter.
+        return raw;
     }
 }
