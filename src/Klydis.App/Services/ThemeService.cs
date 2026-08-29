@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -516,6 +516,44 @@ public class ThemeService : IDisposable
         {
             dict[key] = new SolidColorBrush(color);
         }
+
+        // Shadows are set apart from the loop above because DropShadowEffect takes a Color, not a
+        // Brush. Keyed off the chosen colour's own luminance rather than the mode, so a pale custom
+        // background picked while in dark mode still gets a shadow that reads as depth instead of a
+        // black smudge. Only a custom *background* displaces the theme's token: with just a custom
+        // font, `bg` falls back to the dark palette hex even in light mode, which would wrongly
+        // force black over the light dictionary's own tint.
+        if (hasCustomBg)
+        {
+            dict["ShadowColor"] = Luminance(bg) < 0.45 ? Colors.Black : DeriveShadow(bg);
+        }
+    }
+
+    /// <summary>
+    /// A deep shadow tint carrying the background's own hue, for use on light grounds.
+    /// </summary>
+    /// <remarks>
+    /// Scaling the background toward black would preserve its channel ratios and so flatten a pale
+    /// colour to a near-neutral grey — barely distinguishable from the black it replaces. Holding a
+    /// fixed dark base and amplifying only the distance between channels keeps the hue and restores
+    /// the chroma that being pale had suppressed, while a background that is genuinely neutral
+    /// stays neutral. The constants are the ones that reproduce the hand-authored ShadowColor
+    /// tokens in Themes/Backgrounds: Ocean, Obsidian and Midnight light all land within a few
+    /// units of their authored values.
+    /// </remarks>
+    private static Color DeriveShadow(Color bg)
+    {
+        int floor = Math.Min(bg.R, Math.Min(bg.G, bg.B));
+        int spread = Math.Max(bg.R, Math.Max(bg.G, bg.B)) - floor;
+        if (spread == 0) return Color.FromRgb(45, 45, 45);
+
+        // Cap the total spread as well as the gain. A gain of 3 suits the near-neutral window
+        // colours of the built-in light themes, but applied to a saturated custom colour it walks
+        // a channel up to full brightness -- a pale orange background would yield a bright orange,
+        // which is not a shadow at all. Capping keeps every result dark enough to read as one.
+        double gain = Math.Min(3.0, 40.0 / spread);
+        byte Channel(int offset) => (byte)Math.Clamp(45 + (int)Math.Round(offset * gain), 0, 255);
+        return Color.FromRgb(Channel(bg.R - floor), Channel(bg.G - floor), Channel(bg.B - floor));
     }
 
     private void ApplyAccentOverrides(ResourceDictionary dict, ThemeMode effectiveMode)

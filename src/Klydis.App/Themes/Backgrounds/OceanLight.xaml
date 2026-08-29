@@ -6,6 +6,11 @@
          (main content sits on the base tone, sidebar is a lifted surface). -->
 
     <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#EAF6F7" />
+
+    <!-- Elevation shadow. DropShadowEffect takes a Color, not a Brush, so this is a
+         Color resource. Light themes use a deep tint of their own hue: pure black at
+         the authored opacities reads as a smudge on a pale ground. -->
+    <Color x:Key="ShadowColor">#3E5C61</Color>
     <SolidColorBrush x:Key="SidebarBackgroundBrush" Color="#EAF6F7" />
     <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="TitleBarBackgroundBrush" Color="#EAF6F7" />

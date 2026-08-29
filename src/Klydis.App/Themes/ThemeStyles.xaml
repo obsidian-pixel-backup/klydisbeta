@@ -513,7 +513,7 @@
                     <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" MaxWidth="320">
                         <Border.Effect>
-                            <DropShadowEffect Color="Black" Opacity="0.35" BlurRadius="12" ShadowDepth="3" Direction="270"/>
+                            <DropShadowEffect Color="{DynamicResource ShadowColor}" Opacity="0.35" BlurRadius="12" ShadowDepth="3" Direction="270"/>
                         </Border.Effect>
                         <ContentPresenter Margin="{TemplateBinding Padding}" TextBlock.Foreground="{TemplateBinding Foreground}">
                             <ContentPresenter.Resources>
@@ -742,7 +742,7 @@
                             Padding="{TemplateBinding Padding}"
                             SnapsToDevicePixels="True">
                         <Border.Effect>
-                            <DropShadowEffect BlurRadius="16" ShadowDepth="4" Direction="270" Opacity="0.45" Color="Black"/>
+                            <DropShadowEffect BlurRadius="16" ShadowDepth="4" Direction="270" Opacity="0.45" Color="{DynamicResource ShadowColor}"/>
                         </Border.Effect>
                         <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"/>
                     </Border>
@@ -785,7 +785,7 @@
                             <Popup x:Name="Popup" Placement="Right" HorizontalOffset="2" IsOpen="{TemplateBinding IsSubmenuOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
                                 <Border Background="{DynamicResource SurfaceElevatedBrush}" BorderBrush="{DynamicResource BorderMidBrush}" BorderThickness="1" CornerRadius="8" Padding="4">
                                     <Border.Effect>
-                                        <DropShadowEffect BlurRadius="12" ShadowDepth="3" Direction="270" Opacity="0.4" Color="Black"/>
+                                        <DropShadowEffect BlurRadius="12" ShadowDepth="3" Direction="270" Opacity="0.4" Color="{DynamicResource ShadowColor}"/>
                                     </Border.Effect>
                                     <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"/>
                                 </Border>

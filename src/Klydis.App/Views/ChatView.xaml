@@ -1177,7 +1177,7 @@
                                         <ScaleTransform ScaleX="1" ScaleY="1"/>
                                     </Border.RenderTransform>
                                     <Border.Effect>
-                                        <DropShadowEffect BlurRadius="12" ShadowDepth="3" Direction="270" Color="#000000" Opacity="0.35"/>
+                                        <DropShadowEffect BlurRadius="12" ShadowDepth="3" Direction="270" Color="{DynamicResource ShadowColor}" Opacity="0.35"/>
                                     </Border.Effect>
                                     <Path x:Name="BtnIcon"
                                           Data="M 12,4 L 12,15 M 6,10 L 12,16 L 18,10 M 5,19 L 19,19"
@@ -1381,7 +1381,7 @@
                                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10"
                                         Padding="10,8" MaxHeight="440">
                                     <Border.Effect>
-                                        <DropShadowEffect BlurRadius="20" ShadowDepth="4" Direction="270" Color="#000000" Opacity="0.5"/>
+                                        <DropShadowEffect BlurRadius="20" ShadowDepth="4" Direction="270" Color="{DynamicResource ShadowColor}" Opacity="0.5"/>
                                     </Border.Effect>
                                     <StackPanel Width="240">
                                         <TextBlock Text="TOOL RISK" Style="{StaticResource SettingsMenuSectionHeader}" Margin="0,2,0,4"/>
@@ -1554,7 +1554,7 @@
                         </Style>
                     </Border.Style>
                     <Border.Effect>
-                        <DropShadowEffect BlurRadius="28" ShadowDepth="6" Direction="270" Color="#000000" Opacity="0.5"/>
+                        <DropShadowEffect BlurRadius="28" ShadowDepth="6" Direction="270" Color="{DynamicResource ShadowColor}" Opacity="0.5"/>
                     </Border.Effect>
 
                     <StackPanel>
@@ -1647,7 +1647,7 @@
                         </Style>
                     </Border.Style>
                     <Border.Effect>
-                        <DropShadowEffect BlurRadius="28" ShadowDepth="6" Direction="270" Color="#000000" Opacity="0.5"/>
+                        <DropShadowEffect BlurRadius="28" ShadowDepth="6" Direction="270" Color="{DynamicResource ShadowColor}" Opacity="0.5"/>
                     </Border.Effect>
 
                     <StackPanel>

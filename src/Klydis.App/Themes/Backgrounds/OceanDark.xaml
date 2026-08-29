@@ -6,6 +6,11 @@
          combined with either mode. -->
 
     <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#001619" />
+
+    <!-- Elevation shadow. DropShadowEffect takes a Color, not a Brush, so this is a
+         Color resource. Light themes use a deep tint of their own hue: pure black at
+         the authored opacities reads as a smudge on a pale ground. -->
+    <Color x:Key="ShadowColor">#000000</Color>
     <SolidColorBrush x:Key="SidebarBackgroundBrush" Color="#032128" />
     <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#001619" />
     <SolidColorBrush x:Key="TitleBarBackgroundBrush" Color="#001619" />

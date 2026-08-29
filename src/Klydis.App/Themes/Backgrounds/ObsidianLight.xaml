@@ -2,6 +2,11 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#F3F4F6" />
+
+    <!-- Elevation shadow. DropShadowEffect takes a Color, not a Brush, so this is a
+         Color resource. Light themes use a deep tint of their own hue: pure black at
+         the authored opacities reads as a smudge on a pale ground. -->
+    <Color x:Key="ShadowColor">#3F4247</Color>
     <SolidColorBrush x:Key="SidebarBackgroundBrush" Color="#F3F4F6" />
     <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="TitleBarBackgroundBrush" Color="#F3F4F6" />
