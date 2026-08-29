@@ -678,21 +678,42 @@ public static class NativeEngineManager
     }
 
     /// <summary>
-    /// Auto-updates the native llama.cpp engine to the latest release when the current one is
-    /// missing or stale (the vendored LLamaSharp wrapper matches the CURRENT llama.cpp ABI, so
-    /// the bundled backend alone is not enough). Returns true when a new native engine was
-    /// downloaded and synced (caller should restart the app), false when nothing was needed.
+    /// Updates the native llama.cpp engine when a custom one is installed and a newer release is
+    /// available. Returns true when a new native engine was downloaded and synced (caller should
+    /// restart the app), false when nothing was needed.
     /// </summary>
+    /// <remarks>
+    /// A fresh install deliberately does NOT download. The vendored wrapper is upstream
+    /// LLamaSharp v0.27.0, whose <c>LLamaContextParams</c> ends at <c>samplers</c> and matches the
+    /// <c>LLamaSharp.Backend.*</c> 0.27.0 natives restored into the build output. Current
+    /// llama.cpp adds four fields after that (n_rs_seq, n_outputs_max, ctx_type, ctx_other), so
+    /// pairing a freshly downloaded engine with this managed layout makes the native side read
+    /// past the end of the managed struct: the process dies with 0xc0000409 inside
+    /// llama_context construction, with no managed exception and nothing in the crash log.
+    /// This previously meant a clean clone crashed the first time anyone sent a message.
+    /// Upgrading the engine is therefore an explicit opt-in via <paramref name="forceCheck"/>,
+    /// and must be done together with the managed struct layout — never independently
+    /// (see patches/README.md).
+    /// </remarks>
     /// <param name="logger">Optional logger for telemetry.</param>
-    /// <param name="forceCheck">When true, always performs the online "is there a newer release"
-    /// check. When false (default), the online re-check is throttled to once per day; a missing
-    /// custom native engine is always downloaded immediately since the wrapper requires it.</param>
+    /// <param name="forceCheck">When true, performs the online check even with no engine installed,
+    /// opting in to a newer llama.cpp. When false (default), a fresh install stays on the bundled
+    /// ABI-matched backend and an installed engine is re-checked at most once per day.</param>
     public static async Task<bool> TryAutoUpdateNativeEngineAsync(ILogger? logger = null, bool forceCheck = false, CancellationToken ct = default, Action<string>? statusCallback = null)
     {
         if (!HasCustomNativeEngine())
         {
-            // The patched wrapper requires the current llama.cpp ABI — install before first load.
-            logger?.LogInformation("No custom native engine installed. Downloading the latest llama.cpp release...");
+            if (!forceCheck)
+            {
+                logger?.LogInformation(
+                    "No custom native engine installed; using the bundled LLamaSharp.Backend natives, "
+                    + "whose ABI matches the vendored wrapper. A newer llama.cpp is an explicit opt-in.");
+                return false;
+            }
+
+            logger?.LogWarning(
+                "Forced engine check with no custom engine installed: downloading the latest llama.cpp. "
+                + "This only works if the vendored LLamaSharp struct layout matches that release.");
             return await DownloadLatestNativeEngineAsync(logger: logger, ct: ct, statusCallback: statusCallback);
         }
 
