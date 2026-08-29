@@ -18,10 +18,19 @@ public partial class ModelHubItemViewModel : ObservableObject
     private string _repoId = string.Empty;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AutomationName))]
     private string _modelName = string.Empty;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AutomationName))]
     private string _author = string.Empty;
+
+    /// <summary>
+    /// What a screen reader announces for this row. Without it the list item falls back to
+    /// object.ToString() and every model reads as the type name.
+    /// </summary>
+    public string AutomationName =>
+        string.IsNullOrWhiteSpace(Author) ? ModelName : $"{ModelName} by {Author}";
 
     [ObservableProperty]
     private bool _isLocal;

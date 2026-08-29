@@ -60,6 +60,9 @@ public partial class ColorPickerControl : UserControl
                     Tag = hex,
                     ToolTip = hex
                 };
+                // Swatches carry no text, so without this a screen reader announces nothing for
+                // any of them — 26 presets in each of the three pickers.
+                System.Windows.Automation.AutomationProperties.SetName(swatch, $"Colour {hex}");
                 swatch.Click += OnPresetClick;
                 PresetsPanel.Children.Add(swatch);
             }

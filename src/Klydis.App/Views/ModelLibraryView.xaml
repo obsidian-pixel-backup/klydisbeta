@@ -242,7 +242,7 @@
 
                     <Path Grid.Column="0" Style="{StaticResource PillIconStyle}" Data="{StaticResource IconSearch}" Width="13" Height="13" Margin="0,0,8,0"/>
 
-                    <TextBox Grid.Column="1" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged, Delay=250}" 
+                    <TextBox Grid.Column="1" AutomationProperties.Name="Search all models" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged, Delay=250}" 
                              Background="Transparent" BorderThickness="0" Foreground="{DynamicResource TextPrimaryBrush}"
                              VerticalContentAlignment="Center" FontSize="13"
                              Tag="Search all models" />
@@ -261,13 +261,13 @@
             <!-- Right: Filters & Tools -->
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                 <!-- Format Filter Dropdown -->
-                <ComboBox ItemsSource="{Binding AvailableFormatFilters}" SelectedItem="{Binding SelectedFormatFilter}" Width="100" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+                <ComboBox AutomationProperties.Name="Model format filter" ItemsSource="{Binding AvailableFormatFilters}" SelectedItem="{Binding SelectedFormatFilter}" Width="100" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
 
                 <!-- Capabilities Filter Dropdown -->
-                <ComboBox ItemsSource="{Binding AvailableCapabilityFilters}" SelectedItem="{Binding SelectedCapabilityFilter}" Width="145" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+                <ComboBox AutomationProperties.Name="Capability filter" ItemsSource="{Binding AvailableCapabilityFilters}" SelectedItem="{Binding SelectedCapabilityFilter}" Width="145" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
 
                 <!-- Sort Filter Dropdown -->
-                <ComboBox ItemsSource="{Binding AvailableSortFilters}" SelectedItem="{Binding SelectedSortFilter}" Width="145" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
+                <ComboBox AutomationProperties.Name="Sort order" ItemsSource="{Binding AvailableSortFilters}" SelectedItem="{Binding SelectedSortFilter}" Width="145" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
 
                 <!-- Refresh / Scan Button -->
                 <Button Command="{Binding ScanCommand}" ToolTip="Scan &amp; Refresh Model Hub" Style="{StaticResource GhostButton}" Width="34" Height="34" Margin="0,0,4,0" AutomationProperties.Name="Scan and Refresh Model Hub">
@@ -309,7 +309,7 @@
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                        <ComboBox ItemsSource="{Binding AvailableCategoryFilters}" SelectedItem="{Binding SelectedCategoryFilter}" Width="85" Height="28" FontSize="11" Margin="0,0,8,0" VerticalContentAlignment="Center"/>
+                        <ComboBox AutomationProperties.Name="Category filter" ItemsSource="{Binding AvailableCategoryFilters}" SelectedItem="{Binding SelectedCategoryFilter}" Width="85" Height="28" FontSize="11" Margin="0,0,8,0" VerticalContentAlignment="Center"/>
                     </StackPanel>
                 </Grid>
 
@@ -354,6 +354,9 @@
                          ScrollViewer.VerticalScrollBarVisibility="Auto">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <!-- Without this the row falls back to object.ToString() and every
+                                 model in the list announces "ModelHubItemViewModel". -->
+                            <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName}"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                             <Setter Property="Padding" Value="0"/>
                             <Setter Property="Margin" Value="0"/>
@@ -484,7 +487,7 @@
                                     <!-- Left: Quant Selection Pill -->
                                     <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                                         <!-- When GGUF Files are available -->
-                                        <ComboBox ItemsSource="{Binding SelectedHubItem.GgufFiles}" SelectedItem="{Binding SelectedHubItem.SelectedFile}" 
+                                        <ComboBox AutomationProperties.Name="Quantisation file" ItemsSource="{Binding SelectedHubItem.GgufFiles}" SelectedItem="{Binding SelectedHubItem.SelectedFile}" 
                                                   MinWidth="240" Height="34" VerticalContentAlignment="Center"
                                                   Visibility="{Binding SelectedHubItem.GgufFiles.Count, Converter={StaticResource ZeroToCollapsedConverter}}">
                                             <ComboBox.ItemTemplate>
@@ -519,7 +522,7 @@
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0"
                                                     Visibility="{Binding SelectedHubItem.IsLocal, Converter={StaticResource BooleanToVisibilityConverter}}">
                                             <TextBlock Text="Role:" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <ComboBox ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding SelectedHubItem.Role}" Width="110" Height="32"/>
+                                            <ComboBox AutomationProperties.Name="Model role" ItemsSource="{Binding AvailableRoleFilters}" SelectedItem="{Binding SelectedHubItem.Role}" Width="110" Height="32"/>
                                         </StackPanel>
 
                                         <!-- On-Device Mode: Load / Unload Buttons -->

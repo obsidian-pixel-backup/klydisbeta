@@ -449,7 +449,7 @@
                                                         Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
                                                         ToolTip="Reset accent color override to active theme preset" AutomationProperties.Name="Reset accent color override to active theme preset"/>
                                             </Grid>
-                                            <controls:ColorPickerControl SelectedColor="{Binding CustomAccentColorHex, Mode=TwoWay}"/>
+                                            <controls:ColorPickerControl AutomationProperties.Name="Accent colour" SelectedColor="{Binding CustomAccentColorHex, Mode=TwoWay}"/>
                                         </StackPanel>
                                     </Border>
 
@@ -469,7 +469,7 @@
                                                         Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
                                                         ToolTip="Reset background override to active background preset" AutomationProperties.Name="Reset background override to active background preset"/>
                                             </Grid>
-                                            <controls:ColorPickerControl SelectedColor="{Binding CustomBackgroundColorHex, Mode=TwoWay}"/>
+                                            <controls:ColorPickerControl AutomationProperties.Name="Background colour" SelectedColor="{Binding CustomBackgroundColorHex, Mode=TwoWay}"/>
                                         </StackPanel>
                                     </Border>
 
@@ -489,7 +489,7 @@
                                                         Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
                                                         ToolTip="Reset text color override to active theme preset" AutomationProperties.Name="Reset text color override to active theme preset"/>
                                             </Grid>
-                                            <controls:ColorPickerControl SelectedColor="{Binding CustomFontColorHex, Mode=TwoWay}"/>
+                                            <controls:ColorPickerControl AutomationProperties.Name="Font colour" SelectedColor="{Binding CustomFontColorHex, Mode=TwoWay}"/>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>
@@ -511,13 +511,13 @@
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0">
                                             <TextBlock Text="Font family" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
-                                            <ComboBox ItemsSource="{Binding AvailableFontFamilies}"
+                                            <ComboBox AutomationProperties.Name="Font family" ItemsSource="{Binding AvailableFontFamilies}"
                                                       SelectedItem="{Binding SelectedFontFamily, Mode=TwoWay}"
                                                       Height="30" FontSize="12"/>
                                         </StackPanel>
                                         <StackPanel Grid.Column="2">
                                             <TextBlock Text="Style" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" Margin="0,0,0,6"/>
-                                            <ComboBox ItemsSource="{Binding AvailableFontStyles}"
+                                            <ComboBox AutomationProperties.Name="Font style" ItemsSource="{Binding AvailableFontStyles}"
                                                       SelectedItem="{Binding SelectedFontStyle, Mode=TwoWay}"
                                                       DisplayMemberPath="Label" Height="30" FontSize="12"
                                                       MinWidth="110"/>
@@ -564,7 +564,7 @@
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                                    <ComboBox ItemsSource="{Binding AvailablePersonalities}"
+                                    <ComboBox AutomationProperties.Name="Model personality and user style" ItemsSource="{Binding AvailablePersonalities}"
                                               SelectedItem="{Binding SelectedPersonality, Mode=TwoWay}"
                                               Width="190" Height="30"
                                               VerticalAlignment="Center"
