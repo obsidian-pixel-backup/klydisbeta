@@ -1,4 +1,4 @@
-<UserControl x:Class="Klydis.App.Views.ModelLibraryView"
+﻿<UserControl x:Class="Klydis.App.Views.ModelLibraryView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
@@ -9,6 +9,40 @@
              d:DesignHeight="850" d:DesignWidth="1280">
 
     <UserControl.Resources>
+        <!-- Icon set. These replace emoji glyphs, which rendered as flat monochrome
+             text-presentation characters, clashed with the vector Path icons used in the
+             navigation rail, and resolved through whatever font the user selected in
+             Settings. Drawn on a 16x16 grid in the same thin-stroke style as the rail. -->
+        <Geometry x:Key="IconCache">M2,5 L8,2 L14,5 L14,12 L8,15 L2,12 Z M2,5 L8,8 L14,5 M8,8 L8,15</Geometry>
+        <Geometry x:Key="IconLocal">M2,4 L14,4 L14,12 L2,12 Z M2,8.5 L14,8.5 M4.2,10.4 L5.4,10.4</Geometry>
+        <Geometry x:Key="IconVram">M3,5 L13,5 L13,11 L3,11 Z M5.5,11 L5.5,13 M10.5,11 L10.5,13</Geometry>
+        <Geometry x:Key="IconRam">M2,5 L14,5 L14,11 L2,11 Z M5,5 L5,11 M8,5 L8,11 M11,5 L11,11</Geometry>
+        <Geometry x:Key="IconCpu">M4.5,4.5 L11.5,4.5 L11.5,11.5 L4.5,11.5 Z M6.8,6.8 L9.2,6.8 L9.2,9.2 L6.8,9.2 Z M6.5,4.5 L6.5,2.5 M9.5,4.5 L9.5,2.5 M6.5,11.5 L6.5,13.5 M9.5,11.5 L9.5,13.5 M4.5,6.5 L2.5,6.5 M4.5,9.5 L2.5,9.5 M11.5,6.5 L13.5,6.5 M11.5,9.5 L13.5,9.5</Geometry>
+        <Geometry x:Key="IconSearch">M7,2.2 A4.8,4.8 0 1 1 6.99,2.2 Z M10.6,10.6 L14,14</Geometry>
+        <Geometry x:Key="IconRefresh">M13.2,8 A5.2,5.2 0 1 1 11.4,4.1 M11.4,4.1 L13.9,3.4 M11.4,4.1 L12.2,6.6</Geometry>
+        <Geometry x:Key="IconHeart">M8,13.4 C3.2,10 1.7,7.5 2.7,5.3 C3.6,3.4 6.1,3.4 8,5.6 C9.9,3.4 12.4,3.4 13.3,5.3 C14.3,7.5 12.8,10 8,13.4 Z</Geometry>
+        <Geometry x:Key="IconDownload">M8,2.5 L8,10 M5.2,7.4 L8,10.4 L10.8,7.4 M3,13.2 L13,13.2</Geometry>
+        <Geometry x:Key="IconExternal">M6.2,3 L13,3 L13,9.8 M13,3 L6.6,9.4</Geometry>
+        <Geometry x:Key="IconClock">M8,1.6 A6.4,6.4 0 1 1 7.99,1.6 Z M8,4.6 L8,8.2 L11,9.7</Geometry>
+        <Geometry x:Key="IconCalendar">M2.6,4 L13.4,4 L13.4,13.6 L2.6,13.6 Z M2.6,7 L13.4,7 M5.6,2.4 L5.6,5.4 M10.4,2.4 L10.4,5.4</Geometry>
+        <Geometry x:Key="IconParams">M3,5.2 L13,5.2 M3,10.8 L13,10.8 M6.2,3.2 L6.2,7.2 M10.2,8.8 L10.2,12.8</Geometry>
+        <Geometry x:Key="IconArchitecture">M8,2 L14,5.4 L8,8.8 L2,5.4 Z M2,9.2 L8,12.6 L14,9.2</Geometry>
+        <Geometry x:Key="IconContext">M5.2,3.8 L2.2,8 L5.2,12.2 M10.8,3.8 L13.8,8 L10.8,12.2</Geometry>
+        <Geometry x:Key="IconLicense">M4,2.2 L10,2.2 L13,5.2 L13,13.8 L4,13.8 Z M10,2.2 L10,5.2 L13,5.2 M6.2,10.6 L10.8,10.6</Geometry>
+
+        <Style x:Key="PillIconStyle" TargetType="Path">
+            <Setter Property="Width" Value="11"/>
+            <Setter Property="Height" Value="11"/>
+            <Setter Property="Stretch" Value="Uniform"/>
+            <Setter Property="Fill" Value="Transparent"/>
+            <Setter Property="Stroke" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Setter Property="StrokeThickness" Value="1.3"/>
+            <Setter Property="StrokeLineJoin" Value="Round"/>
+            <Setter Property="StrokeStartLineCap" Value="Round"/>
+            <Setter Property="StrokeEndLineCap" Value="Round"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
         <!-- Model List Item Row Container Style -->
         <Style x:Key="ModelHubRowStyle" TargetType="Border">
             <Setter Property="Background" Value="{DynamicResource InputBackgroundBrush}"/>
@@ -115,7 +149,7 @@
                 <!-- Cache count badge -->
                 <Border Style="{StaticResource HeaderStatusBadgeStyle}">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="📦 " FontSize="10" VerticalAlignment="Center"/>
+                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconCache}"/>
                         <TextBlock Text="{Binding CacheCountText}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}"/>
                     </StackPanel>
                 </Border>
@@ -123,7 +157,7 @@
                 <!-- Local count badge -->
                 <Border Style="{StaticResource HeaderStatusBadgeStyle}">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="💾 " FontSize="10" VerticalAlignment="Center"/>
+                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconLocal}"/>
                         <TextBlock Text="{Binding LocalCountText}" FontSize="11" Foreground="{DynamicResource TextSecondaryBrush}"/>
                     </StackPanel>
                 </Border>
@@ -131,7 +165,7 @@
                 <!-- VRAM badge -->
                 <Border Style="{StaticResource HeaderStatusBadgeStyle}" ToolTip="Detected GPU VRAM Capacity">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="🖥 " FontSize="10" VerticalAlignment="Center"/>
+                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconVram}"/>
                         <TextBlock Text="{Binding VramBadgeText}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
                     </StackPanel>
                 </Border>
@@ -139,7 +173,7 @@
                 <!-- RAM badge -->
                 <Border Style="{StaticResource HeaderStatusBadgeStyle}" ToolTip="System RAM Capacity">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="🧠 " FontSize="10" VerticalAlignment="Center"/>
+                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconRam}"/>
                         <TextBlock Text="{Binding RamBadgeText}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
                     </StackPanel>
                 </Border>
@@ -147,7 +181,7 @@
                 <!-- CPU badge -->
                 <Border Style="{StaticResource HeaderStatusBadgeStyle}" ToolTip="CPU Cores &amp; Logical Threads">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="⚡ " FontSize="10" VerticalAlignment="Center"/>
+                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconCpu}"/>
                         <TextBlock Text="{Binding CpuBadgeText}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
                     </StackPanel>
                 </Border>
@@ -203,7 +237,7 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <TextBlock Grid.Column="0" Text="🔍" FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <Path Grid.Column="0" Style="{StaticResource PillIconStyle}" Data="{StaticResource IconSearch}" Width="13" Height="13" Margin="0,0,8,0"/>
 
                     <TextBox Grid.Column="1" Text="{Binding SearchQuery, UpdateSourceTrigger=PropertyChanged, Delay=250}" 
                              Background="Transparent" BorderThickness="0" Foreground="{DynamicResource TextPrimaryBrush}"
@@ -233,8 +267,8 @@
                 <ComboBox ItemsSource="{Binding AvailableSortFilters}" SelectedItem="{Binding SelectedSortFilter}" Width="145" Height="34" Margin="0,0,8,0" VerticalContentAlignment="Center" />
 
                 <!-- Refresh / Scan Button -->
-                <Button Command="{Binding ScanCommand}" ToolTip="Scan &amp; Refresh Model Hub" Style="{StaticResource GhostButton}" Width="34" Height="34" Margin="0,0,4,0">
-                    <TextBlock Text="🔄" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <Button Command="{Binding ScanCommand}" ToolTip="Scan &amp; Refresh Model Hub" Style="{StaticResource GhostButton}" Width="34" Height="34" Margin="0,0,4,0" AutomationProperties.Name="Scan and Refresh Model Hub">
+                    <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconRefresh}" Width="13" Height="13" Margin="0" HorizontalAlignment="Center"/>
                 </Button>
             </StackPanel>
         </Grid>
@@ -288,14 +322,21 @@
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="Auto"/>
                                             <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
                                         </Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding Status}" FontSize="10.5" Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis"/>
-                                        <Button Grid.Row="0" Grid.Column="1" Content="✕" Command="{Binding CancelCommand}" Style="{StaticResource GhostButton}" Foreground="{DynamicResource ErrorBrush}" Padding="4,0" FontSize="10" ToolTip="Cancel download"/>
+                                        <!-- The file name is fixed for the life of the row. Keeping it out of the
+                                             volatile status string means this line is laid out once instead of being
+                                             re-rendered on every progress tick. -->
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="{Binding FileName}" FontSize="10.5" Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTip="{Binding FileName}"/>
+                                        <Button Grid.Row="0" Grid.Column="1" Content="✕" Command="{Binding CancelCommand}" Style="{StaticResource GhostButton}" Foreground="{DynamicResource ErrorBrush}" Padding="4,0" FontSize="10" ToolTip="Cancel download" AutomationProperties.Name="Cancel download"/>
                                         <ProgressBar Grid.Row="1" Grid.ColumnSpan="2" Minimum="0" Maximum="100" Value="{Binding Progress}" Height="4" Margin="0,4,0,0" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                        <!-- Counters change every tick, so they sit alone on their own line over an
+                                             opaque background: a stale glyph run cannot bleed through from beneath. -->
+                                        <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Text="{Binding Status}" FontSize="10" Margin="0,3,0,0" Foreground="{DynamicResource TextSecondaryBrush}" Background="{DynamicResource SurfaceElevatedBrush}" TextTrimming="CharacterEllipsis"/>
                                     </Grid>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
@@ -354,9 +395,9 @@
                                     <!-- Stats & Time Ago -->
                                     <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right">
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                                            <TextBlock Text="♥ " FontSize="10" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                                            <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconHeart}" Width="9" Height="9" Margin="0,0,3,0"/>
                                             <TextBlock Text="{Binding Likes, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="10.5" Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,0,8,0"/>
-                                            <TextBlock Text="⬇ " FontSize="10" Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                                            <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconDownload}" Width="9" Height="9" Margin="0,0,3,0"/>
                                             <TextBlock Text="{Binding Downloads, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="10.5" Foreground="{DynamicResource TextSecondaryBrush}"/>
                                         </StackPanel>
                                         <TextBlock Text="{Binding TimeAgo}" FontSize="10" Foreground="{DynamicResource TextMutedBrush}" HorizontalAlignment="Right" Margin="0,2,0,0"/>
@@ -368,21 +409,14 @@
                 </ListBox>
 
                 <!-- Empty State for Master List -->
-                <TextBlock Grid.Row="1" Text="No models found matching your search or filters." 
+                <!-- Sits in the list row, not the downloads-banner row above it, so it cannot paint
+                     over an active download. The Style/DataTrigger that used to be here was dead:
+                     a local Visibility value always outranks a Style trigger. -->
+                <TextBlock Grid.Row="2" Text="No models found matching your search or filters."
                            Foreground="{DynamicResource TextSecondaryBrush}" FontStyle="Italic"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
-                           Visibility="{Binding HubItems.Count, Converter={StaticResource ZeroToCollapsedConverter}, ConverterParameter=Inverse}">
-                    <TextBlock.Style>
-                        <Style TargetType="TextBlock">
-                            <Setter Property="Visibility" Value="Collapsed"/>
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding HubItems.Count}" Value="0">
-                                    <Setter Property="Visibility" Value="Visible"/>
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </TextBlock.Style>
-                </TextBlock>
+                           TextWrapping="Wrap" TextAlignment="Center" Margin="16,0"
+                           Visibility="{Binding HubItems.Count, Converter={StaticResource ZeroToCollapsedConverter}, ConverterParameter=Inverse}"/>
             </Grid>
 
             <!-- ========================================== -->
@@ -411,8 +445,8 @@
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                         <TextBlock Text="{Binding SelectedHubItem.ModelName}" FontSize="22" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
-                                        <Button Command="{Binding OpenHfPageCommand}" CommandParameter="{Binding SelectedHubItem.RepoId}" Style="{StaticResource GhostButton}" ToolTip="Open repository on Hugging Face" Margin="6,0,0,0" VerticalAlignment="Center">
-                                            <TextBlock Text="↗" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource AccentPrimaryBrush}"/>
+                                        <Button Command="{Binding OpenHfPageCommand}" CommandParameter="{Binding SelectedHubItem.RepoId}" Style="{StaticResource GhostButton}" ToolTip="Open repository on Hugging Face" Margin="6,0,0,0" VerticalAlignment="Center" AutomationProperties.Name="Open repository on Hugging Face">
+                                            <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconExternal}" Width="13" Height="13" Margin="0" Stroke="{DynamicResource AccentPrimaryBrush}" StrokeThickness="1.6"/>
                                         </Button>
                                     </StackPanel>
 
@@ -542,56 +576,56 @@
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,16">
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="🕒 " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconClock}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.TimeAgo}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
 
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="📅 " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconCalendar}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.ReleaseDate}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
 
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="⬇ " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconDownload}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.Downloads, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
 
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="♥ " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconHeart}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.Likes, Converter={StaticResource CountToFormattedStringConverter}}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
 
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="⚡ " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconParams}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.ParameterSize}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
 
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="🧱 " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconArchitecture}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.Architecture}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
 
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="📏 " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconContext}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.ContextLength}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>
 
                                 <Border Style="{StaticResource MetaPillStyle}">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="⚖ " FontSize="10" VerticalAlignment="Center"/>
+                                        <Path Style="{StaticResource PillIconStyle}" Data="{StaticResource IconLicense}"/>
                                         <TextBlock Text="{Binding SelectedHubItem.License}" FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"/>
                                     </StackPanel>
                                 </Border>

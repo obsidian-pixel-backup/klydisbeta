@@ -34,10 +34,36 @@ public partial class ChatMessageViewModel : ObservableObject
 {
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(BackgroundBrushKey))]
+    [NotifyPropertyChangedFor(nameof(AutomationName))]
     private string _role = "user";
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AutomationName))]
     private string _content = string.Empty;
+
+    /// <summary>
+    /// What a screen reader announces for this bubble. Without it the list item falls back to
+    /// object.ToString() and every message in the conversation reads as the type name.
+    /// </summary>
+    public string AutomationName
+    {
+        get
+        {
+            string speaker = Role switch
+            {
+                "user" => "You",
+                "assistant" => "Klydis",
+                "system" => "System",
+                "tool" => "Tool result",
+                "toolcall" => "Tool call",
+                "thought" => "Reasoning",
+                "typing" => "Klydis is replying",
+                "error" => "Error",
+                _ => Role
+            };
+            return string.IsNullOrWhiteSpace(Content) ? speaker : $"{speaker}: {Content}";
+        }
+    }
 
     [ObservableProperty]
     private string _renderedContent = string.Empty;

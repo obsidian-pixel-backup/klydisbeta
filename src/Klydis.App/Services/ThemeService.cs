@@ -392,6 +392,7 @@ public class ThemeService
         dict["BorderBrushStrong"] = new SolidColorBrush(derived.Strong);
         dict["UserBubbleBackgroundBrush"] = new SolidColorBrush(derived.Bubble);
         dict["UserBubbleTextBrush"] = new SolidColorBrush(derived.BubbleText);
+        AddBubbleChipBrushes(dict, derived.Bubble, derived.BubbleText);
         return dict;
     }
 
@@ -491,6 +492,7 @@ public class ThemeService
         dict["BorderBrushStrong"] = new SolidColorBrush(derived.Strong);
         dict["UserBubbleBackgroundBrush"] = new SolidColorBrush(derived.Bubble);
         dict["UserBubbleTextBrush"] = new SolidColorBrush(derived.BubbleText);
+        AddBubbleChipBrushes(dict, derived.Bubble, derived.BubbleText);
     }
 
     private ResourceDictionary BuildTypographyDictionary()
@@ -629,6 +631,63 @@ public class ThemeService
     {
         // Perceived luminance (Rec. 601 coefficients), 0..1.
         return (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) / 255.0;
+    }
+
+    /// <summary>
+    /// WCAG 2.1 relative luminance (gamma-expanded), which is what a contrast ratio
+    /// needs. Deliberately separate from <see cref="Luminance"/>: that one is Rec. 601
+    /// perceived brightness and its callers are tuned to its thresholds.
+    /// </summary>
+    private static double RelativeLuminance(Color c)
+    {
+        static double Channel(byte v)
+        {
+            double s = v / 255.0;
+            return s <= 0.04045 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * Channel(c.R) + 0.7152 * Channel(c.G) + 0.0722 * Channel(c.B);
+    }
+
+    private static double ContrastRatio(Color a, Color b)
+    {
+        double la = RelativeLuminance(a), lb = RelativeLuminance(b);
+        return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
+    }
+
+    /// <summary>Source-over composite of <paramref name="fg"/> (using its alpha) onto an opaque background.</summary>
+    private static Color CompositeOver(Color fg, Color bg)
+    {
+        double a = fg.A / 255.0;
+        return Color.FromRgb(
+            (byte)Math.Round(a * fg.R + (1 - a) * bg.R),
+            (byte)Math.Round(a * fg.G + (1 - a) * bg.G),
+            (byte)Math.Round(a * fg.B + (1 - a) * bg.B));
+    }
+
+    /// <summary>
+    /// Adds the attachment-chip brushes for a user bubble. The chip sits ON the bubble, and
+    /// every bubble is a bright pastel in BOTH modes, so the chip is tinted with the bubble's
+    /// own ink rather than white — a translucent-white wash never cleared 1.3:1 against it.
+    /// The border alpha is solved per accent so it reaches the 3:1 non-text contrast floor,
+    /// which keeps derived and custom accents as legible as the five hand-tuned dictionaries.
+    /// </summary>
+    private static void AddBubbleChipBrushes(ResourceDictionary dict, Color bubble, Color bubbleText)
+    {
+        dict["UserBubbleChipBackgroundBrush"] = new SolidColorBrush(
+            Color.FromArgb(0x1F, bubbleText.R, bubbleText.G, bubbleText.B));
+
+        byte alpha = 0xFF;
+        for (int a = 0; a <= 255; a++)
+        {
+            var candidate = Color.FromArgb((byte)a, bubbleText.R, bubbleText.G, bubbleText.B);
+            if (ContrastRatio(CompositeOver(candidate, bubble), bubble) >= 3.05)
+            {
+                alpha = (byte)a;
+                break;
+            }
+        }
+        dict["UserBubbleChipBorderBrush"] = new SolidColorBrush(
+            Color.FromArgb(alpha, bubbleText.R, bubbleText.G, bubbleText.B));
     }
 
     private static Color Shift(Color c, double amount)

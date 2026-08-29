@@ -1,4 +1,4 @@
-<UserControl x:Class="Klydis.App.Views.RagView"
+﻿<UserControl x:Class="Klydis.App.Views.RagView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -220,7 +220,7 @@
                                             <Button Grid.Column="1" Command="{Binding DataContext.DeleteCollectionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                                     CommandParameter="{Binding}" Content="🗑" FontSize="12"
                                                     Style="{DynamicResource GhostButton}" Foreground="{DynamicResource ErrorBrush}"
-                                                    Padding="7,4" VerticalAlignment="Center" ToolTip="Delete this workspace index"/>
+                                                    Padding="7,4" VerticalAlignment="Center" ToolTip="Delete this workspace index" AutomationProperties.Name="Delete this workspace index"/>
                                         </Grid>
                                     </Border>
                                 </DataTemplate>

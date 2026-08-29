@@ -1,4 +1,4 @@
-<UserControl x:Class="Klydis.App.Views.SettingsView"
+﻿<UserControl x:Class="Klydis.App.Views.SettingsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -221,7 +221,7 @@
                         </StackPanel>
                         <Button Grid.Column="1" Content="Reset All to Defaults" Command="{Binding ResetAllAppearanceCommand}"
                                 Style="{DynamicResource SecondaryButton}" VerticalAlignment="Center" Padding="14,7" FontSize="12"
-                                ToolTip="Reset mode, background, accent theme, typography, and all manual color overrides back to factory defaults"/>
+                                ToolTip="Reset mode, background, accent theme, typography, and all manual color overrides back to factory defaults" AutomationProperties.Name="Reset mode, background, accent theme, typography, and all manual color overrides back to factory defaults"/>
                     </Grid>
 
                     <!-- 2-Column Grid -->
@@ -447,7 +447,7 @@
                                                 </StackPanel>
                                                 <Button Grid.Column="1" Content="Reset to theme" Command="{Binding ResetCustomAccentColorCommand}"
                                                         Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
-                                                        ToolTip="Reset accent color override to active theme preset"/>
+                                                        ToolTip="Reset accent color override to active theme preset" AutomationProperties.Name="Reset accent color override to active theme preset"/>
                                             </Grid>
                                             <controls:ColorPickerControl SelectedColor="{Binding CustomAccentColorHex, Mode=TwoWay}"/>
                                         </StackPanel>
@@ -467,7 +467,7 @@
                                                 </StackPanel>
                                                 <Button Grid.Column="1" Content="Reset to theme" Command="{Binding ResetCustomBackgroundColorCommand}"
                                                         Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
-                                                        ToolTip="Reset background override to active background preset"/>
+                                                        ToolTip="Reset background override to active background preset" AutomationProperties.Name="Reset background override to active background preset"/>
                                             </Grid>
                                             <controls:ColorPickerControl SelectedColor="{Binding CustomBackgroundColorHex, Mode=TwoWay}"/>
                                         </StackPanel>
@@ -487,7 +487,7 @@
                                                 </StackPanel>
                                                 <Button Grid.Column="1" Content="Reset to theme" Command="{Binding ResetCustomFontColorCommand}"
                                                         Style="{DynamicResource GhostButton}" FontSize="11" Padding="8,4" VerticalAlignment="Center"
-                                                        ToolTip="Reset text color override to active theme preset"/>
+                                                        ToolTip="Reset text color override to active theme preset" AutomationProperties.Name="Reset text color override to active theme preset"/>
                                             </Grid>
                                             <controls:ColorPickerControl SelectedColor="{Binding CustomFontColorHex, Mode=TwoWay}"/>
                                         </StackPanel>
@@ -578,7 +578,7 @@
                                             Foreground="{DynamicResource TextPrimaryBrush}"
                                             BorderBrush="{DynamicResource BorderBrush}"
                                             BorderThickness="1"
-                                            VerticalAlignment="Center"/>
+                                            VerticalAlignment="Center" AutomationProperties.Name="Reload user style modes from disk"/>
                                 </StackPanel>
                             </Grid>
 

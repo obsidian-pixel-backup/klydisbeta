@@ -13,5 +13,11 @@
          own background, so it reads fine on both a white and a dark page. -->
     <SolidColorBrush x:Key="UserBubbleBackgroundBrush" Color="#50E8F4" />
     <SolidColorBrush x:Key="UserBubbleTextBrush" Color="#001619" />
+    <!-- Attachment chips sit ON the bubble, so they are tinted with the bubble's own
+         ink rather than white: the bubble is a bright pastel in BOTH modes, and a
+         translucent-white wash on it never reached 1.3:1. Border alpha is tuned per
+         accent to clear the 3:1 non-text contrast floor against that accent's bubble. -->
+    <SolidColorBrush x:Key="UserBubbleChipBackgroundBrush" Color="#1F001619" />
+    <SolidColorBrush x:Key="UserBubbleChipBorderBrush" Color="#7D001619" />
 
 </ResourceDictionary>

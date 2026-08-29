@@ -653,7 +653,9 @@ public partial class ModelLibraryViewModel : ObservableObject
 
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
-                item.ReadmeMarkdown = rawReadme;
+                // Hugging Face cards are HTML-in-Markdown; MdXaml renders Markdown only and
+                // surfaced the raw tags as code blocks. Pure-Markdown cards pass through unchanged.
+                item.ReadmeMarkdown = Klydis.Core.Models.ModelCardFormatter.Format(rawReadme);
                 item.IsLoadingReadme = false;
             });
         }
@@ -999,7 +1001,8 @@ This model is licensed under `{item.License}`.
         var downloadVm = new ActiveDownloadViewModel
         {
             FileName = fileName,
-            Status = $"Downloading {fileName}...",
+            // Status carries only the volatile part; the row renders FileName separately.
+            Status = "Starting...",
             Progress = 0
         };
 
@@ -1022,7 +1025,7 @@ This model is licensed under `{item.License}`.
         var progress = new Progress<DownloadProgress>(p =>
         {
             downloadVm.Progress = p.PercentComplete;
-            string statusStr = $"Downloading {fileName}... {(p.BytesDownloaded / (1024.0 * 1024.0)):F1} MB / {(p.TotalBytes / (1024.0 * 1024.0)):F1} MB ({p.SpeedBytesPerSecond / (1024.0 * 1024.0):F1} MB/s)";
+            string statusStr = $"{(p.BytesDownloaded / (1024.0 * 1024.0)):F1} MB / {(p.TotalBytes / (1024.0 * 1024.0)):F1} MB · {p.SpeedBytesPerSecond / (1024.0 * 1024.0):F1} MB/s";
             downloadVm.Status = statusStr;
 
             if (item != null)

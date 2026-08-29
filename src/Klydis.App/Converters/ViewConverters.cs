@@ -99,7 +99,11 @@ public class ZeroToCollapsedConverter : IValueConverter
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
         double n = value is double d ? d : double.TryParse(value?.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var p) ? p : 0;
-        return n > 0 ? Visibility.Visible : Visibility.Collapsed;
+        // ConverterParameter=Inverse flips the test so an empty collection becomes Visible. The
+        // parameter used to be ignored, which showed the "no models found" empty state exactly
+        // when the list DID have results.
+        bool inverse = string.Equals(parameter as string, "Inverse", StringComparison.OrdinalIgnoreCase);
+        return (n > 0) != inverse ? Visibility.Visible : Visibility.Collapsed;
     }
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
 }
@@ -156,7 +160,12 @@ public class NullToVisibilityConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        return value != null ? Visibility.Visible : Visibility.Collapsed;
+        // ConverterParameter=Inverse flips the test so a null value maps to Visible. The parameter
+        // used to be ignored, which left the model-hub empty-state placeholder visible exactly when
+        // an item WAS selected — it then painted on top of the detail pane.
+        bool hasValue = value != null;
+        bool inverse = string.Equals(parameter as string, "Inverse", StringComparison.OrdinalIgnoreCase);
+        return hasValue != inverse ? Visibility.Visible : Visibility.Collapsed;
     }
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
 }
