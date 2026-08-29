@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -69,7 +69,7 @@ public record FontStyleChoice(string Label, string Weight, string Style);
 /// user-chosen custom colors and typography on top, and persists everything.
 /// App-layer only: reads/writes a small JSON file under the user's LocalAppData.
 /// </summary>
-public class ThemeService
+public class ThemeService : IDisposable
 {
     // App.xaml merges dictionaries in this fixed order: [mode, accent, styles, typography].
     private const int ModeDictionaryIndex = 0;
@@ -201,6 +201,44 @@ public class ThemeService
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Klydis");
         Directory.CreateDirectory(dir);
         _settingsPath = Path.Combine(dir, "ui-settings.json");
+
+        // ThemeMode.System resolved the OS light/dark setting once and never again, so switching
+        // Windows to light left Klydis dark until it was relaunched. SystemEvents is a static
+        // event: this roots the instance until Dispose, which the DI container calls on shutdown.
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+    }
+
+    private bool _disposed;
+
+    /// <summary>
+    /// Re-applies the palette when Windows changes its light/dark setting, but only while the
+    /// user's mode selection is <see cref="ThemeMode.System"/>.
+    /// </summary>
+    private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        // Windows reports the app light/dark switch under General; Color and VisualStyle are
+        // included because different builds have raised the change under those categories.
+        if (e.Category is not (UserPreferenceCategory.General
+                            or UserPreferenceCategory.Color
+                            or UserPreferenceCategory.VisualStyle))
+        {
+            return;
+        }
+
+        if (CurrentMode != ThemeMode.System) return;
+
+        // Raised on the SystemEvents thread, and Apply mutates Application.Current.Resources.
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher == null) return;
+        dispatcher.BeginInvoke(new Action(RefreshIfFollowingSystem));
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>
