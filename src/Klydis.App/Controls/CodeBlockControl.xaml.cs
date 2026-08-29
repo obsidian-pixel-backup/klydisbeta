@@ -1,4 +1,6 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -114,12 +116,28 @@ public partial class CodeBlockControl : UserControl
 
         var typeface = new Typeface(CodeRichTextBox.FontFamily, CodeRichTextBox.FontStyle,
                                     CodeRichTextBox.FontWeight, CodeRichTextBox.FontStretch);
-        double widest = 0;
+
+        // Only the few longest lines can be the widest, so only those get measured. Building a
+        // FormattedText for every line ran on the UI thread for every code block in the session:
+        // a long transcript with large output blocks froze the window for seconds on load.
+        // The code font is monospace, so an estimated column count ranks lines reliably; a handful
+        // of candidates rather than one covers a fallback font and double-width glyphs.
+        const int candidates = 5;
+        var ranked = new List<(int Columns, string Line)>();
         foreach (var raw in code.Split('\n'))
         {
             // Tabs measure as zero-width in FormattedText, so give them the editor's 4 columns.
             string line = raw.TrimEnd('\r').Replace("\t", "    ");
             if (line.Length == 0) continue;
+            int columns = 0;
+            foreach (char c in line) columns += c >= 0x1100 ? 2 : 1;
+            ranked.Add((columns, line));
+        }
+        if (ranked.Count == 0) return minimum;
+
+        double widest = 0;
+        foreach (var (_, line) in ranked.OrderByDescending(entry => entry.Columns).Take(candidates))
+        {
             var ft = new FormattedText(line, System.Globalization.CultureInfo.CurrentCulture,
                                        FlowDirection.LeftToRight, typeface,
                                        CodeRichTextBox.FontSize, Brushes.Black, pixelsPerDip);

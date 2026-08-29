@@ -400,9 +400,20 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         Action updateUi = () =>
         {
+            // Captured before the flag is cleared below: the ComboBox write-back guard further
+            // down must still see whether a load was in flight when this event arrived.
+            bool loadWasInFlight = IsModelLoading;
+
             IsModelReady = isLoaded;
             if (isLoaded && !string.IsNullOrEmpty(modelPath))
             {
+                // The engine is the authority on whether a model is loaded, so its report ends the
+                // loading state. The load flow clears the flag itself on every path it controls,
+                // but nothing recovered the UI if a load completed outside that flow: the window
+                // sat on "loading…" with the composer disabled even though the model was resident
+                // and usable. Clearing here makes the reported state self-correcting.
+                IsModelLoading = false;
+
                 // Only sync the ComboBox when no user-initiated load is in flight. Otherwise
                 // every load completion writes SelectedModelId, which fires
                 // OnSelectedModelIdChanged -> LoadModelAsync -> ... -> another completion event,
@@ -411,7 +422,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 // the native log). While IsModelLoading is true the user's choice is what
                 // governs; the writeback only serves the ModelLibrary path that loads outside
                 // the chat ComboBox.
-                if (!IsModelLoading)
+                if (!loadWasInFlight)
                 {
                     var modelInfo = _registry.GetAllModels().FirstOrDefault(m => m.FilePath == modelPath);
                     if (modelInfo != null && SelectedModelId != modelInfo.DisplayName)

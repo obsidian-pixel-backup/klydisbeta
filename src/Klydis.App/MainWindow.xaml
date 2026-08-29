@@ -251,7 +251,8 @@
                     <TextBlock Text="{Binding ChatViewModel.ModelLoadStatusText}" FontSize="12" FontStyle="Italic" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"
                                AutomationProperties.Name="{Binding ChatViewModel.ModelLoadStatusText}"
                                Visibility="{Binding ChatViewModel.IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
-                    <TextBlock Text="ready" FontSize="12" Foreground="{DynamicResource SuccessBrush}" VerticalAlignment="Center" Margin="8,0,0,0">
+                    <TextBlock Text="ready" FontSize="12" Foreground="{DynamicResource SuccessBrush}" VerticalAlignment="Center" Margin="8,0,0,0"
+                               AutomationProperties.Name="Model ready">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
                                 <Setter Property="Visibility" Value="Collapsed"/>
@@ -259,6 +260,29 @@
                                     <MultiDataTrigger>
                                         <MultiDataTrigger.Conditions>
                                             <Condition Binding="{Binding ChatViewModel.IsModelReady}" Value="True"/>
+                                            <Condition Binding="{Binding ChatViewModel.IsModelLoading}" Value="False"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+
+                    <!-- Third state. Loading shows the pulsing dot with its status text and ready
+                         shows "ready", but "not loaded" previously showed only a muted dot: the
+                         status was carried by colour alone, and a screen reader got nothing at all
+                         because a Shape exposes no name. -->
+                    <TextBlock Text="not loaded" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
+                               VerticalAlignment="Center" Margin="8,0,0,0"
+                               AutomationProperties.Name="Model not loaded">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding ChatViewModel.IsModelReady}" Value="False"/>
                                             <Condition Binding="{Binding ChatViewModel.IsModelLoading}" Value="False"/>
                                         </MultiDataTrigger.Conditions>
                                         <Setter Property="Visibility" Value="Visible"/>

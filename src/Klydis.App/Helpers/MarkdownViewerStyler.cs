@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
@@ -36,6 +36,8 @@ public static class MarkdownViewerStyler
     public static void Apply(MarkdownScrollViewer viewer)
     {
         Style Res(string key) => (Style)viewer.FindResource(key);
+
+        ForwardWheelWhenNotScrollable(viewer);
 
         var foreground = TextElement.GetForeground(viewer);
         if (foreground == null && viewer.FindResource("TextPrimaryBrush") is Brush textBrush)
@@ -289,4 +291,40 @@ public static class MarkdownViewerStyler
             }
         }
     }
+
+    /// <summary>
+    /// Lets the wheel reach the surrounding scroller when this viewer does not scroll itself.
+    /// </summary>
+    /// <remarks>
+    /// MarkdownScrollViewer is a ScrollViewer. Where a model card or message is hosted inside an
+    /// outer ScrollViewer, the inner one is given Disabled scrollbars so the outer one owns
+    /// scrolling — but a ScrollViewer still marks wheel events handled, so they never bubble and
+    /// the region simply refuses to scroll under the pointer. Re-raising the event on the parent
+    /// restores it. Only applied when the viewer really cannot scroll, so a viewer that owns its
+    /// own scrolling keeps the wheel.
+    /// </remarks>
+    private static void ForwardWheelWhenNotScrollable(MarkdownScrollViewer viewer)
+    {
+        if (viewer.GetValue(WheelForwardedProperty) is true) return;
+        viewer.SetValue(WheelForwardedProperty, true);
+
+        viewer.PreviewMouseWheel += (sender, e) =>
+        {
+            if (e.Handled) return;
+            if (viewer.VerticalScrollBarVisibility != ScrollBarVisibility.Disabled) return;
+
+            e.Handled = true;
+            var bubbled = new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+            {
+                RoutedEvent = UIElement.MouseWheelEvent,
+                Source = viewer
+            };
+            (VisualTreeHelper.GetParent(viewer) as UIElement)?.RaiseEvent(bubbled);
+        };
+    }
+
+    private static readonly DependencyProperty WheelForwardedProperty =
+        DependencyProperty.RegisterAttached("WheelForwarded", typeof(bool), typeof(MarkdownViewerStyler),
+            new PropertyMetadata(false));
+
 }
