@@ -90,6 +90,42 @@ public partial class CodeBlockControl : UserControl
         {
             CodeParagraph.Inlines.Add(inline);
         }
+
+        // The content ScrollViewer scrolls horizontally, so it measures this RichTextBox with
+        // infinite width. A FlowDocument given unbounded width collapses to its minimum instead
+        // of laying out, which rendered code one character per line. Pinning the page width to
+        // the widest line makes the document lay out normally and leaves the ScrollViewer to
+        // scroll only when a line actually overflows.
+        CodeRichTextBox.Document.PageWidth = MeasureWidestLine(code);
+    }
+
+    /// <summary>
+    /// Width of the longest line in <paramref name="code"/> at the code font, plus a small pad
+    /// so a trailing caret or selection is not clipped.
+    /// </summary>
+    private double MeasureWidestLine(string code)
+    {
+        const double minimum = 200;
+        if (string.IsNullOrEmpty(code)) return minimum;
+
+        double pixelsPerDip = 1.0;
+        try { pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip; }
+        catch { /* not in a visual tree yet; 1.0 is close enough to avoid the collapse */ }
+
+        var typeface = new Typeface(CodeRichTextBox.FontFamily, CodeRichTextBox.FontStyle,
+                                    CodeRichTextBox.FontWeight, CodeRichTextBox.FontStretch);
+        double widest = 0;
+        foreach (var raw in code.Split('\n'))
+        {
+            // Tabs measure as zero-width in FormattedText, so give them the editor's 4 columns.
+            string line = raw.TrimEnd('\r').Replace("\t", "    ");
+            if (line.Length == 0) continue;
+            var ft = new FormattedText(line, System.Globalization.CultureInfo.CurrentCulture,
+                                       FlowDirection.LeftToRight, typeface,
+                                       CodeRichTextBox.FontSize, Brushes.Black, pixelsPerDip);
+            if (ft.Width > widest) widest = ft.Width;
+        }
+        return Math.Max(minimum, widest + 24);
     }
 
     private static string FormatLanguageName(string lang) => lang switch
