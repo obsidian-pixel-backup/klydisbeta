@@ -66,6 +66,7 @@
 
         <!-- Segmented Tab Button Style -->
         <Style x:Key="SegmentedTabButtonStyle" TargetType="Button">
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
             <Setter Property="FontFamily" Value="{DynamicResource AppFontFamily}"/>
@@ -204,6 +205,7 @@
                     <Button Content="Discover" Command="{Binding SelectDiscoverTabCommand}">
                         <Button.Style>
                             <Style TargetType="Button" BasedOn="{StaticResource SegmentedTabButtonStyle}">
+                                <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding SelectedHubTab}" Value="Discover">
                                         <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}"/>
@@ -216,6 +218,7 @@
                     <Button Content="On Device" Command="{Binding SelectOnDeviceTabCommand}">
                         <Button.Style>
                             <Style TargetType="Button" BasedOn="{StaticResource SegmentedTabButtonStyle}">
+                                <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding SelectedHubTab}" Value="OnDevice">
                                         <Setter Property="Background" Value="{DynamicResource PanelBackgroundBrush}"/>
@@ -354,7 +357,7 @@
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                             <Setter Property="Padding" Value="0"/>
                             <Setter Property="Margin" Value="0"/>
-                            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="Template">
                                 <Setter.Value>
                                     <ControlTemplate TargetType="ListBoxItem">
@@ -523,6 +526,7 @@
                                         <Button Content="▶ Load" Command="{Binding LoadSelectedModelCommand}" Padding="16,7" Margin="0,0,8,0">
                                             <Button.Style>
                                                 <Style TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+                                                    <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                                     <Setter Property="Visibility" Value="Collapsed"/>
                                                     <Style.Triggers>
                                                         <MultiDataTrigger>
@@ -540,6 +544,7 @@
                                         <Button Content="⏹ Unload" Command="{Binding UnloadSelectedModelCommand}" Padding="16,7" Margin="0,0,8,0">
                                             <Button.Style>
                                                 <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+                                                    <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                                     <Setter Property="Visibility" Value="Collapsed"/>
                                                     <Style.Triggers>
                                                         <MultiDataTrigger>

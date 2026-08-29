@@ -13,6 +13,7 @@
         <!-- Pill-style tab used by the six panel tabs (Queue / Files / Changes / Preview /
              Terminal / Notes), mirroring the app's ActivityTabStyle look. -->
         <Style x:Key="SidePanelTabStyle" TargetType="RadioButton">
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
             <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
@@ -69,6 +70,7 @@
             <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
         </Style>
         <Style x:Key="SidePanelListBoxItem" TargetType="ListBoxItem">
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
             <Setter Property="Padding" Value="4,2"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="Background" Value="Transparent"/>
@@ -326,6 +328,7 @@
                              ToolTip="Drag a queued message to change its processing order (Manual order)">
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
+                                <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                 <Setter Property="Padding" Value="0"/>
                                 <Setter Property="Margin" Value="0"/>
@@ -515,6 +518,7 @@
                          Margin="10,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="Padding" Value="4,3"/>
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -615,6 +619,7 @@
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="Padding" Value="4,3"/>
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -766,6 +771,7 @@
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <ListBox.ItemContainerStyle>
                                 <Style TargetType="ListBoxItem">
+                                    <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                     <Setter Property="Padding" Value="4,3"/>
                                     <Setter Property="Background" Value="Transparent"/>
                                     <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -814,6 +820,7 @@
                                     Content="Open in browser" FontSize="11" Padding="8,3">
                                 <Button.Style>
                                     <Style TargetType="Button" BasedOn="{StaticResource GhostButton}">
+                                        <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                         <Setter Property="Visibility" Value="Collapsed"/>
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding SidePanel.SelectedArtifact.Kind}" Value="html">
@@ -990,6 +997,7 @@
                          Background="Transparent" BorderThickness="0" Margin="10,8" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="Padding" Value="6,4"/>
                             <Setter Property="Background" Value="Transparent"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -1043,6 +1051,7 @@
                                     Content="Delete" FontSize="11" Padding="8,3" Margin="0,0,6,0">
                                 <Button.Style>
                                     <Style TargetType="Button" BasedOn="{StaticResource GhostButton}">
+                                        <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding SidePanel.SelectedNote}" Value="{x:Null}">
                                                 <Setter Property="Visibility" Value="Collapsed"/>

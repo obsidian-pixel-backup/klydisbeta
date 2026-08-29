@@ -15,6 +15,7 @@
              Foreground / BorderBrush can be overridden per instance (accent vs. danger vs.
              neutral) without fighting a shared style's hover triggers. -->
         <Style x:Key="RoundedActionButtonStyle" TargetType="Button">
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="FontSize" Value="12.5"/>

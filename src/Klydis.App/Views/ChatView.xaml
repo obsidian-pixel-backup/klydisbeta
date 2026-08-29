@@ -232,6 +232,7 @@
         <!-- Option row for the inline chat-settings menu: radio dot + label, checked row
              tinted with the accent so the current selection is obvious at a glance. -->
         <Style x:Key="SettingsOptionStyle" TargetType="RadioButton">
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
             <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="Cursor" Value="Hand"/>
@@ -269,6 +270,7 @@
 
         <!-- Personality list rows: same radio-dot look as the option rows above. -->
         <Style x:Key="SettingsPersonalityItem" TargetType="ListBoxItem">
+            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="Template">
@@ -372,7 +374,7 @@
                             <Setter Property="BorderThickness" Value="0"/>
                             <Setter Property="Padding" Value="10,8"/>
                             <Setter Property="Margin" Value="7,2"/>
-                            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                             <Setter Property="VerticalContentAlignment" Value="Center"/>
                             <Setter Property="Template">
@@ -568,10 +570,11 @@
                              points left when the list is open, right when collapsed. -->
                         <ToggleButton IsChecked="{Binding IsSessionSidebarOpen, Mode=TwoWay}"
                                       ToolTip="Show / hide the session list"
-                                      Width="28" Height="28" Padding="0" Cursor="Hand" FocusVisualStyle="{x:Null}"
+                                      Width="28" Height="28" Padding="0" Cursor="Hand" FocusVisualStyle="{DynamicResource KlydisFocusVisual}"
                                       VerticalAlignment="Center" Margin="0,0,6,0" AutomationProperties.Name="Show / hide the session list">
                             <ToggleButton.Style>
                                 <Style TargetType="ToggleButton">
+                                    <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                     <Setter Property="Background" Value="Transparent"/>
                                     <Setter Property="BorderThickness" Value="0"/>
                                     <Setter Property="Template">
@@ -685,6 +688,7 @@
                             </TextBox.InputBindings>
                             <TextBox.Style>
                                 <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+                                    <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                     <Setter Property="Visibility" Value="Collapsed"/>
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding SelectedSession.IsEditingTitle}" Value="True">
@@ -713,10 +717,11 @@
                              open/closed as the user left it. -->
                         <ToggleButton IsChecked="{Binding SidePanel.IsPanelOpen, Mode=TwoWay}" 
                                       ToolTip="Show / hide the workbench panel (queue, files, changes, preview, terminal, notes)"
-                                      Padding="8,4" Cursor="Hand" FocusVisualStyle="{x:Null}"
+                                      Padding="8,4" Cursor="Hand" FocusVisualStyle="{DynamicResource KlydisFocusVisual}"
                                       VerticalAlignment="Center" Margin="2,0,0,0" AutomationProperties.Name="Show / hide the workbench panel (queue, files, changes, preview, terminal, notes)">
                             <ToggleButton.Style>
                                 <Style TargetType="ToggleButton">
+                                    <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                                     <Setter Property="Background" Value="Transparent"/>
                                     <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
                                     <Setter Property="BorderThickness" Value="0"/>
@@ -781,6 +786,7 @@
                          janky, unresponsive scrolling. -->
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
+                            <Setter Property="FocusVisualStyle" Value="{DynamicResource KlydisFocusVisual}"/>
                             <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName}"/>
                             <Setter Property="Focusable" Value="False"/>
                             <Setter Property="Template">
