@@ -30,8 +30,8 @@
     <SolidColorBrush x:Key="SystemBubbleBackgroundBrush" Color="Transparent" />
     <SolidColorBrush x:Key="ErrorBubbleBackgroundBrush" Color="#FCEAEA" />
 
-    <SolidColorBrush x:Key="SuccessBrush" Color="#1E8E3E" />
-    <SolidColorBrush x:Key="ErrorBrush" Color="#D5433D" />
-    <SolidColorBrush x:Key="WarningBrush" Color="#A9720F" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#1B8038" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#C83F39" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#97660D" />
 
 </ResourceDictionary>

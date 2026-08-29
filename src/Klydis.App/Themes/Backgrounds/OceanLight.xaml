@@ -23,7 +23,7 @@
 
     <SolidColorBrush x:Key="TextPrimaryBrush" Color="#04262B" />
     <SolidColorBrush x:Key="TextSecondaryBrush" Color="#3D6B72" />
-    <SolidColorBrush x:Key="TextMutedBrush" Color="#6C959C" />
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#55757B" />
     <SolidColorBrush x:Key="TextInverse" Color="#FFFFFF" />
 
     <SolidColorBrush x:Key="AssistantBubbleBackgroundBrush" Color="#EAF6F7" />
@@ -34,8 +34,8 @@
     <SolidColorBrush x:Key="SystemBubbleBackgroundBrush" Color="Transparent" />
     <SolidColorBrush x:Key="ErrorBubbleBackgroundBrush" Color="#FCEAEA" />
 
-    <SolidColorBrush x:Key="SuccessBrush" Color="#1E8E3E" />
-    <SolidColorBrush x:Key="ErrorBrush" Color="#D5433D" />
-    <SolidColorBrush x:Key="WarningBrush" Color="#A9720F" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#1B8038" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#C83F39" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#97660D" />
 
 </ResourceDictionary>

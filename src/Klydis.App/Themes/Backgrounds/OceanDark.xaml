@@ -23,7 +23,7 @@
 
     <SolidColorBrush x:Key="TextPrimaryBrush" Color="#C7F8FE" />
     <SolidColorBrush x:Key="TextSecondaryBrush" Color="#8FC9D3" />
-    <SolidColorBrush x:Key="TextMutedBrush" Color="#578E9B" />
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#64A3B2" />
     <SolidColorBrush x:Key="TextInverse" Color="#001619" />
 
     <SolidColorBrush x:Key="AssistantBubbleBackgroundBrush" Color="#062A33" />
