@@ -1,3 +1,5 @@
+﻿using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -54,7 +56,7 @@ public static class ModelCardFormatter
 
         if (!ContainsStructuralHtml(working))
         {
-            return Unmask(working, masked);
+            return Unmask(DemoteUndecodableImages(working), masked);
         }
 
         // Convert only the HTML regions. Handing the whole document to the converter would treat
@@ -63,6 +65,7 @@ public static class ModelCardFormatter
         string converted = ConvertHtmlRegions(working);
 
         converted = UnwrapEmphasisAroundLinks(converted);
+        converted = DemoteUndecodableImages(converted);
         converted = Unmask(converted, masked);
         return ExcessBlankLines.Replace(converted, "\n\n").Trim();
     }
@@ -189,5 +192,75 @@ public static class ModelCardFormatter
             sb.Replace($"KLYDISCODE{i}", store[i]);
         }
         return sb.ToString();
+    }
+
+    // A linked badge -- [![alt](img)](href) -- is the shape nearly every shields.io badge takes.
+    private static readonly Regex LinkedImage = new(
+        @"\[\s*!\[(?<alt>[^\]]*)\]\(\s*(?<img>[^)\s]+?)(?:\s+""[^""]*"")?\s*\)\s*\]\(\s*(?<href>[^)\s]+?)(?:\s+""[^""]*"")?\s*\)",
+        RegexOptions.Compiled);
+
+    private static readonly Regex StandaloneImage = new(
+        @"!\[(?<alt>[^\]]*)\]\(\s*(?<img>[^)\s]+?)(?:\s+""[^""]*"")?\s*\)",
+        RegexOptions.Compiled);
+
+    // What WPF's imaging stack can actually decode. SVG is the important omission: shields.io
+    // serves SVG, so every badge on a card hit this.
+    private static readonly HashSet<string> DecodableExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".ico"
+    };
+
+    /// <summary>
+    /// Replaces images the renderer cannot display with their alt text, keeping the surrounding
+    /// link where there is one.
+    /// </summary>
+    /// <remarks>
+    /// MdXaml renders an image it cannot decode as red error text reading "unsupported image
+    /// format" next to the raw URL. Model cards open with rows of shields.io badges, which are
+    /// SVG, so a typical card began with a block of red errors. Demoting them keeps the
+    /// information (the badge label, and its link, which is what the badge was for) and drops
+    /// only the picture that was never going to appear.
+    /// </remarks>
+    private static string DemoteUndecodableImages(string markdown)
+    {
+        string result = LinkedImage.Replace(markdown, m =>
+        {
+            if (IsDecodable(m.Groups["img"].Value)) return m.Value;
+            string alt = m.Groups["alt"].Value.Trim();
+            // No alt means nothing readable would survive, so the link goes with the image.
+            return alt.Length == 0 ? string.Empty : $"[{alt}]({m.Groups["href"].Value})";
+        });
+
+        return StandaloneImage.Replace(result, m =>
+        {
+            if (IsDecodable(m.Groups["img"].Value)) return m.Value;
+            string alt = m.Groups["alt"].Value.Trim();
+            return alt.Length == 0 ? string.Empty : alt;
+        });
+    }
+
+    private static bool IsDecodable(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+
+        if (url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            int comma = url.IndexOf(',');
+            string header = comma > 0 ? url[..comma] : url;
+            return header.Contains("image/png", StringComparison.OrdinalIgnoreCase)
+                || header.Contains("image/jpeg", StringComparison.OrdinalIgnoreCase)
+                || header.Contains("image/gif", StringComparison.OrdinalIgnoreCase)
+                || header.Contains("image/bmp", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // A relative path has no base URI to resolve against here, so it cannot load either.
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+
+        // Query and fragment are not part of the file name (…/x.png?raw=true).
+        string path = uri.AbsolutePath;
+        int dot = path.LastIndexOf('.');
+        if (dot < 0) return false;   // extensionless endpoints (shields.io/badge/…) serve SVG
+        return DecodableExtensions.Contains(path[dot..]);
     }
 }
