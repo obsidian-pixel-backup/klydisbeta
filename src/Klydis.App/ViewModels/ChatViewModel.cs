@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Text;
@@ -106,7 +106,34 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private bool _isGenerating;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ModelLoadStatusText))]
     private bool _isModelLoading;
+
+    /// <summary>Weight-loading progress, 0-100, while <see cref="IsModelLoading"/> is true.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ModelLoadStatusText))]
+    private int _modelLoadPercent;
+
+    /// <summary>Coarse stage reported by the engine while a model loads.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ModelLoadStatusText))]
+    private string _modelLoadStage = string.Empty;
+
+    /// <summary>
+    /// What the status bar shows while a model loads. Weight loading is only part of the wait, so
+    /// the stage carries the rest; the percentage is appended only while it is meaningful.
+    /// </summary>
+    public string ModelLoadStatusText
+    {
+        get
+        {
+            // The percentage llama.cpp reports covers weight loading specifically, which begins
+            // only after the backend has finished initialising. So once ticks arrive the label
+            // moves on from "Preparing backend" rather than attributing the figure to it.
+            if (ModelLoadPercent is > 0 and < 100) return $"Loading weights… {ModelLoadPercent}%";
+            return string.IsNullOrEmpty(ModelLoadStage) ? "loading…" : $"{ModelLoadStage}…";
+        }
+    }
 
     [ObservableProperty]
     private bool _isModelReady;
@@ -324,6 +351,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         RefreshModels();
         _registry.RegistryChanged += OnRegistryChanged;
         _inferenceEngine.ModelStateChanged += OnModelStateChanged;
+        _inferenceEngine.ModelLoadProgressChanged += OnModelLoadProgressChanged;
+        _inferenceEngine.ModelLoadStageChanged += OnEngineLoadStageChanged;
         FireAndForget.Observe(InitializeSessionsAsync(), operation: nameof(InitializeSessionsAsync));
     }
 
@@ -337,7 +366,34 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
         _registry.RegistryChanged -= OnRegistryChanged;
         _inferenceEngine.ModelStateChanged -= OnModelStateChanged;
+        _inferenceEngine.ModelLoadProgressChanged -= OnModelLoadProgressChanged;
+        _inferenceEngine.ModelLoadStageChanged -= OnEngineLoadStageChanged;
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Raised on the loading thread by the inference engine, so it is marshalled here rather
+    /// than at the call site.
+    /// </summary>
+    private void OnEngineLoadStageChanged(string stage)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher == null) return;
+        void Apply()
+        {
+            ModelLoadStage = stage;
+            ModelLoadPercent = 0;   // each stage restarts its own progress
+        }
+        if (dispatcher.CheckAccess()) Apply();
+        else dispatcher.BeginInvoke(new Action(Apply));
+    }
+
+    private void OnModelLoadProgressChanged(int percent)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher == null) return;
+        if (dispatcher.CheckAccess()) ModelLoadPercent = percent;
+        else dispatcher.BeginInvoke(new Action(() => ModelLoadPercent = percent));
     }
 
     private void OnModelStateChanged(bool isLoaded, string? modelPath)
@@ -579,6 +635,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     // Load state is app chrome, not conversation content: it is shown
                     // in the header model chip and status bar, never in the transcript.
                     IsModelLoading = true;
+                    ModelLoadPercent = 0;   // clear the previous load's figures
+                    ModelLoadStage = string.Empty;
                     IsModelReady = false;
 
                     // Unload any existing model asynchronously to free VRAM and cancel ongoing generation

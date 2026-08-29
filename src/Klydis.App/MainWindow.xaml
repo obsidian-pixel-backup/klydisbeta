@@ -248,7 +248,8 @@
                               VerticalContentAlignment="Center"
                               VerticalAlignment="Center"/>
                               
-                    <TextBlock Text="loading…" FontSize="12" FontStyle="Italic" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"
+                    <TextBlock Text="{Binding ChatViewModel.ModelLoadStatusText}" FontSize="12" FontStyle="Italic" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"
+                               AutomationProperties.Name="{Binding ChatViewModel.ModelLoadStatusText}"
                                Visibility="{Binding ChatViewModel.IsModelLoading, Converter={StaticResource BoolToVisConverter}}"/>
                     <TextBlock Text="ready" FontSize="12" Foreground="{DynamicResource SuccessBrush}" VerticalAlignment="Center" Margin="8,0,0,0">
                         <TextBlock.Style>

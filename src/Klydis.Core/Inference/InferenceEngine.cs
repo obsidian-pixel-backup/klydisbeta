@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -115,6 +115,27 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// Event fired when a model is loaded or unloaded (isLoaded, modelPath).
     /// </summary>
     public event Action<bool, string?>? ModelStateChanged;
+
+    /// <summary>
+    /// Weight-loading progress, 0-100. Raised on the loading thread, not the UI thread, so
+    /// subscribers must marshal. Only whole-percent changes are reported: llama.cpp invokes its
+    /// callback once per tensor (thousands of times for a multi-GB model), and forwarding every
+    /// one of those would cost more than the load it is reporting on.
+    /// </summary>
+    public event Action<int>? ModelLoadProgressChanged;
+
+    /// <summary>
+    /// Coarse load stage ("Reading metadata", "Loading weights", "Creating context"). Weight
+    /// loading is only about a third of the wait for a multi-GB model; without this the user
+    /// sees an unexplained pause before and after the percentage runs. Raised off the UI thread.
+    /// </summary>
+    public event Action<string>? ModelLoadStageChanged;
+
+    private void RaiseStage(string stage)
+    {
+        try { ModelLoadStageChanged?.Invoke(stage); }
+        catch { /* a broken subscriber must never fail the load */ }
+    }
 
     /// <summary>
     /// Event fired when speculative decoding status changes.
@@ -400,6 +421,38 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
     /// <summary>
     /// Loads a GGUF model asynchronously with the specified hardware offloading plan.
     /// </summary>
+    /// <summary>
+    /// Loads weights through LLamaSharp's async overload so llama.cpp's native progress callback
+    /// is wired up. The synchronous <c>LoadFromFile</c> reports nothing, which left the UI showing
+    /// an indeterminate "loading…" for the 10-30s a multi-GB model takes.
+    /// </summary>
+    private async Task<LLamaWeights> LoadWeightsWithProgressAsync(LLama.Abstractions.IModelParams parameters)
+    {
+        int lastPercent = -1;
+        var reporter = new InlineProgress<float>(fraction =>
+        {
+            int percent = (int)Math.Round(Math.Clamp(fraction, 0f, 1f) * 100f);
+            if (percent == lastPercent) return;
+            lastPercent = percent;
+            try { ModelLoadProgressChanged?.Invoke(percent); }
+            catch { /* a broken subscriber must never fail the load */ }
+        });
+
+        return await LLamaWeights.LoadFromFileAsync(parameters, CancellationToken.None, reporter)
+                                 .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reports on the calling thread. <see cref="Progress{T}"/> posts to a captured context,
+    /// which here would queue thousands of thread-pool items during a single load.
+    /// </summary>
+    private sealed class InlineProgress<T> : IProgress<T>
+    {
+        private readonly Action<T> _handler;
+        public InlineProgress(Action<T> handler) => _handler = handler;
+        public void Report(T value) => _handler(value);
+    }
+
     public Task LoadModelAsync(string modelPath, Klydis.Core.Hardware.OffloadPlan offloadPlan)
     {
         return Task.Run(async () =>
@@ -410,6 +463,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
             try
             {
                 _logger.LogInformation("Loading model from {ModelPath} with {GpuLayers} GPU layers.", modelPath, offloadPlan.GpuLayers);
+                RaiseStage("Reading model metadata");
                 _lastOffloadPlan = offloadPlan;
 
                 await SpeculativeEngine.UnloadAsync();
@@ -546,7 +600,8 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                 {
                     try
                     {
-                        _weights = LLamaWeights.LoadFromFile(parameters);
+                        RaiseStage("Preparing backend");
+                        _weights = await LoadWeightsWithProgressAsync(parameters);
                     }
                     catch (Exception loadEx)
                     {
@@ -633,6 +688,7 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         throw new InvalidOperationException($"Failed to load model weights from '{modelPath}'.");
                     }
 
+                    RaiseStage("Creating context");
                     _context = _weights.CreateContext(parameters);
                     if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
                     {
@@ -655,13 +711,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
 
                         try
                         {
-                            _weights = LLamaWeights.LoadFromFile(parameters);
+                            RaiseStage("Preparing backend");
+                        _weights = await LoadWeightsWithProgressAsync(parameters);
                             if (_weights == null)
                             {
                                 throw new InvalidOperationException($"Retry (no-FA) failed to load model weights from '{modelPath}'.");
                             }
 
-                            _context = _weights.CreateContext(parameters);
+                            RaiseStage("Creating context");
+                    _context = _weights.CreateContext(parameters);
                             if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
                             {
                                 throw new InvalidOperationException($"Retry (no-FA) failed to create context for '{modelPath}'.");
@@ -676,13 +734,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                             parameters.GpuLayerCount = 0;
                             parameters.ContextSize = (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
 
-                            _weights = LLamaWeights.LoadFromFile(parameters);
+                            RaiseStage("Preparing backend");
+                        _weights = await LoadWeightsWithProgressAsync(parameters);
                             if (_weights == null)
                             {
                                 throw new InvalidOperationException($"CPU fallback failed to load model weights from '{modelPath}'.");
                             }
 
-                            _context = _weights.CreateContext(parameters);
+                            RaiseStage("Creating context");
+                    _context = _weights.CreateContext(parameters);
                             if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
                             {
                                 throw new InvalidOperationException($"CPU fallback failed to create context for '{modelPath}': {gpuEx.Message}");
@@ -700,13 +760,15 @@ public sealed class InferenceEngine : IInferenceEngine, IDisposable, IAsyncDispo
                         parameters.GpuLayerCount = 0;
                         parameters.ContextSize = (uint)Math.Max(2048, offloadPlan.RecommendedContextSize);
 
-                        _weights = LLamaWeights.LoadFromFile(parameters);
+                        RaiseStage("Preparing backend");
+                        _weights = await LoadWeightsWithProgressAsync(parameters);
                         if (_weights == null)
                         {
                             throw new InvalidOperationException($"CPU fallback failed to load model weights from '{modelPath}'.");
                         }
 
-                        _context = _weights.CreateContext(parameters);
+                        RaiseStage("Creating context");
+                    _context = _weights.CreateContext(parameters);
                         if (_context == null || _context.NativeHandle == null || _context.NativeHandle.IsInvalid || _context.NativeHandle.IsClosed)
                         {
                             throw new InvalidOperationException($"CPU fallback failed to create context for '{modelPath}': {gpuEx.Message}");
